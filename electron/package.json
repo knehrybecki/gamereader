@@ -1,7 +1,7 @@
 {
   "name": "gamereader",
   "productName": "LiveDub",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "LiveDub — polski lektor na żywo do gier (GTA VI przez PS Remote Play) i filmów w Chrome",
   "main": "main.js",
   "author": "Kamil",
@@ -17,6 +17,7 @@
       "main.js",
       "preload.js",
       "tap-preload.js",
+      "updater.js",
       "renderer/**"
     ],
     "extraResources": [

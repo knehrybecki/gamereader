@@ -44,7 +44,11 @@ chmod +x "$APP/Contents/Resources/GameReaderHelper"
 mkdir -p "$APP/Contents/Resources/engine"
 cp "$ROOT/gamereader_engine.py" "$ROOT/gamereader_worker.py" "$APP/Contents/Resources/engine/"
 
-PY_APP="/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python"
+PY_REL="Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python"
+PY_APP="/opt/homebrew/Cellar/python@3.14/3.14.7/$PY_REL"
+if [ ! -f "$PY_APP" ]; then
+  PY_APP="$(brew --prefix python@3.14)/$PY_REL"
+fi
 ENGINE_APP="$APP/Contents/Helpers/Engine.app"
 ENGINE_BUILD="$ELEC/build/Engine.app"
 rm -rf "$ENGINE_APP" "$ENGINE_BUILD"
@@ -58,6 +62,16 @@ printf 'APPL????' > "$ENGINE_APP/Contents/PkgInfo"
 printf 'APPL????' > "$ENGINE_BUILD/Contents/PkgInfo"
 codesign --force --sign - "$ENGINE_APP/Contents/MacOS/Engine" || true
 codesign --force --sign - "$ENGINE_BUILD" || true
+
+# CI (GitHub Actions): tylko paczka do wydania, bez instalowania w ~/Applications
+if [ "${LIVEDUB_NO_INSTALL:-}" = "1" ]; then
+  xattr -cr "$APP" || true
+  codesign --force --sign - "$APP/Contents/Resources/GameReaderHelper" || true
+  rm -f "$ELEC/dist/LiveDub-mac-arm64.zip"
+  ditto -c -k --keepParent "$APP" "$ELEC/dist/LiveDub-mac-arm64.zip"
+  printf 'ZIP_OK %s\n' "$ELEC/dist/LiveDub-mac-arm64.zip"
+  exit 0
+fi
 
 mkdir -p "$HOME/Applications"
 # stara nazwa (GameReader) też znika, żeby nie było dwóch aplikacji
