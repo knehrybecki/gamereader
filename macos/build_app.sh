@@ -77,6 +77,12 @@ if [ "${LIVEDUB_NO_INSTALL:-}" = "1" ]; then
   exit 0
 fi
 
+# lokalny certyfikat (macos/make_signing_cert.sh) = stały podpis, macOS pamięta zgody
+SIGN_ID="-"
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "LiveDub Local"; then
+  SIGN_ID="LiveDub Local"
+fi
+
 mkdir -p "$HOME/Applications"
 # stara nazwa (GameReader) też znika, żeby nie było dwóch aplikacji
 for old in "$HOME/Applications/LiveDub.app" "$HOME/Applications/GameReader.app" "$HOME/Desktop/GameReader.app" "/Applications/GameReader.app"; do
@@ -88,6 +94,6 @@ done
 cp -R "$APP" "$HOME/Applications/LiveDub.app"
 xattr -cr "$HOME/Applications/LiveDub.app" || true
 codesign --force --sign - "$HOME/Applications/LiveDub.app/Contents/Resources/GameReaderHelper" || true
-codesign --force --deep --sign - "$HOME/Applications/LiveDub.app" || true
+codesign --force --deep --sign "$SIGN_ID" "$HOME/Applications/LiveDub.app" || true
 "$LSREG" -f "$HOME/Applications/LiveDub.app"
 printf 'APP_OK %s\n' "$HOME/Applications/LiveDub.app"

@@ -412,21 +412,37 @@ def repair_polish_ocr(text):
     return normalize_text(fixed)
 
 
+# częste angielskie słowa — przeważają nad polskimi = tekst angielski
+EN_COMMON = EN_HINTS | {
+    "in", "on", "it", "do", "go", "be", "he", "she", "they", "with", "for", "get", "can", "just",
+    "know", "here", "there", "now", "come", "going", "want", "got", "all", "right", "okay", "yeah",
+    "no", "yes", "let's", "gonna", "him", "her", "us", "them", "out", "up", "if", "so", "but",
+}
+# słowa wspólne dla obu języków („to”, „i”, „we”…) nie rozstrzygają
+EN_PL_SHARED = {"to", "i", "a", "o", "we", "no", "na", "do", "on", "go", "ta", "tak"}
+
+
 def looks_polish(text):
     raw = normalize_text(text)
     if not raw:
         return False
     if any(ch in PL_MARK for ch in raw):
         return True
-    tokens = [polish_fold(part) for part in re.findall(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+", raw)]
+    words = re.findall(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż']+", raw.lower())
+    en_hits = sum(1 for word in words if word in EN_COMMON and word not in EN_PL_SHARED)
     hits = 0
-    for token in tokens:
-        if token in _POLISH_BY_FOLD or token in _POLISH_FOLDED:
-            hits += 1
+    pl_only = 0
+    for word in words:
+        if "'" in word:
             continue
-        if any(key.startswith(token) or token.startswith(key) for key in _POLISH_BY_FOLD if len(token) >= 4 and len(key) >= 4):
+        token = polish_fold(word)
+        if token in _POLISH_BY_FOLD or token in _POLISH_FOLDED or any(
+            key.startswith(token) or token.startswith(key) for key in _POLISH_BY_FOLD if len(token) >= 4 and len(key) >= 4
+        ):
             hits += 1
-    return hits >= 1
+            pl_only += word not in EN_PL_SHARED
+    # „to”, „i”, „we” są w obu językach — same nie przeważą nad angielskimi słowami
+    return hits >= 1 and pl_only >= en_hits
 
 
 def should_translate(text):
@@ -434,7 +450,7 @@ def should_translate(text):
     if not raw or looks_polish(raw):
         return False
     tokens = set(re.findall(r"[a-z']+", raw.lower()))
-    return len(tokens & EN_HINTS) >= 1 or (len(tokens) >= 4 and not looks_polish(raw))
+    return len(tokens & (EN_COMMON - EN_PL_SHARED)) >= 1 or (len(tokens) >= 4 and not looks_polish(raw))
 
 
 def usable_ocr(text):
@@ -466,6 +482,9 @@ MAX_SPEECH_SEC = 8.0
 PREROLL_SEC = 0.25
 # po ostatnim napisie przez tyle sekund dźwięk nie jest tłumaczony (napisy = główne dialogi)
 SUBTITLE_PRIORITY_SEC = 30.0
+# polskie napisy + angielski dźwięk: przez tyle sekund od ostatniego polskiego napisu dźwięku
+# nie rozpoznajemy ani nie tłumaczymy — służy tylko do emocji i ściszania gry
+PL_SUBS_HOLD_SEC = 600.0
 PARAKEET_MODEL = "mlx-community/parakeet-tdt-0.6b-v3"
 SPEECH_RMS = 0.0025
 JUNK_HEARD = {
@@ -691,7 +710,9 @@ def lektor_segments(text):
         mood = _sentence_mood(piece)
         # krótkie zdanie („Jedź, jedź!”, „Hej!”) samo brzmi sztucznie — sklej z sąsiednim;
         # wygrywa mocniejszy nastrój (ożywiony > cichy > spokojny)
-        if groups and (groups[-1][1] == mood or len(piece) < 25 or len(groups[-1][0]) < 25):
+        # pierwszy fragment trzymaj krótki — lektor rusza dopiero, gdy jest zsyntezowany
+        first_full = len(groups) == 1 and len(groups[0][0]) >= 25 and len(groups[0][0]) + len(piece) > 60
+        if groups and not first_full and (groups[-1][1] == mood or len(piece) < 25 or len(groups[-1][0]) < 25):
             prev_text, prev_mood = groups[-1]
             rank = {"lively": 2, "soft": 1, "calm": 0}
             mood = max(mood, prev_mood, key=rank.get)
@@ -702,8 +723,8 @@ def lektor_segments(text):
         return [(normalize_text(text), "calm")] if _speakable(text) else []
     # długi początek tnij na przecinku — lektor rusza szybciej, reszta syntezuje się w trakcie
     head, mood = groups[0]
-    if len(head) > 70:
-        cut = head.find(", ", 25)
+    if len(head) > 50:
+        cut = head.find(", ", 18)
         if 0 < cut < len(head) - 20:
             groups[0:1] = [(head[: cut + 1], mood), (head[cut + 2 :], mood)]
     return groups
@@ -1181,6 +1202,20 @@ def helper_has_screen():
     return None
 
 
+def screen_access_ok():
+    """Czy macOS pozwala czytać ekran (silnik i helper). False = brak zgody „Nagrywanie ekranu”.
+
+    Bez tej zgody nie widać tytułów okien ani napisów — silnik po cichu czytałby tylko z dźwięku."""
+    try:
+        from Quartz import CGPreflightScreenCaptureAccess
+
+        if not CGPreflightScreenCaptureAccess():
+            return False
+    except Exception:
+        pass
+    return helper_has_screen() is not False
+
+
 def pick_region_native():
     if helper_available():
         try:
@@ -1440,6 +1475,67 @@ def lektor_pace(text):
     return 1.0
 
 
+class SdPlayback:
+    """Odtwarzanie WAV w procesie silnika (sounddevice) — rusza od razu, bez startu afplay.
+
+    Udaje interfejs Popen (poll/terminate/wait/kill), więc reszta lektora się nie zmienia."""
+
+    def __init__(self, sd, path):
+        with wave.open(str(path), "rb") as handle:
+            sr = handle.getframerate()
+            channels = handle.getnchannels()
+            raw = handle.readframes(handle.getnframes())
+        data = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+        if channels > 1:
+            data = data.reshape(-1, channels).mean(axis=1)
+        self.data = data
+        self.pos = 0
+        self.done = threading.Event()
+        self._stop_cls = sd.CallbackStop
+        self.stream = sd.OutputStream(
+            samplerate=sr, channels=1, dtype="float32", latency="low",
+            callback=self._fill, finished_callback=self.done.set,
+        )
+        self.stream.start()
+
+    def _fill(self, out, frames, _time, _status):
+        chunk = self.data[self.pos : self.pos + frames]
+        n = chunk.size
+        out[:n, 0] = chunk
+        self.pos += n
+        if n < frames:
+            out[n:] = 0
+            raise self._stop_cls
+
+    def poll(self):
+        if self.done.is_set():
+            self._close()
+            return 0
+        return None
+
+    def terminate(self):
+        try:
+            self.stream.abort()
+        except Exception:
+            pass
+        self.done.set()
+        self._close()
+
+    kill = terminate
+
+    def wait(self, timeout=None):
+        self.done.wait(timeout)
+        return 0
+
+    def _close(self):
+        stream, self.stream = self.stream, None
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+
 class MaleLektor:
     """Lektor filmowy: Supertonic 3 na GPU (CoreML), równy głos, zmasterowany przez ffmpeg."""
 
@@ -1452,6 +1548,13 @@ class MaleLektor:
         self.voice = DEFAULT_SUPERTONIC_VOICE
         self.tts_scale = 1.0
         self.ffmpeg = which_bin("ffmpeg")
+        # sounddevice = start bez opóźnienia; afplay zostaje jako zapas
+        try:
+            import sounddevice
+
+            self._sd = sounddevice
+        except Exception:
+            self._sd = None
 
     @property
     def backend(self):
@@ -1592,6 +1695,12 @@ class MaleLektor:
 
     def play(self, path):
         with self.lock:
+            if self._sd is not None:
+                try:
+                    self.player = SdPlayback(self._sd, path)
+                    return
+                except Exception:
+                    self._sd = None  # urządzenie nie wstało — dalej przez afplay
             self.player = subprocess.Popen(
                 ["afplay", str(path)],
                 stdout=subprocess.DEVNULL,
@@ -1602,6 +1711,8 @@ class MaleLektor:
 class ArgosTranslator:
     def __init__(self):
         self._fn = None
+        self._cache = {}
+        self._lock = threading.Lock()
 
     def ensure(self):
         if self._fn is not None:
@@ -1628,8 +1739,17 @@ class ArgosTranslator:
         self._fn = pair.translate
 
     def translate(self, text):
-        self.ensure()
-        return normalize_text(self._fn(text))
+        # napisy i dialogi się powtarzają — drugi raz bez czekania na tłumacza
+        hit = self._cache.get(text)
+        if hit is not None:
+            return hit
+        with self._lock:
+            self.ensure()
+            out = normalize_text(self._fn(text))
+        if len(self._cache) > 256:
+            self._cache.clear()
+        self._cache[text] = out
+        return out
 
 
 class ParakeetSTT:
@@ -2285,6 +2405,9 @@ class AppleVisionOcr:
                     break
                 if score >= 22:
                     break
+                # angielski napis nie ma ąęćłńóśźż do zgubienia — kolejne przebiegi nic nie dadzą
+                if score >= 12 and not looks_polish(best):
+                    break
         if best_raw and (not usable_ocr(best) or len(best) + 8 < len(re.sub(r"\s+", "", best_raw))):
             best = repair_polish_ocr(best_raw) or normalize_text(best_raw)
         if self.skip_yellow_speaker:
@@ -2361,11 +2484,22 @@ class Engine:
         # kiedy ostatnio gra pokazała napis — wtedy dialogi bierzemy tylko z napisów
         self._last_subtitle_seen = 0.0
         self._heard_arousal = {}
+        self._pl_subs_at = None
+        # kwestie przygotowane zawczasu: src → (tekst, fragmenty, przejęcie, wav)
+        self._ready = {}
+        self._ready_lock = threading.Lock()
+        # synteza „na zapas” od pierwszego odczytu napisu, zanim OCR go potwierdzi
+        self._spec_item = None
+        self._spec_event = threading.Event()
+        self._spec_busy = None
+        self._spec_done = threading.Condition()
+        self._seen_at = {}
         self.line_q = queue.Queue()
         self.transcriber = None
         self.devices = [PS_REMOTE] + [name for _i, name in list_input_devices()]
         self.apply_game(self.game, persist=False, announce=False, reset_lock=False)
         threading.Thread(target=self._tts_loop, daemon=True).start()
+        threading.Thread(target=self._spec_loop, daemon=True).start()
         threading.Thread(target=self._warmup_voice, daemon=True).start()
         threading.Thread(target=self._watch_remote_play, daemon=True).start()
 
@@ -2567,6 +2701,8 @@ class Engine:
         self.emit({"event": "state", **self.snapshot()})
 
     def apply_game(self, game, persist=True, announce=True, reset_lock=True):
+        # inna gra = może mieć inne napisy; polskie wykryjemy od nowa
+        self._pl_subs_at = None
         self.game = normalize_game(game)
         profile = GAME_PROFILES[self.game]
         if self.auto_interval:
@@ -2690,6 +2826,24 @@ class Engine:
         self._tts_interrupt.clear()
         self._flush_line_q()
         self.emit({"event": "running", "on": True})
+        # bez zgody na nagrywanie ekranu napisy nie działają (np. po aktualizacji aplikacji
+        # macOS traktuje ją jak nową i zgodę trzeba dać jeszcze raz) — powiedz to wprost
+        if self.mode != "audio" and not screen_access_ok():
+            self.running = False
+            self.emit({"event": "running", "on": False})
+            self.emit(
+                {
+                    "event": "status",
+                    "text": "Brak zgody na nagrywanie ekranu — nie widzę napisów. Ustawienia → Prywatność → "
+                    "Nagrywanie ekranu: włącz LiveDub (usuń stary wpis i dodaj ponownie), potem uruchom LiveDub od nowa.",
+                }
+            )
+            # autostart nie ponawia co 2 s, a Ustawienia otwieramy raz na uruchomienie
+            self._user_stopped = True
+            if not getattr(self, "_screen_warned", False):
+                self._screen_warned = True
+                open_screen_settings()
+            return
         if self.mode == "audio":
             self.emit({"event": "status", "text": f"Podpinam dźwięk: {self._source_label()}…"})
             target = self._audio_loop
@@ -2923,26 +3077,35 @@ class Engine:
             if same_utterance(src, self.speaking_text) or self._recently_spoken(src):
                 continue
             try:
-                text = self.translator.translate(src) if translate else src
-                text = strip_fillers(text)
-                segments = self.lektor.plan(text) if text else []
-                if not segments:
-                    continue
-                # dźwięk: cała wypowiedź postaci; napisy: ostatnie ~1,6 s tego, co postać mówi
-                arousal = self._heard_arousal.pop(text_key(src), None) if translate else None
-                if arousal is None:
-                    arousal = self.prosody.recent()
-                arousal = float(arousal or 0.0)
-                # pierwsze zdanie od razu — reszta syntezuje się, gdy lektor już mówi
-                path = self.lektor.prepare(
-                    segments[0][0], volume=self.lektor_volume / 100.0, mood=segments[0][1], arousal=arousal
-                )
+                # przygotowana w tle, gdy lektor kończył poprzednią kwestię — start bez czekania
+                t0 = time.monotonic()
+                # ta kwestia właśnie syntezuje się na zapas — poczekaj, zamiast robić ją drugi raz
+                with self._spec_done:
+                    self._spec_done.wait_for(lambda: self._spec_busy != src, timeout=4.0)
+                with self._ready_lock:
+                    ready = self._ready.pop(src, None)
+                if ready:
+                    text, segments, arousal, path = ready
+                else:
+                    text, segments, arousal = self._plan_line(src, translate)
+                    if not segments:
+                        continue
+                    # pierwsze zdanie od razu — reszta syntezuje się, gdy lektor już mówi
+                    path = self.lektor.prepare(
+                        segments[0][0], volume=self.lektor_volume / 100.0, mood=segments[0][1], arousal=arousal
+                    )
                 with self.pending_lock:
                     newer = self.pending
                 # przy no_barge_in dokończ obecną syntezę; nowszy zostanie na kolejkę
                 if newer and not same_utterance(newer[0], src) and not self.no_barge_in:
                     continue
                 self._tts_interrupt.clear()
+                seen = self._seen_at.pop(src, None)
+                self._timing(
+                    f"{'GOTOWE' if ready else 'synteza'} {time.monotonic() - t0:.2f}s"
+                    + (f", od napisu {time.monotonic() - seen:.2f}s" if seen else "")
+                    + f" | {text[:70]!r}"
+                )
                 self.speaking_text = src
                 if not translate:
                     self.speaking_full = full
@@ -2957,6 +3120,9 @@ class Engine:
                     if idx + 1 < len(segments):
                         seg, mood = segments[idx + 1]
                         nxt = self.lektor.prepare(seg, volume=self.lektor_volume / 100.0, mood=mood, arousal=arousal)
+                    else:
+                        # ostatni fragment gra — w tym czasie przygotuj kolejną kwestię z kolejki
+                        self._prefetch_pending(src)
                     if self._wait_segment(src) or gen != self._speech_gen:
                         break
                     path = nxt
@@ -2971,6 +3137,89 @@ class Engine:
                 self.speaking_full = ""
                 self._tts_interrupt.clear()
                 self._duck_release()
+
+    def _plan_line(self, src, translate):
+        """Tłumaczenie, podział na zdania i emocja kwestii: (tekst, fragmenty, przejęcie)."""
+        text = self.translator.translate(src) if translate else src
+        text = strip_fillers(text)
+        segments = self.lektor.plan(text) if text else []
+        # dźwięk: cała wypowiedź postaci; napisy: ostatnie ~1,6 s tego, co postać mówi
+        arousal = self._heard_arousal.pop(text_key(src), None) if translate else None
+        if arousal is None:
+            arousal = self.prosody.recent()
+        return text, segments, float(arousal or 0.0)
+
+    def _prefetch_pending(self, current):
+        """Gdy lektor czyta ostatni fragment: przetłumacz i zsyntezuj początek następnej kwestii."""
+        if not self.no_barge_in:
+            return  # bez kolejki nowa kwestia i tak przerywa bieżącą
+        with self.pending_lock:
+            item = self.pending
+        if not item:
+            return
+        src, translate, _full = item
+        if same_utterance(src, current) or self._recently_spoken(src):
+            return
+        with self._ready_lock:
+            if src in self._ready:
+                return
+        try:
+            text, segments, arousal = self._plan_line(src, translate)
+            if not segments:
+                return
+            path = self.lektor.prepare(
+                segments[0][0], volume=self.lektor_volume / 100.0, mood=segments[0][1], arousal=arousal
+            )
+            self._store_ready(src, (text, segments, arousal, path))
+        except Exception:
+            pass
+
+    def _store_ready(self, src, item):
+        with self._ready_lock:
+            if len(self._ready) > 8:
+                self._ready.clear()
+            self._ready[src] = item
+
+    def _speculate(self, src, translate):
+        """Zacznij tłumaczyć i syntezować napis od pierwszego odczytu (najnowszy wygrywa)."""
+        self._spec_item = (src, translate)
+        self._spec_event.set()
+
+    def _spec_loop(self):
+        while True:
+            self._spec_event.wait()
+            self._spec_event.clear()
+            item, self._spec_item = self._spec_item, None
+            if not item or self.lektor.model is None:
+                continue
+            src, translate = item
+            with self._ready_lock:
+                if src in self._ready:
+                    continue
+            if same_utterance(src, self.speaking_text) or self._recently_spoken(src):
+                continue
+            self._spec_busy = src
+            try:
+                text, segments, arousal = self._plan_line(src, translate)
+                if segments and self._spec_item is None:  # nowszy odczyt = ten już nieaktualny
+                    path = self.lektor.prepare(
+                        segments[0][0], volume=self.lektor_volume / 100.0, mood=segments[0][1], arousal=arousal
+                    )
+                    self._store_ready(src, (text, segments, arousal, path))
+            except Exception:
+                pass
+            finally:
+                with self._spec_done:
+                    self._spec_busy = None
+                    self._spec_done.notify_all()
+
+    def _timing(self, line):
+        """Czasy lektora do /tmp/livedub-engine.log — do szukania opóźnień."""
+        try:
+            with open("/tmp/livedub-engine.log", "a", encoding="utf-8") as handle:
+                handle.write(f"{time.strftime('%H:%M:%S')} {line}\n")
+        except OSError:
+            pass
 
     def _wait_segment(self, src):
         """Czeka na koniec fragmentu; True = przerwano (Stop albo nowa kwestia przy barge-in)."""
@@ -2991,6 +3240,8 @@ class Engine:
         arousal = self.prosody.analyze(audio) if audio is not None else None
         # gra ma napisy: dialogi czytamy z napisów, a dźwięk bez napisu to gadanie w tle
         if self.mode != "audio" and time.monotonic() - self._last_subtitle_seen < SUBTITLE_PRIORITY_SEC:
+            return
+        if self._pl_subs_active:
             return
         # ciche mruczenie pod nosem i tłum w tle — pomijamy
         if quiet:
@@ -3019,6 +3270,12 @@ class Engine:
         self._tts_interrupt.set()
         self.lektor.stop()
         self._tts_interrupt.clear()
+
+    @property
+    def _pl_subs_active(self):
+        """Gra ma polskie napisy — lektor czyta tylko je, angielskiej mowy nie tłumaczy."""
+        at = self._pl_subs_at
+        return self.mode != "audio" and at is not None and time.monotonic() - at < PL_SUBS_HOLD_SEC
 
     def _on_subtitle(self, src):
         if not usable_ocr(src):
@@ -3053,6 +3310,14 @@ class Engine:
         else:
             self._ocr_candidate = src
             self._ocr_candidate_n = 1
+            key = strip_fillers(src)
+            if key:
+                if len(self._seen_at) > 32:
+                    self._seen_at.clear()
+                self._seen_at.setdefault(key, now)
+                # zanim OCR potwierdzi napis, lektor już go tłumaczy i syntezuje
+                if need > 1 and len(key) >= 6:
+                    self._speculate(key, should_translate(src))
         if self._ocr_candidate_n < need:
             return
         src = self._ocr_candidate
@@ -3062,7 +3327,14 @@ class Engine:
         self.last_key = text_key(src)
         self.subtitle_until = now + 2.5
         # napisy po angielsku (gra albo Netflix bez PL) — tłumacz automatycznie
-        self._offer_line(src, should_translate(src))
+        translate = should_translate(src)
+        if not translate:
+            if not self._pl_subs_active:
+                self.emit(
+                    {"event": "status", "text": "Polskie napisy — czytam je, angielski dźwięk tylko do emocji i ściszania."}
+                )
+            self._pl_subs_at = now
+        self._offer_line(src, translate)
 
     def _ocr_only_loop(self):
         if self.duck:
@@ -3183,6 +3455,12 @@ class Engine:
                     continue
                 audio = state.feed(chunk)
                 if audio is not None:
+                    if self._pl_subs_active:
+                        # polskie napisy: angielskiej mowy nie rozpoznajemy (GPU zostaje dla lektora),
+                        # tylko uczymy miernik emocji, jak mówią postacie w tej grze
+                        if not self.prosody.is_quiet(audio):
+                            self.prosody.analyze(audio)
+                        continue
                     live.submit(audio)
         except PermissionError as exc:
             self.emit({"event": "perm", "text": str(exc)})
