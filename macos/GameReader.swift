@@ -189,6 +189,8 @@ func cgNumber(_ value: Any?) -> CGFloat {
 func isRemotePlay(_ app: SCRunningApplication) -> Bool {
     let bundle = app.bundleIdentifier.lowercased()
     let name = app.applicationName.lowercased()
+    // systemowe usługi Apple (np. ThemeWidgetControlViewService (PS Remote Play)) to nie gra
+    if bundle.hasPrefix("com.apple.") { return false }
     return bundle.contains("playstation")
         || bundle.contains("remoteplay")
         || name.contains("remote play")
@@ -197,12 +199,26 @@ func isRemotePlay(_ app: SCRunningApplication) -> Bool {
         || name == "remoteplay"
 }
 
+// Chrome gra dźwięk z procesów pomocniczych (com.google.Chrome.helper…) — bierzemy całą rodzinę
+func isChrome(_ app: SCRunningApplication) -> Bool {
+    let bundle = app.bundleIdentifier.lowercased()
+    return bundle.hasPrefix("com.google.chrome") || bundle.hasPrefix("org.chromium.chromium")
+}
+
+func tapTarget() -> String {
+    let args = CommandLine.arguments
+    if let i = args.firstIndex(of: "--tap-target"), args.count > i + 1 { return args[i + 1] }
+    return "ps"
+}
+
 func isSelfApp(_ app: SCRunningApplication) -> Bool {
     let bundle = app.bundleIdentifier.lowercased()
     let name = app.applicationName.lowercased()
     return bundle.contains("gamereader")
         || bundle.contains("python")
         || name.contains("gamereader")
+        || bundle.contains("livedub")
+        || name.contains("livedub")
         || name.contains("python")
 }
 
@@ -211,7 +227,12 @@ func runTap() async {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         guard let display = content.displays.first else { throw TapError.noDisplay }
 
-        let remote = content.applications.filter(isRemotePlay)
+        // właściwa aplikacja na początek (komunikat LISTENING ma ją pokazać)
+        let chrome = tapTarget() == "chrome"
+        let remote = content.applications.filter(chrome ? isChrome : isRemotePlay).sorted { lhs, _ in
+            let bundle = lhs.bundleIdentifier.lowercased()
+            return bundle.contains("playstation") || bundle == "com.google.chrome"
+        }
         let filter: SCContentFilter
         if let app = remote.first {
             FileHandle.standardError.write(Data("LISTENING \(app.applicationName) \(app.bundleIdentifier)\n".utf8))
@@ -475,6 +496,12 @@ enum GameReader {
     static var retainedPicker: RegionPickController?
 
     static func main() {
+        if CommandLine.arguments.contains("--duck") {
+            let args = CommandLine.arguments
+            let target = args.firstIndex(of: "--duck-target").flatMap { args.count > $0 + 1 ? args[$0 + 1] : nil } ?? "ps"
+            runDucker(target: target)
+            return
+        }
         if CommandLine.arguments.contains("--tap") {
             let app = NSApplication.shared
             app.setActivationPolicy(.accessory)

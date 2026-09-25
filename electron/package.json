@@ -1,8 +1,8 @@
 {
   "name": "gamereader",
-  "productName": "GameReader",
+  "productName": "LiveDub",
   "version": "1.2.0",
-  "description": "Lektor napisów i dźwięku z PS Remote Play",
+  "description": "LiveDub — polski lektor na żywo do gier (GTA VI przez PS Remote Play) i filmów w Chrome",
   "main": "main.js",
   "author": "Kamil",
   "license": "UNLICENSED",
@@ -12,7 +12,7 @@
   },
   "build": {
     "appId": "pl.kamil.gamereader.mac",
-    "productName": "GameReader",
+    "productName": "LiveDub",
     "files": [
       "main.js",
       "preload.js",
@@ -38,13 +38,13 @@
       "gatekeeperAssess": false,
       "category": "public.app-category.utilities",
       "extendInfo": {
-        "CFBundleDisplayName": "GameReader",
-        "CFBundleName": "GameReader",
-        "LSMinimumSystemVersion": "14.0",
+        "CFBundleDisplayName": "LiveDub",
+        "CFBundleName": "LiveDub",
+        "LSMinimumSystemVersion": "14.2",
         "NSHighResolutionCapable": true,
-        "NSScreenCaptureUsageDescription": "GameReader musi widzieć fragment ekranu z napisami, żeby je odczytać i przeczytać na głos.",
-        "NSMicrophoneUsageDescription": "GameReader może użyć mikrofonu tylko jako zapasu. Docelowo słucha dźwięku PS Remote Play.",
-        "NSAudioCaptureUsageDescription": "GameReader nasłuchuje dźwięku z PS Remote Play, żeby tłumaczyć dialogi na żywo i czytać je lektorem."
+        "NSScreenCaptureUsageDescription": "LiveDub musi widzieć fragment ekranu z napisami, żeby je odczytać i przeczytać na głos.",
+        "NSMicrophoneUsageDescription": "LiveDub może użyć mikrofonu tylko jako zapasu. Docelowo słucha dźwięku gry.",
+        "NSAudioCaptureUsageDescription": "LiveDub nasłuchuje dźwięku gry (PS Remote Play) albo Chrome, żeby tłumaczyć dialogi na żywo i czytać je lektorem."
       }
     },
     "directories": {

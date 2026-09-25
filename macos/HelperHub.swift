@@ -208,7 +208,7 @@ final class HelperHub {
                 writeLine(fd, "ERR NO_REMOTE_PLAY")
             }
         case "TAP":
-            tap(fd)
+            tap(fd, target: parts.count >= 2 ? parts[1] : "ps")
         default:
             writeLine(fd, "ERR unknown")
         }
@@ -253,7 +253,7 @@ final class HelperHub {
         }
     }
 
-    private func tap(_ fd: Int32) {
+    private func tap(_ fd: Int32, target: String) {
         guard let exe = Bundle.main.executableURL else {
             writeLine(fd, "ERR noexe")
             return
@@ -261,7 +261,7 @@ final class HelperHub {
         stopTap()
         let proc = Process()
         proc.executableURL = exe
-        proc.arguments = ["--tap"]
+        proc.arguments = ["--tap", "--tap-target", target == "chrome" ? "chrome" : "ps"]
         let out = Pipe()
         let err = Pipe()
         proc.standardOutput = out

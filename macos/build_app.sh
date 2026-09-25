@@ -11,9 +11,9 @@ LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServic
 mkdir -p "$ROOT/electron/build" "$ICONSET"
 
 SDK="$(xcrun --sdk macosx --show-sdk-path)"
-swiftc -parse-as-library -O -target arm64-apple-macosx14.0 -sdk "$SDK" \
-  -o "$HELPER" "$ROOT/macos/GameReader.swift" "$ROOT/macos/HelperHub.swift" \
-  -framework AppKit -framework ScreenCaptureKit -framework CoreMedia -framework Foundation -framework CoreAudio -framework ImageIO -framework CoreGraphics
+swiftc -parse-as-library -O -target arm64-apple-macosx14.2 -sdk "$SDK" \
+  -o "$HELPER" "$ROOT/macos/GameReader.swift" "$ROOT/macos/HelperHub.swift" "$ROOT/macos/Ducker.swift" \
+  -framework AppKit -framework ScreenCaptureKit -framework CoreMedia -framework Foundation -framework CoreAudio -framework AudioToolbox -framework ImageIO -framework CoreGraphics
 
 if [ -f "$ICON_SRC" ]; then
   sips -z 16 16 "$ICON_SRC" --out "$ICONSET/icon_16x16.png" >/dev/null
@@ -35,9 +35,9 @@ if [ ! -d node_modules ]; then
 fi
 npx electron-builder --mac dir --arm64 --config.mac.icon="$ELEC/build/icon.icns"
 
-APP="$ELEC/dist/mac-arm64/GameReader.app"
+APP="$ELEC/dist/mac-arm64/LiveDub.app"
 if [ ! -d "$APP" ]; then
-  APP="$ELEC/dist/mac/GameReader.app"
+  APP="$ELEC/dist/mac/LiveDub.app"
 fi
 cp "$HELPER" "$APP/Contents/Resources/GameReaderHelper"
 chmod +x "$APP/Contents/Resources/GameReaderHelper"
@@ -60,14 +60,15 @@ codesign --force --sign - "$ENGINE_APP/Contents/MacOS/Engine" || true
 codesign --force --sign - "$ENGINE_BUILD" || true
 
 mkdir -p "$HOME/Applications"
-for old in "$HOME/Applications/GameReader.app" "$HOME/Desktop/GameReader.app" "/Applications/GameReader.app"; do
+# stara nazwa (GameReader) też znika, żeby nie było dwóch aplikacji
+for old in "$HOME/Applications/LiveDub.app" "$HOME/Applications/GameReader.app" "$HOME/Desktop/GameReader.app" "/Applications/GameReader.app"; do
   if [ -e "$old" ]; then
     "$LSREG" -u "$old" >/dev/null 2>&1 || true
     rm -rf "$old"
   fi
 done
-cp -R "$APP" "$HOME/Applications/GameReader.app"
-xattr -cr "$HOME/Applications/GameReader.app" || true
-codesign --force --sign - "$HOME/Applications/GameReader.app/Contents/Resources/GameReaderHelper" || true
-"$LSREG" -f "$HOME/Applications/GameReader.app"
-printf 'APP_OK %s\n' "$HOME/Applications/GameReader.app"
+cp -R "$APP" "$HOME/Applications/LiveDub.app"
+xattr -cr "$HOME/Applications/LiveDub.app" || true
+codesign --force --sign - "$HOME/Applications/LiveDub.app/Contents/Resources/GameReaderHelper" || true
+"$LSREG" -f "$HOME/Applications/LiveDub.app"
+printf 'APP_OK %s\n' "$HOME/Applications/LiveDub.app"

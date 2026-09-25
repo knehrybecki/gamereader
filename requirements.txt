@@ -1,0 +1,20 @@
+# GameReader — silnik Pythona (macOS, Apple Silicon). Wagi modeli pobierają się przy pierwszym uruchomieniu.
+numpy>=2.0
+pillow>=11.0
+mss>=10.0
+sounddevice>=0.5
+ocrmac>=1.0
+pyobjc-core>=12.0
+pyobjc-framework-Cocoa>=12.0
+pyobjc-framework-Quartz>=12.0
+pyobjc-framework-Vision>=12.0
+
+# lektor: Supertonic 3 (kod MIT, model OpenRAIL-M) na GPU przez CoreML
+supertonic>=1.3
+onnxruntime>=1.22
+
+# mowa → tekst (Parakeet v3, CC-BY-4.0) i tłumaczenie EN→PL (Argos, MIT)
+mlx>=0.25
+parakeet-mlx>=0.5
+argostranslate>=1.9
+
