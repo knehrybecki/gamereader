@@ -1475,67 +1475,6 @@ def lektor_pace(text):
     return 1.0
 
 
-class SdPlayback:
-    """Odtwarzanie WAV w procesie silnika (sounddevice) — rusza od razu, bez startu afplay.
-
-    Udaje interfejs Popen (poll/terminate/wait/kill), więc reszta lektora się nie zmienia."""
-
-    def __init__(self, sd, path):
-        with wave.open(str(path), "rb") as handle:
-            sr = handle.getframerate()
-            channels = handle.getnchannels()
-            raw = handle.readframes(handle.getnframes())
-        data = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
-        if channels > 1:
-            data = data.reshape(-1, channels).mean(axis=1)
-        self.data = data
-        self.pos = 0
-        self.done = threading.Event()
-        self._stop_cls = sd.CallbackStop
-        self.stream = sd.OutputStream(
-            samplerate=sr, channels=1, dtype="float32", latency="low",
-            callback=self._fill, finished_callback=self.done.set,
-        )
-        self.stream.start()
-
-    def _fill(self, out, frames, _time, _status):
-        chunk = self.data[self.pos : self.pos + frames]
-        n = chunk.size
-        out[:n, 0] = chunk
-        self.pos += n
-        if n < frames:
-            out[n:] = 0
-            raise self._stop_cls
-
-    def poll(self):
-        if self.done.is_set():
-            self._close()
-            return 0
-        return None
-
-    def terminate(self):
-        try:
-            self.stream.abort()
-        except Exception:
-            pass
-        self.done.set()
-        self._close()
-
-    kill = terminate
-
-    def wait(self, timeout=None):
-        self.done.wait(timeout)
-        return 0
-
-    def _close(self):
-        stream, self.stream = self.stream, None
-        if stream is not None:
-            try:
-                stream.close()
-            except Exception:
-                pass
-
-
 class MaleLektor:
     """Lektor filmowy: Supertonic 3 na GPU (CoreML), równy głos, zmasterowany przez ffmpeg."""
 
@@ -1548,13 +1487,6 @@ class MaleLektor:
         self.voice = DEFAULT_SUPERTONIC_VOICE
         self.tts_scale = 1.0
         self.ffmpeg = which_bin("ffmpeg")
-        # sounddevice = start bez opóźnienia; afplay zostaje jako zapas
-        try:
-            import sounddevice
-
-            self._sd = sounddevice
-        except Exception:
-            self._sd = None
 
     @property
     def backend(self):
@@ -1694,13 +1626,8 @@ class MaleLektor:
                     pass
 
     def play(self, path):
+        # afplay w osobnym procesie: OCR i synteza w silniku nie przerywają dźwięku (bez trzasków)
         with self.lock:
-            if self._sd is not None:
-                try:
-                    self.player = SdPlayback(self._sd, path)
-                    return
-                except Exception:
-                    self._sd = None  # urządzenie nie wstało — dalej przez afplay
             self.player = subprocess.Popen(
                 ["afplay", str(path)],
                 stdout=subprocess.DEVNULL,
