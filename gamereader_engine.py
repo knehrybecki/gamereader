@@ -676,8 +676,35 @@ _SOFT_WORDS = (
 )
 # 5 kroków dyfuzji: ~30% szybciej niż domyślne 8, wymowa bez zmian
 SUPERTONIC_STEPS = 5
-# nastrój z tekstu przesuwa „przejęcie” (z głosu postaci): -1 szept … +1 krzyk
-LEKTOR_MOOD_BIAS = {"calm": 0.0, "lively": 0.35, "soft": -0.4}
+# tempo lektora (parametr speed Supertonic przy zwykłej kwestii; było 1,05)
+LEKTOR_SPEED = 1.15
+# gdy w kolejce czeka już następna kwestia: szybciej i bez pauz, żeby nic nie przepadło
+LEKTOR_HURRY = 1.12
+LEKTOR_MAX_SPEED = 1.45
+# nastrój z napisu (słowa i interpunkcja): tylko głośność i pauza — bez domieszki innego głosu
+# i bez zmiany tempa, więc barwa lektora się nie zmienia
+LEKTOR_MOOD_GAIN = {"calm": 1.0, "lively": 1.1, "soft": 0.9}
+
+
+def lektor_punctuation(text, mood="calm"):
+    """Interpunkcja napisu → (mnożnik głośności, pauza po fragmencie w s).
+
+    „!” głośniej, „!!”/„?!” jeszcze głośniej, „…” ciszej i z dłuższą pauzą, „?” krótki oddech po pytaniu.
+    Tekst dla lektora zostaje bez zmian — intonację pytania robi sam Supertonic."""
+    t = normalize_text(text)
+    gain = LEKTOR_MOOD_GAIN.get(mood, 1.0)
+    if re.search(r"[!?]{2,}", t):
+        gain = max(gain, 1.22)
+    elif "!" in t:
+        gain = max(gain, 1.14)
+    end = t.rstrip("\"'”»)] ")
+    pause = 0.0
+    if end.endswith(("…", "...")):
+        gain = min(gain, 0.9)
+        pause = 0.2
+    elif end.endswith("?"):
+        pause = 0.1
+    return gain, pause
 
 
 def lektor_voice_params(arousal):
@@ -711,7 +738,7 @@ def lektor_segments(text):
         # krótkie zdanie („Jedź, jedź!”, „Hej!”) samo brzmi sztucznie — sklej z sąsiednim;
         # wygrywa mocniejszy nastrój (ożywiony > cichy > spokojny)
         # pierwszy fragment trzymaj krótki — lektor rusza dopiero, gdy jest zsyntezowany
-        first_full = len(groups) == 1 and len(groups[0][0]) >= 25 and len(groups[0][0]) + len(piece) > 60
+        first_full = len(groups) == 1 and len(groups[0][0]) >= 25 and len(groups[0][0]) + len(piece) > 90
         if groups and not first_full and (groups[-1][1] == mood or len(piece) < 25 or len(groups[-1][0]) < 25):
             prev_text, prev_mood = groups[-1]
             rank = {"lively": 2, "soft": 1, "calm": 0}
@@ -723,8 +750,9 @@ def lektor_segments(text):
         return [(normalize_text(text), "calm")] if _speakable(text) else []
     # długi początek tnij na przecinku — lektor rusza szybciej, reszta syntezuje się w trakcie
     head, mood = groups[0]
-    if len(head) > 50:
-        cut = head.find(", ", 18)
+    # (tylko bardzo długi: każdy podział to słyszalna przerwa między plikami audio)
+    if len(head) > 110:
+        cut = head.find(", ", 40)
         if 0 < cut < len(head) - 20:
             groups[0:1] = [(head[: cut + 1], mood), (head[cut + 2 :], mood)]
     return groups
@@ -1549,31 +1577,39 @@ class MaleLektor:
         style.dp = (1 - blend) * calm.dp + blend * other.dp
         return style
 
-    def prepare(self, text, volume=1.0, mood="calm", arousal=0.0):
+    def prepare(self, text, volume=1.0, mood="calm", arousal=0.0, hurry=False):
         """Zwraca ścieżkę gotowego WAV (z cache, jeśli ta sama kwestia już była).
 
         arousal: jak mówi postać (-1 szept … +1 krzyk), mood: wskazówka z tekstu."""
         self.ensure()
-        a = max(-1.0, min(1.0, float(arousal or 0.0) + LEKTOR_MOOD_BIAS.get(mood, 0.0)))
+        a = max(-1.0, min(1.0, float(arousal or 0.0)))
         a = round(a * 5) / 5  # stopnie co 0,2 — cache się powtarza
         params = lektor_voice_params(a)
         pace = lektor_pace(text) * float(self.tts_scale or 1.0) / params["speed"]
-        # suwak Głośność = głośność lektora; przejęcie ją moduluje
+        # interpunkcja napisu: „!” głośniej, „…” ciszej, pauza po „?” i „…”
+        punct_gain, punct_pause = lektor_punctuation(text, mood)
+        pause = max(params["pause"], punct_pause)
+        if text.rstrip().endswith(","):
+            pause = 0.0  # fragment ucięty na przecinku — reszta zdania leci od razu
+        if hurry:
+            pace /= LEKTOR_HURRY
+            pause = min(pause, 0.03)
+        # suwak Głośność = głośność lektora; przejęcie i interpunkcja ją modulują
         # volume 0…1 (suwak 0–100 %); 100 % = 1,3× — limiter i tak nie przepuści przesteru
-        gain = 1.3 * max(0.0, min(1.0, float(volume))) * params["gain"]
-        key = f"st4|{self.voice}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{bool(self.ffmpeg)}"
+        gain = 1.3 * max(0.0, min(1.0, float(volume))) * params["gain"] * punct_gain
+        key = f"st6|{self.voice}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
         path = CACHE_DIR / f"{text_key(key)}.wav"
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         if path.exists() and path.stat().st_size >= 64:
             return path
         raw = Path(str(path) + ".raw.wav")
-        self._synth(text, raw, pace, self._style(params["blend"]), params["pause"])
+        self._synth(text, raw, pace, self._style(params["blend"]), pause)
         self._master(raw, path, gain)
         return path
 
     def _synth(self, text, path, pace, style, pause):
         # pace < 1 = szybciej
-        speed = max(0.85, min(1.45, 1.05 / max(0.5, pace)))
+        speed = max(0.9, min(LEKTOR_MAX_SPEED, LEKTOR_SPEED / max(0.5, pace)))
         with self.synth_lock:
             wav, _dur = self.model.synthesize(
                 polish_pronounce(text), voice_style=style, total_steps=SUPERTONIC_STEPS, speed=speed, lang="pl"
@@ -1584,7 +1620,8 @@ class MaleLektor:
         # próg niski i zapas na końcu: ciche „dź”, „ś”, „ć” nie mogą zostać ucięte
         loud = np.flatnonzero(np.abs(audio) > 0.004)
         if loud.size:
-            audio = audio[max(0, loud[0] - int(sr * 0.04)) : loud[-1] + int(sr * 0.15)]
+            # zapas na końcu 0,1 s: ciche głoski zostają, a przerwa między fragmentami jest krótsza
+            audio = audio[max(0, loud[0] - int(sr * 0.03)) : loud[-1] + int(sr * 0.1)]
         # wyrównaj poziom (RMS części z głosem), bez przekraczania szczytu
         voiced = audio[np.abs(audio) > 0.01]
         if voiced.size:
@@ -3019,7 +3056,8 @@ class Engine:
                         continue
                     # pierwsze zdanie od razu — reszta syntezuje się, gdy lektor już mówi
                     path = self.lektor.prepare(
-                        segments[0][0], volume=self.lektor_volume / 100.0, mood=segments[0][1], arousal=arousal
+                        segments[0][0], volume=self.lektor_volume / 100.0, mood=segments[0][1], arousal=arousal,
+                        hurry=self._queue_waiting(src),
                     )
                 with self.pending_lock:
                     newer = self.pending
@@ -3046,7 +3084,10 @@ class Engine:
                     nxt = None
                     if idx + 1 < len(segments):
                         seg, mood = segments[idx + 1]
-                        nxt = self.lektor.prepare(seg, volume=self.lektor_volume / 100.0, mood=mood, arousal=arousal)
+                        nxt = self.lektor.prepare(
+                            seg, volume=self.lektor_volume / 100.0, mood=mood, arousal=arousal,
+                            hurry=self._queue_waiting(src),
+                        )
                     else:
                         # ostatni fragment gra — w tym czasie przygotuj kolejną kwestię z kolejki
                         self._prefetch_pending(src)
@@ -3064,6 +3105,12 @@ class Engine:
                 self.speaking_full = ""
                 self._tts_interrupt.clear()
                 self._duck_release()
+
+    def _queue_waiting(self, current):
+        """Czy w kolejce czeka już następna kwestia — wtedy lektor przyspiesza, żeby jej nie zgubić."""
+        with self.pending_lock:
+            item = self.pending
+        return bool(item) and not same_utterance(item[0], current)
 
     def _plan_line(self, src, translate):
         """Tłumaczenie, podział na zdania i emocja kwestii: (tekst, fragmenty, przejęcie)."""
