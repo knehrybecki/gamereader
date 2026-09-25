@@ -28,6 +28,16 @@ function githubToken() {
   return "";
 }
 
+const SIGN_NAME = "LiveDub Local";
+
+function signingIdentity() {
+  const res = spawnSync("/usr/bin/security", ["find-identity", "-v", "-p", "codesigning"], {
+    encoding: "utf8",
+    timeout: 5000,
+  });
+  return res.status === 0 && (res.stdout || "").includes(SIGN_NAME) ? SIGN_NAME : "-";
+}
+
 function newer(remote, local) {
   const parse = (v) => String(v || "").replace(/^v/i, "").split(/[.-]/).slice(0, 3).map((n) => parseInt(n, 10) || 0);
   const a = parse(remote);
@@ -110,8 +120,10 @@ async function checkForUpdates({ log, status }) {
   spawnSync("/usr/bin/xattr", ["-cr", fresh]);
   spawnSync("/usr/bin/codesign", ["--force", "--sign", "-", path.join(fresh, "Contents", "Resources", "GameReaderHelper")]);
   spawnSync("/usr/bin/codesign", ["--force", "--sign", "-", path.join(fresh, "Contents", "Helpers", "Engine.app")]);
-  // podmieniony silnik psuje podpis całości — bez tego macOS uzna aplikację za uszkodzoną
-  run("/usr/bin/codesign", ["--force", "--deep", "--sign", "-", fresh]);
+  // podmieniony silnik psuje podpis całości — bez tego macOS uzna aplikację za uszkodzoną.
+  // Z lokalnym certyfikatem (macos/make_signing_cert.sh) podpis jest stały i macOS
+  // zachowuje zgodę na nagrywanie ekranu; bez niego ad-hoc = zgodę trzeba dać ponownie.
+  run("/usr/bin/codesign", ["--force", "--deep", "--sign", signingIdentity(), fresh]);
 
   // podmiana po zamknięciu tej instancji; stara wersja zostaje jako kopia, gdyby coś poszło źle
   const script = path.join(work, "swap.sh");

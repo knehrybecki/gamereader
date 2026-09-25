@@ -691,7 +691,9 @@ def lektor_segments(text):
         mood = _sentence_mood(piece)
         # krótkie zdanie („Jedź, jedź!”, „Hej!”) samo brzmi sztucznie — sklej z sąsiednim;
         # wygrywa mocniejszy nastrój (ożywiony > cichy > spokojny)
-        if groups and (groups[-1][1] == mood or len(piece) < 25 or len(groups[-1][0]) < 25):
+        # pierwszy fragment trzymaj krótki — lektor rusza dopiero, gdy jest zsyntezowany
+        first_full = len(groups) == 1 and len(groups[0][0]) >= 25 and len(groups[0][0]) + len(piece) > 60
+        if groups and not first_full and (groups[-1][1] == mood or len(piece) < 25 or len(groups[-1][0]) < 25):
             prev_text, prev_mood = groups[-1]
             rank = {"lively": 2, "soft": 1, "calm": 0}
             mood = max(mood, prev_mood, key=rank.get)
@@ -702,8 +704,8 @@ def lektor_segments(text):
         return [(normalize_text(text), "calm")] if _speakable(text) else []
     # długi początek tnij na przecinku — lektor rusza szybciej, reszta syntezuje się w trakcie
     head, mood = groups[0]
-    if len(head) > 70:
-        cut = head.find(", ", 25)
+    if len(head) > 50:
+        cut = head.find(", ", 18)
         if 0 < cut < len(head) - 20:
             groups[0:1] = [(head[: cut + 1], mood), (head[cut + 2 :], mood)]
     return groups
@@ -1181,6 +1183,20 @@ def helper_has_screen():
     return None
 
 
+def screen_access_ok():
+    """Czy macOS pozwala czytać ekran (silnik i helper). False = brak zgody „Nagrywanie ekranu”.
+
+    Bez tej zgody nie widać tytułów okien ani napisów — silnik po cichu czytałby tylko z dźwięku."""
+    try:
+        from Quartz import CGPreflightScreenCaptureAccess
+
+        if not CGPreflightScreenCaptureAccess():
+            return False
+    except Exception:
+        pass
+    return helper_has_screen() is not False
+
+
 def pick_region_native():
     if helper_available():
         try:
@@ -1602,6 +1618,8 @@ class MaleLektor:
 class ArgosTranslator:
     def __init__(self):
         self._fn = None
+        self._cache = {}
+        self._lock = threading.Lock()
 
     def ensure(self):
         if self._fn is not None:
@@ -1628,8 +1646,17 @@ class ArgosTranslator:
         self._fn = pair.translate
 
     def translate(self, text):
-        self.ensure()
-        return normalize_text(self._fn(text))
+        # napisy i dialogi się powtarzają — drugi raz bez czekania na tłumacza
+        hit = self._cache.get(text)
+        if hit is not None:
+            return hit
+        with self._lock:
+            self.ensure()
+            out = normalize_text(self._fn(text))
+        if len(self._cache) > 256:
+            self._cache.clear()
+        self._cache[text] = out
+        return out
 
 
 class ParakeetSTT:
@@ -2361,6 +2388,8 @@ class Engine:
         # kiedy ostatnio gra pokazała napis — wtedy dialogi bierzemy tylko z napisów
         self._last_subtitle_seen = 0.0
         self._heard_arousal = {}
+        # kolejna kwestia przygotowana w tle: (src, tekst, fragmenty, przejęcie, wav)
+        self._prefetched = None
         self.line_q = queue.Queue()
         self.transcriber = None
         self.devices = [PS_REMOTE] + [name for _i, name in list_input_devices()]
@@ -2690,6 +2719,24 @@ class Engine:
         self._tts_interrupt.clear()
         self._flush_line_q()
         self.emit({"event": "running", "on": True})
+        # bez zgody na nagrywanie ekranu napisy nie działają (np. po aktualizacji aplikacji
+        # macOS traktuje ją jak nową i zgodę trzeba dać jeszcze raz) — powiedz to wprost
+        if self.mode != "audio" and not screen_access_ok():
+            self.running = False
+            self.emit({"event": "running", "on": False})
+            self.emit(
+                {
+                    "event": "status",
+                    "text": "Brak zgody na nagrywanie ekranu — nie widzę napisów. Ustawienia → Prywatność → "
+                    "Nagrywanie ekranu: włącz LiveDub (usuń stary wpis i dodaj ponownie), potem uruchom LiveDub od nowa.",
+                }
+            )
+            # autostart nie ponawia co 2 s, a Ustawienia otwieramy raz na uruchomienie
+            self._user_stopped = True
+            if not getattr(self, "_screen_warned", False):
+                self._screen_warned = True
+                open_screen_settings()
+            return
         if self.mode == "audio":
             self.emit({"event": "status", "text": f"Podpinam dźwięk: {self._source_label()}…"})
             target = self._audio_loop
@@ -2923,20 +2970,18 @@ class Engine:
             if same_utterance(src, self.speaking_text) or self._recently_spoken(src):
                 continue
             try:
-                text = self.translator.translate(src) if translate else src
-                text = strip_fillers(text)
-                segments = self.lektor.plan(text) if text else []
-                if not segments:
-                    continue
-                # dźwięk: cała wypowiedź postaci; napisy: ostatnie ~1,6 s tego, co postać mówi
-                arousal = self._heard_arousal.pop(text_key(src), None) if translate else None
-                if arousal is None:
-                    arousal = self.prosody.recent()
-                arousal = float(arousal or 0.0)
-                # pierwsze zdanie od razu — reszta syntezuje się, gdy lektor już mówi
-                path = self.lektor.prepare(
-                    segments[0][0], volume=self.lektor_volume / 100.0, mood=segments[0][1], arousal=arousal
-                )
+                # przygotowana w tle, gdy lektor kończył poprzednią kwestię — start bez czekania
+                ready, self._prefetched = self._prefetched, None
+                if ready and ready[0] == src:
+                    _src, text, segments, arousal, path = ready
+                else:
+                    text, segments, arousal = self._plan_line(src, translate)
+                    if not segments:
+                        continue
+                    # pierwsze zdanie od razu — reszta syntezuje się, gdy lektor już mówi
+                    path = self.lektor.prepare(
+                        segments[0][0], volume=self.lektor_volume / 100.0, mood=segments[0][1], arousal=arousal
+                    )
                 with self.pending_lock:
                     newer = self.pending
                 # przy no_barge_in dokończ obecną syntezę; nowszy zostanie na kolejkę
@@ -2957,6 +3002,9 @@ class Engine:
                     if idx + 1 < len(segments):
                         seg, mood = segments[idx + 1]
                         nxt = self.lektor.prepare(seg, volume=self.lektor_volume / 100.0, mood=mood, arousal=arousal)
+                    else:
+                        # ostatni fragment gra — w tym czasie przygotuj kolejną kwestię z kolejki
+                        self._prefetch_pending(src)
                     if self._wait_segment(src) or gen != self._speech_gen:
                         break
                     path = nxt
@@ -2971,6 +3019,39 @@ class Engine:
                 self.speaking_full = ""
                 self._tts_interrupt.clear()
                 self._duck_release()
+
+    def _plan_line(self, src, translate):
+        """Tłumaczenie, podział na zdania i emocja kwestii: (tekst, fragmenty, przejęcie)."""
+        text = self.translator.translate(src) if translate else src
+        text = strip_fillers(text)
+        segments = self.lektor.plan(text) if text else []
+        # dźwięk: cała wypowiedź postaci; napisy: ostatnie ~1,6 s tego, co postać mówi
+        arousal = self._heard_arousal.pop(text_key(src), None) if translate else None
+        if arousal is None:
+            arousal = self.prosody.recent()
+        return text, segments, float(arousal or 0.0)
+
+    def _prefetch_pending(self, current):
+        """Gdy lektor czyta ostatni fragment: przetłumacz i zsyntezuj początek następnej kwestii."""
+        if not self.no_barge_in:
+            return  # bez kolejki nowa kwestia i tak przerywa bieżącą
+        with self.pending_lock:
+            item = self.pending
+        if not item:
+            return
+        src, translate, _full = item
+        if same_utterance(src, current) or self._recently_spoken(src):
+            return
+        try:
+            text, segments, arousal = self._plan_line(src, translate)
+            if not segments:
+                return
+            path = self.lektor.prepare(
+                segments[0][0], volume=self.lektor_volume / 100.0, mood=segments[0][1], arousal=arousal
+            )
+            self._prefetched = (src, text, segments, arousal, path)
+        except Exception:
+            self._prefetched = None
 
     def _wait_segment(self, src):
         """Czeka na koniec fragmentu; True = przerwano (Stop albo nowa kwestia przy barge-in)."""
