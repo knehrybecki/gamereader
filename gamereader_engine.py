@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import wave
 import json
@@ -35,73 +36,46 @@ PREVIEW_W = 780
 PREVIEW_H = 110
 CONFIG_PATH = Path.home() / "Library/Application Support/GameReader/config.json"
 CACHE_DIR = Path.home() / "Library/Caches/GameReader"
-VOICE_DIR = Path.home() / "Library/Application Support/GameReader/voices"
-JARVIS_ONNX = VOICE_DIR / "pl_PL-jarvis_wg_glos-medium.onnx"
-CHATTERBOX_REF = VOICE_DIR / "chatterbox_ref_pl.wav"
+# Lektor: Supertonic 3 (kod MIT, model OpenRAIL-M) — czysta polska wymowa, ~1 s na kwestię na GPU.
+SUPERTONIC_VOICES = ("M5", "M2", "M3", "M4", "M1")
+DEFAULT_SUPERTONIC_VOICE = "M5"
 
-MOODS = {
-    # length < 1 = szybciej — nie schodź za nisko, bo brzmi jak przyspieszone nagranie
-    "narrate": {"label": "spokojny", "length": 1.05, "volume": 0.95, "noise": 0.45, "noise_scale": 0.55, "pause": 0.10, "exag": 0.45, "cfg": 0.50},
-    "urgent": {"label": "ostry", "length": 0.88, "volume": 1.22, "noise": 0.90, "noise_scale": 0.75, "pause": 0.06, "exag": 0.72, "cfg": 0.32},
-    "intense": {"label": "gniew", "length": 0.82, "volume": 1.30, "noise": 1.05, "noise_scale": 0.90, "pause": 0.05, "exag": 0.85, "cfg": 0.28},
-    "question": {"label": "pytanie", "length": 1.16, "volume": 1.08, "noise": 0.70, "noise_scale": 0.65, "pause": 0.12, "exag": 0.58, "cfg": 0.40},
-    "soft": {"label": "cicho", "length": 1.40, "volume": 0.55, "noise": 0.25, "noise_scale": 0.35, "pause": 0.22, "exag": 0.30, "cfg": 0.55},
-    "tender": {"label": "ciepło", "length": 1.22, "volume": 0.84, "noise": 0.35, "noise_scale": 0.40, "pause": 0.14, "exag": 0.48, "cfg": 0.48},
-    "dark": {"label": "mrocznie", "length": 1.30, "volume": 0.74, "noise": 0.85, "noise_scale": 0.75, "pause": 0.16, "exag": 0.64, "cfg": 0.34},
-}
+# Mastering: suchy, bliski mikrofon — ciepło, czytelność, kompresja, równa głośność.
+# Poziom jest wyrównany już przy syntezie (RMS ~ -20 dBFS); głośność/emocja idzie PRZED limiterem,
+# więc głośniejsze kwestie nie przesterowują.
+LEKTOR_FILTER = (
+    "highpass=f=70,"
+    "equalizer=f=160:t=q:w=1.0:g=2,"
+    "equalizer=f=3200:t=q:w=1.2:g=3,"
+    "acompressor=threshold=-22dB:ratio=3:attack=5:release=90:makeup=2"
+)
+LEKTOR_LIMITER = "alimiter=limit=0.89:attack=4:release=60:level=disabled"
+LEKTOR_TARGET_RMS = 0.1
 
-MOOD_WORDS_EN = {
-    "intense": (
-        "hate", "kill", "die", "murder", "bastard", "damn", "fuck", "shit", "hell",
-        "attack", "destroy", "burn", "bleed", "idiot", "stupid",
-    ),
-    "dark": (
-        "blood", "corpse", "fear", "afraid", "darkness", "death", "ghost",
-        "monster", "nightmare", "scream", "pain", "suffer", "grave", "shadow",
-    ),
-    "tender": (
-        "love", "please", "sorry", "thanks", "forgive", "miss", "friend",
-        "together", "honey", "dear",
-    ),
-    "urgent": (
-        "run", "hurry", "quick", "move", "fast", "behind", "incoming", "help",
-    ),
-    "soft": ("quiet", "whisper", "sleep", "slowly", "calm"),
-}
-
-MOOD_WORDS_PL = {
-    "intense": (
-        "nienawidzę", "zabij", "zabić", "zabiję", "śmierć", "zdychaj", "won",
-        "giń", "atak", "zniszcz", "kretyn", "idiota", "zamknij",
-    ),
-    "dark": (
-        "krew", "trup", "strach", "boję", "ciemność", "zginiesz", "umrzesz",
-        "duch", "potwór", "koszmar", "krzyk", "grób", "cień",
-    ),
-    "tender": (
-        "kocham", "kochanie", "przepraszam", "tęsknię", "proszę", "dziękuję",
-        "dzięki", "wybacz", "przyjaciel",
-    ),
-    "urgent": (
-        "uciekaj", "szybko", "ruszaj", "uwaga", "pomocy", "stój", "natychmiast",
-    ),
-    "soft": ("cicho", "szept", "śpij", "odpocznij", "powoli", "spokojnie"),
-}
-
-BG = "#0B0D12"
-SURFACE = "#141821"
-SURFACE2 = "#1B2130"
-BORDER = "#2A3344"
-TEXT = "#F4F1EA"
-MUTED = "#8B93A7"
-ACCENT = "#7CFFD0"
-GOLD = "#F5C16C"
 def normalize_text(text):
     return re.sub(r"\s+", " ", (text or "")).strip()
 
 
 def text_key(text):
     return hashlib.sha1(normalize_text(text).lower().encode("utf-8")).hexdigest()
+
+
+def utterance_tail(prev, nxt):
+    """Końcówka `nxt`, której nie ma w `prev` (napis dopisał resztę zdania)."""
+    left = polish_fold(prev or "")
+    words = normalize_text(nxt or "").split()
+    if not left or not words:
+        return ""
+    idx = polish_fold(" ".join(words)).find(left)
+    if idx < 0:
+        return ""
+    covered = idx + len(left)
+    acc = 0
+    for i, word in enumerate(words):
+        acc += len(polish_fold(word))
+        if acc >= covered:
+            return normalize_text(" ".join(words[i + 1 :]))
+    return ""
 
 
 def same_utterance(a, b):
@@ -472,127 +446,6 @@ def usable_ocr(text):
     return sum(ch.isalpha() for ch in raw) >= 2
 
 
-def _score_words(scores, text, lexicon):
-    if not text:
-        return
-    low = text.lower()
-    tokens = set(re.findall(r"[a-zA-ZąćęłńóśźżĄĆĘŁŃÓŚŹŻ']+", low))
-    for mood, words in lexicon.items():
-        for word in words:
-            if word in tokens:
-                scores[mood] += 2 if len(word) > 3 else 1
-            elif len(word) > 5 and any(token.startswith(word) for token in tokens):
-                scores[mood] += 1
-
-
-def mood_from_punct(chunk):
-    """Emocja wyłącznie z końcówki / znaków w fragmencie."""
-    raw = normalize_text(chunk or "")
-    if not raw:
-        return "narrate"
-    if re.search(r"\?[!？]|[!！]\?", raw) or ("?!" in raw) or ("!?" in raw):
-        return "intense"
-    bangs = raw.count("!") + raw.count("！")
-    if bangs >= 2:
-        return "intense"
-    if bangs == 1:
-        return "urgent"
-    if "?" in raw or "？" in raw:
-        return "question"
-    if "…" in raw or "..." in raw or raw.rstrip(".!?").endswith(".."):
-        return "soft"
-    if raw.endswith(",") or raw.endswith(";") or raw.endswith("—") or raw.endswith("–"):
-        return "narrate"
-    if raw.endswith("."):
-        return "narrate"
-    return "narrate"
-
-
-def split_emotion_segments(text):
-    """Dzieli napis na kawałki według interpunkcji — każdy z własną emocją."""
-    raw = normalize_text(text)
-    if not raw:
-        return []
-    # zachowaj znaki; dziel po silnej interpunkcji
-    parts = re.split(r"(?<=[\.\!\?…！？])\s+|(?<=\.\.\.)\s+", raw)
-    segments = []
-    for part in parts:
-        piece = normalize_text(part)
-        if not piece:
-            continue
-        # doklej samotne wielokropki do poprzedniego
-        if piece in ("...", "…") and segments:
-            prev_text, prev_mood = segments[-1]
-            segments[-1] = (normalize_text(prev_text + " " + piece), "soft")
-            continue
-        mood = mood_from_punct(piece)
-        segments.append((piece, mood))
-    if not segments:
-        segments = [(raw, mood_from_punct(raw))]
-    return segments
-
-
-def detect_mood(polish, english=None):
-    """Główna emocja kwestii: najpierw interpunkcja, potem słowa."""
-    raw = normalize_text(" ".join(part for part in (polish, english) if part))
-    if not raw:
-        return "narrate"
-
-    # Dominująca emocja z segmentów (ważniejsze = intensywniejsze)
-    priority = {"intense": 5, "urgent": 4, "question": 3, "soft": 2, "tender": 2, "dark": 2, "narrate": 1}
-    segments = split_emotion_segments(raw)
-    best = "narrate"
-    best_p = 0
-    for _piece, mood in segments:
-        p = priority.get(mood, 0)
-        if p > best_p:
-            best = mood
-            best_p = p
-
-    # Słowa mogą podbić tender/dark gdy brak mocnej interpunkcji
-    scores = {name: 0 for name in MOODS}
-    if best != "narrate":
-        # Interpunkcja (! ? …) zawsze ustala emocję głosu
-        return best
-    _score_words(scores, polish, MOOD_WORDS_PL)
-    _score_words(scores, english, MOOD_WORDS_EN)
-    picked = max(scores, key=scores.get)
-    if scores[picked] <= 0:
-        return "narrate"
-    return picked
-
-
-def mood_voice(mood, intensity=1.0, tts_scale=1.0):
-    """Parametry głosu Pipera dla emocji (+ suwak Emocje)."""
-    base = MOODS.get(mood) or MOODS["narrate"]
-    calm = MOODS["narrate"]
-    # intensity 0 = prawie spokojny, 1 = pełny profil, >1 = jeszcze ostrzej
-    t = max(0.0, min(1.5, float(intensity)))
-    blend = min(1.0, 0.35 + 0.75 * t)
-
-    def mix(a, b):
-        return float(a) + (float(b) - float(a)) * blend
-
-    length = mix(calm["length"], base["length"]) * float(tts_scale or 1.0)
-    # nie przyspieszaj agresywnie — lepiej lekko wolniej niż „pisk”
-    if t > 1.0 and mood in ("urgent", "intense"):
-        length *= 0.96
-    if t > 1.0 and mood in ("soft", "question"):
-        length *= 1.04
-    volume = mix(calm["volume"], base["volume"]) * (0.88 + 0.18 * min(t, 1.0))
-    noise = mix(calm["noise"], base["noise"])
-    noise_scale = mix(calm.get("noise_scale", 0.55), base.get("noise_scale", 0.55))
-    pause = float(base.get("pause", 0.08))
-    return {
-        "length": max(0.78, min(1.7, length)),
-        "volume": max(0.45, min(1.40, volume)),
-        "noise": max(0.15, min(1.3, noise)),
-        "noise_scale": max(0.2, min(1.1, noise_scale)),
-        "pause": pause,
-        "label": base["label"],
-    }
-
-
 def load_config():
     try:
         return json.loads(CONFIG_PATH.read_text())
@@ -606,14 +459,15 @@ def save_config(data):
 
 
 SAMPLE_RATE = 16000
-SILENCE_SEC = 0.12
-MIN_SPEECH_SEC = 0.18
-MAX_SPEECH_SEC = 2.2
-STREAM_SEC = 0.24
+# Wypowiedź = od ciszy do ciszy; transkrybujemy ją raz, w całości (bez wersji roboczych).
+SILENCE_SEC = 0.35
+MIN_SPEECH_SEC = 0.35
+MAX_SPEECH_SEC = 8.0
+PREROLL_SEC = 0.25
+# po ostatnim napisie przez tyle sekund dźwięk nie jest tłumaczony (napisy = główne dialogi)
+SUBTITLE_PRIORITY_SEC = 30.0
 PARAKEET_MODEL = "mlx-community/parakeet-tdt-0.6b-v3"
 SPEECH_RMS = 0.0025
-LIVE_WORDS = 3
-HOLD_WORDS = 1
 JUNK_HEARD = {
     "thanks for watching",
     "thank you",
@@ -645,6 +499,19 @@ def normalize_mode(mode):
 
 
 GAME_PROFILES = {
+    "gta6": {
+        "label": "GTA VI",
+        "hint": "Na razie wycinki z Netflixa w Chrome (do testów); po premierze PS Remote Play.",
+        "interval": 0.15,
+        "tts": 0.92,
+        "boost": 2.4,
+        # pasek pod napisy Netflixa (wyżej i większe niż w grach)
+        "band": 0.2,
+        "gap": 0.07,
+        "inset": 0.1,
+        # w trybie źródła „Auto” najpierw szukaj Netflixa w Chrome
+        "prefer": "chrome",
+    },
     "rdr2": {
         "label": "Red Dead Redemption 2",
         "hint": "Szybkie kwestie na dole. Skan 0,16 s, lektor żwawy.",
@@ -727,7 +594,7 @@ GAME_PROFILES = {
 def normalize_game(game):
     if game in GAME_PROFILES:
         return game
-    return "rdr2"
+    return "gta6"
 
 
 def which_bin(name):
@@ -748,39 +615,99 @@ def _speakable(piece):
     return bool(re.search(r"[A-Za-zĄąĆćĘęŁłŃńÓóŚśŹźŻż]", piece))
 
 
-def take_ready(full, emitted, force=False):
-    full = normalize_text(full)
-    emitted = normalize_text(emitted)
-    if not full:
-        return [], emitted
-    low_full = full.lower()
-    if emitted and low_full.startswith(emitted.lower()):
-        rest = normalize_text(full[len(emitted) :])
+# Odgłosy i wtrącenia, których lektor nie czyta (EN z dźwięku i PL z napisów).
+_FILLER_RE = re.compile(
+    r"^(?:h+m+|m+h*m+|mhm|u+h+|u+m+|a+h+|e+h+|e+r+m*|o+h+|u+g+h+|a+r+g+h+|o+o+f+|p+h+e+w+|huh|"
+    r"(?:h+a+){2,}|(?:h+e+){2,}|h+e+h+|y{2,}|e{3,}|a{3,}|a+c+h+|o+c+h+|e+c+h+|u+f+|o+j+|u+u+|aha)$",
+    re.IGNORECASE,
+)
+_WORD_EDGE = "\"'„”«»()[]*-–—…,.!?;:"
+
+
+def _is_filler_word(word):
+    core = word.strip(_WORD_EDGE).lower().replace("-", "")
+    return bool(core) and bool(_FILLER_RE.match(core))
+
+
+def strip_fillers(text):
+    """Usuwa „hmm”, „uh”, „yyy”, „ach”… Zwraca "" gdy nie zostaje nic do przeczytania."""
+    words = normalize_text(text or "").split()
+    # sam śmiech („ha ha ha”) też pomijamy — ale „he” w zdaniu to angielskie „on”
+    if words and all(_is_filler_word(w) or w.strip(_WORD_EDGE).lower() in ("ha", "he", "hah", "heh") for w in words):
+        return ""
+    kept = [w for w in words if not _is_filler_word(w)]
+    if len(kept) != len(words):
+        cleaned = normalize_text(" ".join(kept))
+        cleaned = re.sub(r"^[,;:—–\-…. ]+", "", cleaned)
+        cleaned = cleaned[:1].upper() + cleaned[1:] if cleaned else ""
     else:
-        rest = full
-        emitted = ""
-    ready = []
-    while True:
-        match = re.search(r"[,:;—.!?]", rest)
-        if not match:
-            break
-        piece = normalize_text(rest[: match.end()])
-        rest = normalize_text(rest[match.end() :])
-        if _speakable(piece):
-            ready.append(piece)
-            emitted = normalize_text(f"{emitted} {piece}")
-    words = rest.split()
-    if force:
-        piece = normalize_text(rest)
-        if _speakable(piece):
-            ready.append(piece)
-            emitted = normalize_text(f"{emitted} {piece}")
-    elif len(words) >= LIVE_WORDS + HOLD_WORDS:
-        piece = " ".join(words[:-HOLD_WORDS])
-        if _speakable(piece):
-            ready.append(piece)
-            emitted = normalize_text(f"{emitted} {piece}")
-    return ready, emitted
+        cleaned = normalize_text(text or "")
+    letters = sum(ch.isalpha() for ch in cleaned)
+    return cleaned if letters >= 3 else ""
+
+
+# Delikatne emocje lektora, zdanie po zdaniu.
+_LIVELY_WORDS = (
+    "szybko", "uciekaj", "uważaj", "padnij", "stój", "rusz", "biegnij", "jedź", "gazu", "gliny",
+    "pomocy", "cholera", "kurwa", "zabiję", "zabij", "strzelaj", "teraz", "natychmiast", "spadaj",
+)
+_SOFT_WORDS = (
+    "przepraszam", "kocham", "tęsknię", "żegnaj", "cicho", "szepnij", "spokojnie", "przykro",
+    "nie żyje", "umarł", "umarła", "pogrzeb",
+)
+# 5 kroków dyfuzji: ~30% szybciej niż domyślne 8, wymowa bez zmian
+SUPERTONIC_STEPS = 5
+# nastrój z tekstu przesuwa „przejęcie” (z głosu postaci): -1 szept … +1 krzyk
+LEKTOR_MOOD_BIAS = {"calm": 0.0, "lively": 0.35, "soft": -0.4}
+
+
+def lektor_voice_params(arousal):
+    """Przejęcie -1…1 → domieszka żywego głosu, tempo, głośność, pauza."""
+    a = max(-1.0, min(1.0, float(arousal)))
+    return {
+        "blend": max(0.0, min(0.75, 0.1 + 0.65 * a)) if a > -0.15 else 0.0,
+        "speed": 1.0 + (0.14 * a if a > 0 else 0.10 * a),
+        "gain": 1.0 + (0.32 * a if a > 0 else 0.35 * a),
+        "pause": max(0.05, 0.10 - 0.06 * a),
+    }
+
+
+def _sentence_mood(sentence):
+    low = sentence.lower()
+    if "!" in sentence or any(w in low for w in _LIVELY_WORDS):
+        return "lively"
+    if "…" in sentence or "..." in sentence or any(w in low for w in _SOFT_WORDS):
+        return "soft"
+    return "calm"
+
+
+def lektor_segments(text):
+    """Dzieli kwestię na zdania i skleja sąsiednie o tym samym nastroju: [(tekst, nastrój), …]."""
+    pieces = [normalize_text(p) for p in re.findall(r"[^.!?…]+(?:[.!?…]+|$)", normalize_text(text or ""))]
+    groups = []
+    for piece in pieces:
+        if not _speakable(piece):
+            continue
+        mood = _sentence_mood(piece)
+        # krótkie zdanie („Jedź, jedź!”, „Hej!”) samo brzmi sztucznie — sklej z sąsiednim;
+        # wygrywa mocniejszy nastrój (ożywiony > cichy > spokojny)
+        if groups and (groups[-1][1] == mood or len(piece) < 25 or len(groups[-1][0]) < 25):
+            prev_text, prev_mood = groups[-1]
+            rank = {"lively": 2, "soft": 1, "calm": 0}
+            mood = max(mood, prev_mood, key=rank.get)
+            groups[-1] = (f"{prev_text} {piece}", mood)
+        else:
+            groups.append((piece, mood))
+    if not groups:
+        return [(normalize_text(text), "calm")] if _speakable(text) else []
+    # długi początek tnij na przecinku — lektor rusza szybciej, reszta syntezuje się w trakcie
+    head, mood = groups[0]
+    if len(head) > 70:
+        cut = head.find(", ", 25)
+        if 0 < cut < len(head) - 20:
+            groups[0:1] = [(head[: cut + 1], mood), (head[cut + 2 :], mood)]
+    return groups
+
 
 
 def preferred_device_name(devices):
@@ -939,8 +866,125 @@ def _quartz_remote_play_info():
     return best
 
 
-def capture_remote_play_band(left, top, width, height):
-    """Szybki zrzut paska z okna PS (Quartz w procesie, bez spawn helpera)."""
+SOURCES = ("auto", "ps", "chrome")
+CHROME_OWNERS = ("google chrome", "chrome", "google chrome canary", "chromium")
+VIDEO_TITLES = ("netflix", "youtube", "twitch", "max", "prime video", "disney")
+# Netflix/YouTube: napisy wyżej i większe niż w grach
+CHROME_BAND = {"band": 0.2, "gap": 0.07, "inset": 0.1}
+
+
+def _quartz_chrome_info(video_only=False):
+    """Okno Chrome (x, y, w, h, window_id, tytuł): najpierw karta z wideo, potem największe."""
+    try:
+        from Quartz import (
+            CGWindowListCopyWindowInfo,
+            kCGNullWindowID,
+            kCGWindowListExcludeDesktopElements,
+            kCGWindowListOptionOnScreenOnly,
+        )
+    except Exception:
+        return None
+    options = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements
+    best = None
+    best_score = 0.0
+    for win in CGWindowListCopyWindowInfo(options, kCGNullWindowID) or []:
+        owner = str(win.get("kCGWindowOwnerName") or "").lower()
+        if owner not in CHROME_OWNERS or int(win.get("kCGWindowLayer") or 0) != 0:
+            continue
+        title = str(win.get("kCGWindowName") or "")
+        video = any(key in title.lower() for key in VIDEO_TITLES)
+        if video_only and not video:
+            continue
+        bounds = win.get("kCGWindowBounds") or {}
+        width = float(bounds.get("Width") or 0)
+        height = float(bounds.get("Height") or 0)
+        wid = int(win.get("kCGWindowNumber") or 0)
+        if width < 320 or height < 200 or wid <= 0:
+            continue
+        score = width * height * (4.0 if video else 1.0)
+        if score > best_score:
+            best_score = score
+            best = (int(bounds.get("X") or 0), int(bounds.get("Y") or 0), int(width), int(height), wid, title)
+    return best
+
+
+def find_source_window(source="auto", prefer="ps"):
+    """(x, y, w, h, window_id, rodzaj, tytuł) okna źródła albo None. rodzaj: "ps" | "chrome".
+    prefer="chrome": w trybie auto najpierw Netflix/YouTube w Chrome (np. GTA VI na wycinkach)."""
+    if source == "auto" and prefer == "chrome":
+        info = _quartz_chrome_info(video_only=True)
+        if info is not None:
+            return (*info[:5], "chrome", info[5])
+    if source in ("auto", "ps"):
+        info = _quartz_remote_play_info()
+        if info is not None:
+            return (*info[:5], "ps", "PS Remote Play")
+        if source == "ps":
+            win = find_remote_play_window()
+            return (*win, 0, "ps", "PS Remote Play") if win else None
+    if source in ("auto", "chrome"):
+        # w trybie auto Chrome liczy się tylko z Netflixem/YouTube — zwykłe przeglądanie nie odpala lektora
+        info = _quartz_chrome_info(video_only=(source == "auto"))
+        if info is not None:
+            return (*info[:5], "chrome", info[5])
+    return None
+
+
+# Napisy interfejsu odtwarzaczy (Netflix/YouTube) — to nie dialog
+PLAYER_UI_TEXT = (
+    "wstrzymane", "oglądasz", "ogladasz", "pomiń czołówkę", "pomin czolowke", "pomiń podsumowanie",
+    "następny odcinek", "nastepny odcinek", "obejrzyj napisy końcowe", "odtwórz ponownie",
+    "paused", "you're watching", "skip intro", "skip recap", "next episode", "watch credits",
+    "pomiń reklamę", "skip ad",
+)
+PLAYER_UI_EXACT = ("reklama", "ad", "reklama.", "ad.")
+
+
+def is_player_ui_text(text):
+    low = normalize_text(text or "").lower()
+    if not low:
+        return False
+    if low in PLAYER_UI_EXACT or any(low.startswith(item) for item in PLAYER_UI_TEXT):
+        return True
+    # „12:34”, „-1:02:10” — licznik czasu
+    return bool(re.fullmatch(r"-?\d{1,2}(:\d{2}){1,2}", low))
+
+
+PLAYER_PAUSED = ("wstrzymane", "paused")
+
+
+def player_paused(text):
+    """Netflix przy pauzie pokazuje „Wstrzymane” — wtedy nic nie czytamy."""
+    low = normalize_text(text or "").lower()
+    return any(re.search(rf"(?:^|\s){word}(?:$|\s|[.!?])", low) for word in PLAYER_PAUSED)
+
+
+def strip_player_ui(text):
+    """Wycina z odczytu OCR doklejone napisy odtwarzacza (licznik czasu, „Pomiń czołówkę”…)."""
+    out = normalize_text(text or "")
+    for item in PLAYER_UI_TEXT:
+        out = re.sub(re.escape(item), " ", out, flags=re.IGNORECASE)
+    out = re.sub(r"(?<!\S)-?\d{1,2}(?::\d{2}){1,2}(?!\S)", " ", out)
+    return normalize_text(out)
+
+
+def player_controls_visible(info):
+    """Netflix/YouTube pokazuje pasek sterowania (pauza, ruch myszą) — na dole jest wtedy tytuł, nie dialog.
+    Poznajemy go po czerwonym pasku postępu w dolnej części okna."""
+    if not info:
+        return False
+    x, y, w, h = info[:4]
+    strip = capture_remote_play_band(x, y + int(h * 0.72), w, int(h * 0.28), info=info)
+    if strip is None:
+        return False
+    b, g, r = strip[:, :, 0].astype(int), strip[:, :, 1].astype(int), strip[:, :, 2].astype(int)
+    red = (r > 170) & (g < 70) & (b < 80)
+    # pasek postępu = poziomy ciąg czerwieni (co najmniej kilkanaście pikseli w jednym wierszu)
+    return bool(red.size) and int(red.sum(axis=1).max()) >= 14
+
+
+def capture_remote_play_band(left, top, width, height, info=None):
+    """Szybki zrzut paska z okna źródła (Quartz w procesie, bez spawn helpera)."""
     try:
         from Quartz import (
             CGWindowListCreateImage,
@@ -951,10 +995,10 @@ def capture_remote_play_band(left, top, width, height):
         )
     except Exception:
         return None
-    info = _quartz_remote_play_info()
-    if info is None:
+    info = info or _quartz_remote_play_info()
+    if info is None or not info[4]:
         return None
-    wx, wy, ww, wh, wid = info
+    wx, wy, ww, wh, wid = info[:5]
     try:
         full = CGWindowListCreateImage(
             CGRectNull,
@@ -1078,6 +1122,7 @@ def game_reader_bin():
         here.parents[1] / "GameReaderHelper",
         here.parents[1] / "MacOS" / "GameReaderHelper",
         here.parents[1] / "MacOS" / "GameReader",
+        Path.home() / "Applications/LiveDub.app/Contents/Resources/GameReaderHelper",
         Path.home() / "Applications/GameReader.app/Contents/Resources/GameReaderHelper",
         Path.home() / "Applications/GameReader.app/Contents/MacOS/GameReaderHelper",
         Path.home() / "Applications/GameReader.app/Contents/MacOS/GameReader",
@@ -1089,9 +1134,9 @@ def game_reader_bin():
     return None
 
 
-def audio_tap_cmd():
+def audio_tap_cmd(target="ps"):
     path = game_reader_bin()
-    return [str(path), "--tap"] if path else None
+    return [str(path), "--tap", "--tap-target", target] if path else None
 
 
 def helper_sock_path():
@@ -1159,7 +1204,12 @@ def pick_region_native():
 
 
 class GameAudioTap:
-    def __init__(self):
+    def __init__(self, target="ps", duck=False):
+        # "ps" = PS Remote Play, "chrome" = Google Chrome (Netflix, YouTube…)
+        self.target = target
+        # duck = przejmij dźwięk gry (Core Audio tap) i pozwól go ściszać, gdy mówi lektor
+        self.duck = duck
+        self.ducking = False
         self.proc = None
         self.sock = None
         self.chunks = queue.Queue()
@@ -1167,14 +1217,42 @@ class GameAudioTap:
         self.alive = False
 
     def start(self):
+        if self.duck:
+            try:
+                self._start_proc([str(game_reader_bin()), "--duck", "--duck-target", self.target], stdin=True)
+                self.ducking = True
+                return
+            except PermissionError:
+                raise
+            except Exception as exc:
+                # nie wyszło (np. gra jeszcze nic nie gra) — zwykły nasłuch, bez ściszania
+                self.duck_error = str(exc)
+                self.stop()
         if helper_available():
             self._start_helper()
             return
-        cmd = audio_tap_cmd()
+        cmd = audio_tap_cmd(self.target)
         if cmd is None:
-            raise RuntimeError("Brak GameReader --tap. Przebuduj aplikację.")
+            raise RuntimeError("Brak pomocnika dźwięku (--tap). Przebuduj aplikację.")
+        self._start_proc(cmd)
+
+    def set_gain(self, value):
+        """Głośność gry 0…1 (tylko w trybie ściszania)."""
+        if not self.ducking or self.proc is None or self.proc.stdin is None:
+            return
+        try:
+            self.proc.stdin.write(f"GAIN {max(0.0, min(1.0, float(value))):.2f}\n".encode())
+            self.proc.stdin.flush()
+        except (OSError, ValueError):
+            pass
+
+    def _start_proc(self, cmd, stdin=False):
+        if not cmd or cmd[0] in ("None", ""):
+            raise RuntimeError("Brak pomocnika dźwięku. Przebuduj aplikację.")
+        self.message = ""
         self.proc = subprocess.Popen(
             cmd,
+            stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=0,
@@ -1187,14 +1265,17 @@ class GameAudioTap:
             time.sleep(0.1)
             if self.message:
                 break
+        # błąd pomocnik wypisuje tuż przed wyjściem — daj mu chwilę, żeby nie uznać startu za udany
+        if "LISTENING" not in self.message and "AUDIO_OK" not in self.message:
+            time.sleep(0.3)
         if self.proc.poll() is not None:
-            text = self.message or "PS Remote Play nie oddaje dźwięku."
+            text = self.message or "Gra nie oddaje dźwięku."
             if any(word in text.lower() for word in ("tcc", "zgody", "przechwytywania", "denied", "not permitted")):
                 raise PermissionError(text)
             raise RuntimeError(text)
 
     def _start_helper(self):
-        line, sock, rest = helper_call("TAP", timeout=16)
+        line, sock, rest = helper_call(f"TAP {self.target}", timeout=16)
         if line.startswith("ERR"):
             sock.close()
             text = line[4:].strip() or "PS Remote Play nie oddaje dźwięku."
@@ -1270,6 +1351,11 @@ class GameAudioTap:
             except OSError:
                 pass
             self.sock = None
+        if self.proc and self.proc.stdin is not None:
+            try:
+                self.proc.stdin.close()  # Ducker sprząta i oddaje dźwięk grze
+            except OSError:
+                pass
         if self.proc and self.proc.poll() is None:
             self.proc.terminate()
             try:
@@ -1310,8 +1396,8 @@ def set_mac_app_name():
 
         info = NSBundle.mainBundle().infoDictionary()
         if info is not None:
-            info["CFBundleName"] = "GameReader"
-            info["CFBundleDisplayName"] = "GameReader"
+            info["CFBundleName"] = "LiveDub"
+            info["CFBundleDisplayName"] = "LiveDub"
             info["LSUIElement"] = True
     except Exception:
         pass
@@ -1328,91 +1414,69 @@ def hide_helper_dock_icon():
         pass
 
 
-class MaleLektor:
-    """Piper (szybki) + opcjonalnie Chatterbox Multilingual (emocje, wolniejszy)."""
+# Wymowa: „rz” czytane jako osobne r + z (zamarzać, marznąć…). Apostrof rozdziela
+# głoski bez pauzy; „marzenie”, „marzę” (od marzyć) zostają z „ż”.
+_PRONOUNCE_RULES = [
+    (re.compile(r"(mar)(z(?:n|ł|l))", re.IGNORECASE), r"\1'\2"),
+    (re.compile(r"\b((?:za|od|prze|przy|roz|do|u|ob|wy|z|prz)mar)(za)", re.IGNORECASE), r"\1'\2"),
+    (re.compile(r"\b(tar)(zan)", re.IGNORECASE), r"\1'\2"),
+    (re.compile(r"(mier)(zi|zł)", re.IGNORECASE), r"\1'\2"),
+]
 
-    REF_TEXT = (
-        "Dzień dobry. Jestem lektorem gry. Czytam polskie napisy spokojnie i wyraźnie, "
-        "żebyś zawsze rozumiał dialog. Uwaga, ruszaj szybko. Przepraszam. Kocham cię. "
-        "Ciemność nadchodzi, ale damy radę."
-    )
+
+def polish_pronounce(text):
+    for pattern, repl in _PRONOUNCE_RULES:
+        text = pattern.sub(repl, text)
+    return text
+
+
+def lektor_pace(text):
+    """Długie kwestie lekko szybciej, żeby lektor nadążał za napisami."""
+    n = len(text or "")
+    if n > 220:
+        return 0.88
+    if n > 140:
+        return 0.93
+    return 1.0
+
+
+class MaleLektor:
+    """Lektor filmowy: Supertonic 3 na GPU (CoreML), równy głos, zmasterowany przez ffmpeg."""
 
     def __init__(self):
         self.player = None
         self.lock = threading.Lock()
         self.synth_lock = threading.Lock()
-        self.backend = None
-        self.preferred = "piper"
         self.model = None
-        self.voice = None
-        self.device = "cpu"
+        self.styles = {}
+        self.voice = DEFAULT_SUPERTONIC_VOICE
         self.tts_scale = 1.0
         self.ffmpeg = which_bin("ffmpeg")
-        self._load_error = ""
+
+    @property
+    def backend(self):
+        return "supertonic" if self.model is not None else None
 
     def ensure(self):
-        if self.backend is not None:
+        if self.model is not None:
             return
-        order = ["piper", "chatterbox"] if self.preferred == "piper" else ["chatterbox", "piper"]
-        errors = []
-        for name in order:
-            try:
-                if name == "chatterbox":
-                    self._ensure_chatterbox()
-                else:
-                    self._ensure_piper()
-                return
-            except Exception as exc:
-                errors.append(f"{name}: {exc}")
-                self.backend = None
-                self.model = None
-                self.voice = None
-        self._load_error = " | ".join(errors)
-        raise RuntimeError(self._load_error or "Brak lektora.")
+        import onnxruntime
+        import supertonic.loader as st_loader
+        from supertonic import TTS
 
-    def _ensure_piper(self):
-        from piper import PiperVoice
-
-        if not JARVIS_ONNX.is_file():
-            raise RuntimeError("Brak lokalnego głosu lektora (Piper Jarvis).")
-        self.voice = PiperVoice.load(str(JARVIS_ONNX))
-        self.backend = "piper"
-
-    def _ensure_chatterbox(self):
-        import os
-
-        import perth
-        import torch
-        from chatterbox.mtl_tts import ChatterboxMultilingualTTS
-
-        os.environ["TQDM_DISABLE"] = "1"
-        # resemble-perth 1.0.1 bywa bez Implicit — Chatterbox wtedy pada na NoneType
-        if getattr(perth, "PerthImplicitWatermarker", None) is None:
-            perth.PerthImplicitWatermarker = perth.DummyWatermarker
-
-        if torch.backends.mps.is_available():
-            self.device = "mps"
-        else:
-            self.device = "cpu"
-        self.model = ChatterboxMultilingualTTS.from_pretrained(self.device)
-        self._ensure_ref_wav()
-        self.model.prepare_conditionals(str(CHATTERBOX_REF), exaggeration=0.5)
-        self.backend = "chatterbox"
-
-    def _ensure_ref_wav(self):
-        VOICE_DIR.mkdir(parents=True, exist_ok=True)
-        if CHATTERBOX_REF.is_file() and CHATTERBOX_REF.stat().st_size > 8000:
-            return
-        from piper import PiperVoice, SynthesisConfig
-
-        if not JARVIS_ONNX.is_file():
-            raise RuntimeError("Brak Piper Jarvis do zbudowania próbki głosu Chatterbox.")
-        voice = PiperVoice.load(str(JARVIS_ONNX))
-        cfg = SynthesisConfig(length_scale=1.0, volume=1.0, noise_w_scale=0.5)
-        with wave.open(str(CHATTERBOX_REF), "wb") as handle:
-            voice.synthesize_wav(self.REF_TEXT, handle, syn_config=cfg)
-        if not CHATTERBOX_REF.is_file() or CHATTERBOX_REF.stat().st_size < 8000:
-            raise RuntimeError("Nie udało się zbudować próbki głosu Chatterbox.")
+        onnxruntime.set_default_logger_severity(3)
+        # CoreML = GPU/ANE na Macu; ONNX Runtime sam spada na CPU, jeśli CoreML nie wstanie
+        st_loader.DEFAULT_ONNX_PROVIDERS = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+        model = TTS(auto_download=True)
+        if self.voice not in SUPERTONIC_VOICES:
+            self.voice = DEFAULT_SUPERTONIC_VOICE
+        calm = model.get_voice_style(voice_name=self.voice)
+        # M1 = żywszy głos; domieszka daje więcej melodii przy tej samej barwie lektora
+        other = model.get_voice_style(voice_name="M1" if self.voice != "M1" else "M4")
+        # rozgrzewka: pierwsza synteza kompiluje grafy CoreML
+        model.synthesize("Lektor gotowy.", voice_style=calm, lang="pl")
+        self.styles = {"calm": calm, "lively": other}
+        self.model = model
 
     def stop(self):
         with self.lock:
@@ -1438,170 +1502,95 @@ class MaleLektor:
                 return True
             time.sleep(poll)
 
-    def prepare(self, text, source=None, volume=1.0):
+    def plan(self, text):
+        return lektor_segments(text)
+
+    def _style(self, blend):
+        if blend <= 0.0:
+            return self.styles["calm"]
+        calm, other = self.styles["calm"], self.styles["lively"]
+        style = copy.copy(calm)
+        style.ttl = (1 - blend) * calm.ttl + blend * other.ttl
+        style.dp = (1 - blend) * calm.dp + blend * other.dp
+        return style
+
+    def prepare(self, text, volume=1.0, mood="calm", arousal=0.0):
+        """Zwraca ścieżkę gotowego WAV (z cache, jeśli ta sama kwestia już była).
+
+        arousal: jak mówi postać (-1 szept … +1 krzyk), mood: wskazówka z tekstu."""
         self.ensure()
-        mood = detect_mood(text, source)
-        intensity = max(0.0, min(1.5, float(volume)))
-        if self.backend == "chatterbox":
-            profile = MOODS[mood]
-            exag = float(profile.get("exag", 0.5))
-            exag = max(0.15, min(1.0, exag * (0.65 + 0.55 * intensity)))
-            cfg = float(profile.get("cfg", 0.5))
-            cfg = max(0.15, min(0.7, cfg))
-            key = f"cb|{text}|{mood}|{exag:.2f}|{cfg:.2f}|{self.tts_scale:.2f}"
-            path = CACHE_DIR / f"{text_key(key)}.wav"
-            CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            if not path.exists() or path.stat().st_size < 64:
-                self._synth_chatterbox(text, path, exag, cfg, intensity)
-            return mood, path
-        voice = mood_voice(mood, intensity=intensity, tts_scale=self.tts_scale)
-        # cache zależny od segmentów emocji + intensity
-        seg_key = "|".join(f"{m}:{t}" for t, m in split_emotion_segments(text))
-        key = f"px|{text}|{seg_key}|{intensity:.2f}|{self.tts_scale:.2f}"
+        a = max(-1.0, min(1.0, float(arousal or 0.0) + LEKTOR_MOOD_BIAS.get(mood, 0.0)))
+        a = round(a * 5) / 5  # stopnie co 0,2 — cache się powtarza
+        params = lektor_voice_params(a)
+        pace = lektor_pace(text) * float(self.tts_scale or 1.0) / params["speed"]
+        # suwak Głośność = głośność lektora; przejęcie ją moduluje
+        # volume 0…1 (suwak 0–100 %); 100 % = 1,3× — limiter i tak nie przepuści przesteru
+        gain = 1.3 * max(0.0, min(1.0, float(volume))) * params["gain"]
+        key = f"st4|{self.voice}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{bool(self.ffmpeg)}"
         path = CACHE_DIR / f"{text_key(key)}.wav"
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        if not path.exists() or path.stat().st_size < 64:
-            self._synth_piper_expressive(text, path, intensity)
-        return mood, path
+        if path.exists() and path.stat().st_size >= 64:
+            return path
+        raw = Path(str(path) + ".raw.wav")
+        self._synth(text, raw, pace, self._style(params["blend"]), params["pause"])
+        self._master(raw, path, gain)
+        return path
 
-    def speak(self, text, source=None, volume=1.0):
-        mood, path = self.prepare(text, source=source, volume=volume)
-        self.stop()
-        self._play_file(path)
-        return mood
-
-    def _synth_chatterbox(self, text, path, exaggeration, cfg_weight, volume):
-        import contextlib
-        import os
-
-        import torch
-        import torch.nn.functional as F
-        from chatterbox.mtl_tts import drop_invalid_tokens, punc_norm
-        from chatterbox.models.t3.modules.cond_enc import T3Cond
-
-        os.environ["TQDM_DISABLE"] = "1"
-        max_tokens = int(min(180, max(72, len(text) * 6)))
-
+    def _synth(self, text, path, pace, style, pause):
+        # pace < 1 = szybciej
+        speed = max(0.85, min(1.45, 1.05 / max(0.5, pace)))
         with self.synth_lock:
-            with open(os.devnull, "w") as devnull, contextlib.redirect_stderr(devnull), contextlib.redirect_stdout(devnull):
-                if float(exaggeration) != float(self.model.conds.t3.emotion_adv[0, 0, 0].item()):
-                    cond = self.model.conds.t3
-                    self.model.conds.t3 = T3Cond(
-                        speaker_emb=cond.speaker_emb,
-                        cond_prompt_speech_tokens=cond.cond_prompt_speech_tokens,
-                        emotion_adv=exaggeration * torch.ones(1, 1, 1),
-                    ).to(device=self.model.device)
-                normed = punc_norm(text)
-                text_tokens = self.model.tokenizer.text_to_tokens(normed, language_id="pl").to(self.model.device)
-                text_tokens = torch.cat([text_tokens, text_tokens], dim=0)
-                sot = self.model.t3.hp.start_text_token
-                eot = self.model.t3.hp.stop_text_token
-                text_tokens = F.pad(text_tokens, (1, 0), value=sot)
-                text_tokens = F.pad(text_tokens, (0, 1), value=eot)
-                with torch.inference_mode():
-                    speech_tokens = self.model.t3.inference(
-                        t3_cond=self.model.conds.t3,
-                        text_tokens=text_tokens,
-                        max_new_tokens=max_tokens,
-                        temperature=0.7,
-                        cfg_weight=float(cfg_weight),
-                        repetition_penalty=2.0,
-                        min_p=0.05,
-                        top_p=1.0,
-                    )
-                    speech_tokens = drop_invalid_tokens(speech_tokens[0]).to(self.model.device)
-                    wav, _ = self.model.s3gen.inference(
-                        speech_tokens=speech_tokens,
-                        ref_dict=self.model.conds.gen,
-                    )
-                    wav = wav.squeeze(0).detach().cpu()
-            if wav is None:
-                raise RuntimeError("Chatterbox nic nie wygenerował.")
-            if wav.ndim == 1:
-                wav = wav.unsqueeze(0)
-            gain = max(0.45, min(1.35, float(volume)))
-            audio = (wav.float() * gain).clamp(-1.0, 1.0).numpy()
-            if audio.ndim == 2:
-                audio = audio[0]
-            sr = int(getattr(self.model, "sr", 24000) or 24000)
-            tmp = Path(str(path) + ".part")
-            pcm = (audio * 32767.0).astype("<i2")
-            with wave.open(str(tmp), "wb") as handle:
-                handle.setnchannels(1)
-                handle.setsampwidth(2)
-                handle.setframerate(sr)
-                handle.writeframes(pcm.tobytes())
-            tmp.replace(path)
-        if not path.exists() or path.stat().st_size < 64:
-            raise RuntimeError("Nie udało się zsyntetyzować Chatterbox.")
-
-    def _synth_piper_chunk(self, text, length, volume, noise, noise_scale):
-        from piper import SynthesisConfig
-
-        cfg = SynthesisConfig(
-            length_scale=length,
-            volume=volume,
-            noise_w_scale=noise,
-            noise_scale=noise_scale,
-        )
-        buf = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        buf.close()
-        try:
-            with wave.open(buf.name, "wb") as handle:
-                self.voice.synthesize_wav(text, handle, syn_config=cfg)
-            with wave.open(buf.name, "rb") as handle:
-                sr = handle.getframerate()
-                sw = handle.getsampwidth()
-                ch = handle.getnchannels()
-                frames = handle.readframes(handle.getnframes())
-            return sr, sw, ch, frames
-        finally:
-            try:
-                os.unlink(buf.name)
-            except OSError:
-                pass
-
-    def _synth_piper_expressive(self, text, path, intensity):
-        """Każdy fragment po ! ? … dostaje osobne tempo/głośność + pauzę."""
-        segments = split_emotion_segments(text)
-        if not segments:
-            raise RuntimeError("Brak tekstu do syntezy.")
-        chunks = []
-        sr = sw = ch = None
-        for idx, (piece, mood) in enumerate(segments):
-            voice = mood_voice(mood, intensity=intensity, tts_scale=self.tts_scale)
-            # zostaw interpunkcję w tekście — Piper lepiej trzyma intonację pytania/wykrzyknienia
-            csr, csw, cch, frames = self._synth_piper_chunk(
-                piece,
-                voice["length"],
-                voice["volume"],
-                voice["noise"],
-                voice["noise_scale"],
+            wav, _dur = self.model.synthesize(
+                polish_pronounce(text), voice_style=style, total_steps=SUPERTONIC_STEPS, speed=speed, lang="pl"
             )
-            if sr is None:
-                sr, sw, ch = csr, csw, cch
-            chunks.append(frames)
-            if idx + 1 < len(segments):
-                pause = float(voice["pause"])
-                # przecinek / wielokropek = dłuższa cisza
-                if mood == "soft":
-                    pause = max(pause, 0.20)
-                elif piece.rstrip().endswith((",", ";", "—")):
-                    pause = max(pause, 0.10)
-                n = int(sr * pause)
-                chunks.append(b"\x00" * (n * sw * ch))
-        tmp = Path(str(path) + ".part")
-        with wave.open(str(tmp), "wb") as handle:
-            handle.setnchannels(ch)
-            handle.setsampwidth(sw)
-            handle.setframerate(sr)
-            for block in chunks:
-                handle.writeframes(block)
-        tmp.replace(path)
-        if not path.exists() or path.stat().st_size < 64:
-            raise RuntimeError("Nie udało się zsyntetyzować lektora.")
+        audio = np.asarray(wav, dtype=np.float32).reshape(-1)
+        sr = int(self.model.sample_rate)
+        # przytnij ciszę na brzegach (szybszy start), dodaj pauzę zależną od nastroju
+        # próg niski i zapas na końcu: ciche „dź”, „ś”, „ć” nie mogą zostać ucięte
+        loud = np.flatnonzero(np.abs(audio) > 0.004)
+        if loud.size:
+            audio = audio[max(0, loud[0] - int(sr * 0.04)) : loud[-1] + int(sr * 0.15)]
+        # wyrównaj poziom (RMS części z głosem), bez przekraczania szczytu
+        voiced = audio[np.abs(audio) > 0.01]
+        if voiced.size:
+            rms = float(np.sqrt(np.mean(voiced**2)))
+            peak = float(np.max(np.abs(audio)))
+            audio = audio * min(LEKTOR_TARGET_RMS / max(rms, 1e-4), 0.95 / max(peak, 1e-4))
+        audio = np.concatenate([audio, np.zeros(int(sr * pause), dtype=np.float32)])
+        pcm = (np.clip(audio, -1.0, 1.0) * 32767.0).astype("<i2")
+        with wave.open(str(path), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(int(self.model.sample_rate))
+            handle.writeframes(pcm.tobytes())
 
-    def _play_file(self, path):
+    def _master(self, src, dst, gain):
+        tmp = Path(str(dst) + ".part.wav")
+        try:
+            if self.ffmpeg:
+                result = subprocess.run(
+                    [
+                        self.ffmpeg, "-y", "-loglevel", "error", "-i", str(src),
+                        "-af", f"{LEKTOR_FILTER},volume={gain:.2f},{LEKTOR_LIMITER}",
+                        "-ar", "44100", "-ac", "1", "-c:a", "pcm_s16le", str(tmp),
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=20,
+                )
+                if result.returncode == 0 and tmp.is_file() and tmp.stat().st_size >= 64:
+                    tmp.replace(dst)
+                    return
+            # bez ffmpeg: surowy głos (i tak czytelny)
+            shutil.copyfile(src, dst)
+        finally:
+            for leftover in (src, tmp):
+                try:
+                    leftover.unlink()
+                except OSError:
+                    pass
+
+    def play(self, path):
         with self.lock:
             self.player = subprocess.Popen(
                 ["afplay", str(path)],
@@ -1644,43 +1633,77 @@ class ArgosTranslator:
 
 
 class ParakeetSTT:
+    """Parakeet v3 na MLX. MLX trzyma strumienie obliczeń per wątek, a wagi ładuje leniwie —
+    więc WSZYSTKO (wczytanie, rozgrzewka, transkrypcja) idzie przez jeden stały wątek."""
+
     def __init__(self):
         self.model = None
-        self._cm = None
-        self._stream = None
+        self._jobs = queue.Queue()
+        self._thread = None
+        self._thread_lock = threading.Lock()
+
+    def _call(self, fn, *args):
+        with self._thread_lock:
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(target=self._loop, name="mlx-stt", daemon=True)
+                self._thread.start()
+        done = threading.Event()
+        box = {}
+        self._jobs.put((fn, args, box, done))
+        done.wait()
+        if "error" in box:
+            raise box["error"]
+        return box.get("result")
+
+    def _loop(self):
+        try:
+            import mlx.core as mx
+
+            mx.set_default_device(mx.gpu)
+        except Exception:
+            pass
+        while True:
+            fn, args, box, done = self._jobs.get()
+            try:
+                box["result"] = fn(*args)
+            except Exception as exc:
+                box["error"] = exc
+            finally:
+                done.set()
 
     def ensure(self):
-        if self.model is not None:
-            return
-        from parakeet_mlx import from_pretrained
-
-        self.model = from_pretrained(PARAKEET_MODEL)
+        if self.model is None:
+            self._call(self._ensure)
 
     def warmup(self):
-        self.ensure()
+        self._call(self._warmup)
+
+    def transcribe(self, audio):
+        return self._call(self._transcribe, audio)
+
+    # --- poniżej tylko w wątku mlx-stt ---
+
+    def _ensure(self):
+        if self.model is not None:
+            return
+        import mlx.core as mx
+        from parakeet_mlx import from_pretrained
+
+        model = from_pretrained(PARAKEET_MODEL)
+        # wagi do pamięci od razu — leniwe tablice nie mogą czekać na inny wątek
+        mx.eval(model.parameters())
+        self.model = model
+
+    def _warmup(self):
+        self._ensure()
         import mlx.core as mx
         from parakeet_mlx.audio import get_logmel
 
         dummy = mx.array(np.zeros(int(SAMPLE_RATE * 0.7), dtype=np.float32))
         self.model.generate(get_logmel(dummy, self.model.preprocessor_config))
 
-    def start_stream(self):
-        self.close_stream()
-        self.ensure()
-        self._cm = self.model.transcribe_stream(context_size=(128, 128))
-        self._stream = self._cm.__enter__()
-
-    def close_stream(self):
-        if self._cm is None:
-            return
-        try:
-            self._cm.__exit__(None, None, None)
-        except Exception:
-            pass
-        self._cm = None
-        self._stream = None
-
-    def _norm_audio(self, audio):
+    @staticmethod
+    def _norm_audio(audio):
         if audio.dtype != np.float32:
             audio = audio.astype(np.float32)
         peak = float(np.max(np.abs(audio))) if audio.size else 0.0
@@ -1688,28 +1711,8 @@ class ParakeetSTT:
             audio = audio / peak
         return audio
 
-    def push(self, audio):
-        import mlx.core as mx
-
-        if self._stream is None:
-            self.start_stream()
-        audio = self._norm_audio(audio)
-        if audio.size < int(SAMPLE_RATE * 0.12):
-            return normalize_text(self._stream.result.text)
-        self._stream.add_audio(mx.array(audio))
-        return normalize_text(self._stream.result.text)
-
-    def finish(self, tail):
-        text = ""
-        if tail is not None and tail.size >= int(SAMPLE_RATE * 0.12):
-            text = self.push(tail)
-        elif self._stream is not None:
-            text = normalize_text(self._stream.result.text)
-        self.close_stream()
-        return text
-
-    def transcribe(self, audio):
-        self.ensure()
+    def _transcribe(self, audio):
+        self._ensure()
         import mlx.core as mx
         from parakeet_mlx.audio import get_logmel
 
@@ -1722,15 +1725,182 @@ class ParakeetSTT:
         return normalize_text(getattr(results[0], "text", None) or "")
 
 
+class ProsodyMeter:
+    """Jak mówi postać: głośność, melodia i tempo względem typowej mowy w tej grze → „przejęcie” -1…1."""
+
+    FRAME = 512  # 32 ms przy 16 kHz
+
+    def __init__(self):
+        self.ring = np.zeros(int(SAMPLE_RATE * 3.0), dtype=np.float32)
+        self.ring_n = 0
+        self.ring_t = 0.0
+        self.lock = threading.Lock()
+        # bazowe statystyki mowy w grze (średnia/odchylenie z wygaszaniem)
+        self.stats = {}
+        self.count = 0
+
+    def feed(self, mono):
+        if mono is None or mono.size == 0:
+            return
+        with self.lock:
+            n = min(mono.size, self.ring.size)
+            self.ring = np.roll(self.ring, -n)
+            self.ring[-n:] = mono[-n:]
+            self.ring_n = min(self.ring.size, self.ring_n + n)
+            self.ring_t = time.monotonic()
+
+    def recent(self, window=1.6):
+        """Przejęcie z ostatnich sekund dźwięku gry (dla napisów); None gdy brak świeżej mowy."""
+        with self.lock:
+            if time.monotonic() - self.ring_t > 2.0 or self.ring_n < SAMPLE_RATE * 0.5:
+                return None
+            audio = self.ring[-int(SAMPLE_RATE * window) :].copy()
+        return self.analyze(audio, learn=False)
+
+    def _features(self, audio):
+        frame = self.FRAME
+        n = audio.size // frame
+        if n < 8:
+            return None
+        frames = audio[: n * frame].reshape(n, frame).astype(np.float64)
+        rms = np.sqrt(np.mean(frames**2, axis=1))
+        gate = max(SPEECH_RMS * 0.6, float(np.percentile(rms, 60)) * 0.5)
+        f0s = []
+        voiced = []
+        lo, hi = SAMPLE_RATE // 400, SAMPLE_RATE // 55
+        for i in range(n):
+            if rms[i] < gate:
+                continue
+            x = frames[i] - frames[i].mean()
+            spec = np.fft.rfft(x, 2 * frame)
+            ac = np.fft.irfft(spec * np.conj(spec))[:frame]
+            if ac[0] <= 0:
+                continue
+            k = lo + int(np.argmax(ac[lo:hi]))
+            if ac[k] >= 0.45 * ac[0]:
+                f0s.append(SAMPLE_RATE / k)
+                voiced.append(i)
+        if len(f0s) < 5:
+            return None
+        semis = 12.0 * np.log2(np.asarray(f0s) / 100.0)
+        # mediana z 5 ramek zjada skoki o oktawę; rozrzut odporny (IQR) zamiast odchylenia
+        if semis.size >= 5:
+            pad = np.pad(semis, 2, mode="edge")
+            semis = np.median(np.lib.stride_tricks.sliding_window_view(pad, 5), axis=1)
+        q75, q25 = np.percentile(semis, [75, 25])
+        # tempo: szczyty obwiedni wygładzonej ~160 ms, wyraźnie ponad dolinami
+        env = np.convolve(rms, np.ones(5) / 5.0, mode="same")
+        mid = env[1:-1]
+        peaks = (mid > env[:-2]) & (mid >= env[2:]) & (mid > gate * 1.5)
+        idx = np.flatnonzero(peaks) + 1
+        count = 0
+        last = -99
+        for i in idx:
+            if i - last >= 4:  # min. ~130 ms między sylabami
+                count += 1
+                last = i
+        dur = max(0.3, n * frame / SAMPLE_RATE)
+        return {
+            "energy": float(np.log(np.mean(rms[voiced]) + 1e-6)),
+            "pitch": float(np.median(semis)),
+            "melody": float((q75 - q25) / 1.35),
+            "rate": float(count / dur),
+        }
+
+    # priorytety zanim poznamy grę: melodia/tempo w wartościach bezwzględnych
+    PRIORS = {"melody": (2.2, 1.0), "rate": (3.0, 1.0)}
+    WEIGHTS = {"energy": 0.45, "melody": 0.35, "rate": 0.2, "pitch": 0.2}
+
+    def is_quiet(self, audio):
+        """Cicha wypowiedź (postać mruczy pod nosem, tłum w tle) — względem typowej mowy w tej grze."""
+        audio = np.asarray(audio, dtype=np.float32)
+        feats = self._features(audio)
+        if feats is None:
+            # za mało wyraźnej mowy, żeby ją zmierzyć — traktuj jak tło
+            return True
+        mean, var = self.stats.get("energy", (None, None))
+        if self.count >= 3 and mean is not None:
+            return (feats["energy"] - mean) / max(np.sqrt(var), 0.15) < -1.2
+        return float(np.exp(feats["energy"])) < SPEECH_RMS * 4
+
+    def analyze(self, audio, learn=True):
+        feats = self._features(np.asarray(audio, dtype=np.float32))
+        if feats is None:
+            return None
+        score = 0.0
+        for name, value in feats.items():
+            mean, var = self.stats.get(name, (None, None))
+            if self.count >= 3 and mean is not None:
+                z = (value - mean) / max(np.sqrt(var), 0.15)
+            elif name in self.PRIORS:
+                pm, ps = self.PRIORS[name]
+                z = (value - pm) / ps
+            else:
+                z = 0.0
+            score += self.WEIGHTS[name] * max(-2.5, min(2.5, z))
+        if learn:
+            alpha = 0.5 if self.count < 3 else 0.12
+            for name, value in feats.items():
+                mean, var = self.stats.get(name, (value, 1.0))
+                diff = value - mean
+                mean += alpha * diff
+                var = (1 - alpha) * (var + alpha * diff * diff)
+                self.stats[name] = (mean, max(var, 0.02))
+            self.count += 1
+        return max(-1.0, min(1.0, score / 1.2))
+
+
+class UtteranceCutter:
+    """Dzieli strumień na wypowiedzi po ciszy; zwraca całą wypowiedź (z krótkim zapasem na początku)."""
+
+    def __init__(self):
+        self.preroll = []
+        self.preroll_n = 0
+        self.buf = []
+        self.spoken = 0.0
+        self.quiet = 0.0
+
+    def feed(self, mono):
+        if mono is None or mono.size == 0:
+            return None
+        duration = mono.size / float(SAMPLE_RATE)
+        loud = float(np.sqrt(np.mean(np.square(mono)))) >= SPEECH_RMS
+        if not self.buf:
+            if not loud:
+                self.preroll.append(mono)
+                self.preroll_n += mono.size
+                while self.preroll and self.preroll_n - self.preroll[0].size >= int(SAMPLE_RATE * PREROLL_SEC):
+                    self.preroll_n -= self.preroll.pop(0).size
+                return None
+            self.buf = self.preroll + [mono]
+            self.preroll, self.preroll_n = [], 0
+            self.spoken, self.quiet = duration, 0.0
+            return None
+        # w środku wypowiedzi bierzemy wszystko, także ciszę między słowami
+        self.buf.append(mono)
+        if loud:
+            self.spoken += duration
+            self.quiet = 0.0
+        else:
+            self.quiet += duration
+        total = sum(part.size for part in self.buf) / float(SAMPLE_RATE)
+        if self.quiet >= SILENCE_SEC or total >= MAX_SPEECH_SEC:
+            audio = np.concatenate(self.buf)
+            enough = self.spoken >= MIN_SPEECH_SEC
+            self.buf, self.spoken, self.quiet = [], 0.0, 0.0
+            return audio if enough else None
+        return None
+
+
 class LiveTranscriber:
-    def __init__(self, stt, on_line, on_draft=None, on_error=None, on_ready=None):
+    """Kolejka wypowiedzi: każda trafia do Parakeeta raz, w całości, i daje jedną kwestię."""
+
+    def __init__(self, stt, on_line, on_error=None, on_ready=None):
         self.stt = stt
         self.on_line = on_line
-        self.on_draft = on_draft
         self.on_error = on_error
         self.on_ready = on_ready
         self.jobs = queue.Queue()
-        self.emitted = ""
         self.thread = None
         self.ready = threading.Event()
 
@@ -1738,68 +1908,31 @@ class LiveTranscriber:
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 
-    def feed(self, mono):
-        self.jobs.put(("pcm", mono))
-
-    def flush(self):
-        self.jobs.put(("flush", None))
+    def submit(self, audio):
+        self.jobs.put(audio)
 
     def stop(self):
-        self.jobs.put(("stop", None))
+        self.jobs.put(None)
 
     def _run(self):
-        acc = []
-        samples = 0
-        window = int(SAMPLE_RATE * STREAM_SEC)
         try:
-            import mlx.core as mx
-
-            try:
-                mx.set_default_device(mx.gpu)
-            except Exception:
-                pass
+            # MLX żyje we własnym wątku ParakeetSTT — tu tylko zlecamy zadania
             self.stt.ensure()
             self.stt.warmup()
             self.ready.set()
             if self.on_ready:
                 self.on_ready()
             while True:
-                kind, data = self.jobs.get()
-                if kind == "stop":
-                    self.stt.close_stream()
+                audio = self.jobs.get()
+                if audio is None:
                     return
-                if kind == "pcm":
-                    acc.append(data)
-                    samples += data.size
-                    if samples >= window:
-                        text = self.stt.push(np.concatenate(acc))
-                        acc = []
-                        samples = 0
-                        if self.on_draft and text:
-                            self.on_draft(text)
-                        self._emit(text, force=False)
-                elif kind == "flush":
-                    tail = np.concatenate(acc) if acc else None
-                    acc = []
-                    samples = 0
-                    text = self.stt.finish(tail)
-                    if self.on_draft and text:
-                        self.on_draft(text)
-                    self._emit(text, force=True)
-                    self.emitted = ""
+                text = self.stt.transcribe(audio)
+                if _speakable(text):
+                    self.on_line(text, audio)
         except Exception as exc:
             self.ready.set()
             if self.on_error:
                 self.on_error(str(exc))
-            try:
-                self.stt.close_stream()
-            except Exception:
-                pass
-
-    def _emit(self, text, force):
-        pieces, self.emitted = take_ready(text, self.emitted, force=force)
-        for piece in pieces:
-            self.on_line(piece)
 
 
 DIALOGUE_STARTERS = {
@@ -2168,12 +2301,15 @@ class Engine:
         self.overlay = False
         self.auto_interval = bool(self.cfg.get("autoInterval", True))
         self.interval = max(MIN_INTERVAL, min(0.8, float(self.cfg.get("interval", DEFAULT_INTERVAL))))
-        self.intensity = float(self.cfg.get("intensity", 1.0))
+        # głośność lektora 0–100 %
+        self.lektor_volume = max(0, min(100, int(self.cfg.get("lektorVolume", 80))))
         self.running = False
         self.last_key = ""
         self.last_subtitle = ""
         self.subtitle_until = 0.0
         self.speaking_text = ""
+        self.speaking_full = ""
+        self.last_full = ""
         self._ocr_candidate = ""
         self._ocr_candidate_n = 0
         self._spoken_folds = {}
@@ -2184,41 +2320,136 @@ class Engine:
         self.pending_lock = threading.Lock()
         self.has_pending = threading.Event()
         self._tts_interrupt = threading.Event()
-        self.game = normalize_game(self.cfg.get("game", "rdr2"))
+        # rośnie przy każdym Stop/flush — przerywa czytanie wielozdaniowej kwestii
+        self._speech_gen = 0
+        self.game = normalize_game(self.cfg.get("game", "gta6"))
+        if not self.cfg.get("gta6Added"):
+            # GTA VI to główny cel aplikacji — jednorazowo ustaw ją jako wybraną grę
+            self.game = "gta6"
         self.game_regions = dict(self.cfg.get("games") or {})
         self.lock_region = bool(self.cfg.get("lockRegion", False))
         self.show_region = bool(self.cfg.get("showRegion", False))
         self.dock_corner = str(self.cfg.get("dockCorner") or "tr")
         self.collapsed = bool(self.cfg.get("collapsed", False))
+        # autostart: lektor rusza sam, gdy pojawi się okno PS Remote Play
+        self.auto_start = bool(self.cfg.get("autoStart", True))
+        # źródło: auto (PS Remote Play, a bez niego Chrome z Netflixem/YouTube), ps, chrome
+        source = str(self.cfg.get("source") or "auto").lower()
+        self.source = source if source in SOURCES else "auto"
+        self.source_info = None
+        self._last_ocr_logged = ""
+        self._controls_logged = 0.0
+        # ściszanie gry, gdy mówi lektor (jak prawdziwy lektor w filmie)
+        # o ile ściszyć grę, gdy mówi lektor: 0 % = wcale (dźwięku gry nie przejmujemy), 100 % = cisza
+        self.duck_amount = max(0, min(100, int(self.cfg.get("duckAmount", 70))))
+        self._tap = None
+        self._duck_timer = None
+        self._auto_started = False
+        self._user_stopped = False
         if self.dock_corner not in ("tl", "tr", "bl", "br"):
             self.dock_corner = "tr"
         self._last_win_sync = 0.0
         self.ps_window = None
         self.ocr = AppleVisionOcr()
         self.lektor = MaleLektor()
-        # piper = szybki lektor do napisów; chatterbox opcjonalnie (wolniejszy, więcej emocji)
-        preferred = str(self.cfg.get("ttsEngine") or "piper").strip().lower()
-        if preferred in ("chatterbox", "piper"):
-            self.lektor.preferred = preferred
+        voice = str(self.cfg.get("lektorVoice") or DEFAULT_SUPERTONIC_VOICE).strip().upper()
+        if voice in SUPERTONIC_VOICES:
+            self.lektor.voice = voice
         self.translator = ArgosTranslator()
         self.stt = ParakeetSTT()
+        self.prosody = ProsodyMeter()
+        # kiedy ostatnio gra pokazała napis — wtedy dialogi bierzemy tylko z napisów
+        self._last_subtitle_seen = 0.0
+        self._heard_arousal = {}
         self.line_q = queue.Queue()
         self.transcriber = None
         self.devices = [PS_REMOTE] + [name for _i, name in list_input_devices()]
         self.apply_game(self.game, persist=False, announce=False, reset_lock=False)
         threading.Thread(target=self._tts_loop, daemon=True).start()
         threading.Thread(target=self._warmup_voice, daemon=True).start()
+        threading.Thread(target=self._watch_remote_play, daemon=True).start()
+
+    def _watch_remote_play(self):
+        """Pilnuje okna gry (PS Remote Play / Chrome): autostart, autostop i podpis okna w UI."""
+        missing = 0.0
+        step = 2.0
+        while True:
+            time.sleep(step)
+            try:
+                info = find_source_window(self.source, GAME_PROFILES[self.game].get("prefer", "ps"))
+            except Exception:
+                continue
+            win = info[:4] if info else None
+            kind = info[5] if info else None
+            if (win is None) != (self.ps_window is None) or kind != self._source_kind():
+                self.ps_window = win
+                self.source_info = info
+                self.emit({"event": "state", **self.snapshot()})
+            if win is None:
+                missing += step
+                # po zamknięciu Remote Play ręczny Stop przestaje obowiązywać
+                if missing >= 10.0:
+                    self._user_stopped = False
+                    if self.running and self._auto_started:
+                        self.stop()
+                        self.emit({"event": "status", "text": "Gra zamknięta — lektor czeka."})
+                continue
+            missing = 0.0
+            if self.auto_start and not self.running and not self._user_stopped:
+                self.emit({"event": "status", "text": f"Wykryłem {self._source_label()} — startuję lektora."})
+                self.start(auto=True)
+
+    @property
+    def duck(self):
+        return self.duck_amount > 0
+
+    @property
+    def duck_level(self):
+        return 1.0 - self.duck_amount / 100.0
+
+    def _set_game_gain(self, value):
+        tap = self._tap
+        if tap is not None:
+            tap.set_gain(value)
+
+    def _duck_on(self):
+        if self._duck_timer is not None:
+            self._duck_timer.cancel()
+            self._duck_timer = None
+        if self.duck:
+            self._set_game_gain(self.duck_level)
+
+    def _duck_release(self):
+        # chwila zapasu: kolejna kwestia zaraz po poprzedniej nie „pompuje” głośności gry
+        if self._duck_timer is not None:
+            self._duck_timer.cancel()
+        self._duck_timer = threading.Timer(0.35, lambda: self._set_game_gain(1.0))
+        self._duck_timer.daemon = True
+        self._duck_timer.start()
+
+    def _source_kind(self):
+        return self.source_info[5] if self.source_info else None
+
+    def _source_label(self):
+        if not self.source_info:
+            return "grę"
+        if self.source_info[5] == "chrome":
+            title = self.source_info[6] or ""
+            name = next((v.title() for v in VIDEO_TITLES if v in title.lower()), "")
+            return f"Chrome ({name})" if name else "Chrome"
+        return "PS Remote Play"
+
+    def _band_profile(self):
+        profile = dict(GAME_PROFILES[self.game])
+        if self._source_kind() == "chrome":
+            profile.update(CHROME_BAND)
+        return profile
 
     def _warmup_voice(self):
-        engine = getattr(self.lektor, "preferred", "piper")
-        label = "Piper (szybki)" if engine == "piper" else "Chatterbox (emocje)"
-        self.emit({"event": "status", "text": f"Ładuję lektora {label}…"})
+        self.emit({"event": "status", "text": "Ładuję lektora…"})
         try:
             self.lektor.ensure()
-            if self.lektor.backend == "chatterbox":
-                self.emit({"event": "status", "text": f"Lektor Chatterbox gotowy ({self.lektor.device})."})
-            else:
-                self.emit({"event": "status", "text": "Lektor Piper Jarvis gotowy."})
+            self.emit({"event": "status", "text": f"Lektor gotowy (Supertonic {self.lektor.voice}, GPU)."})
         except Exception as exc:
             self.emit({"event": "status", "text": f"Lektor nie wstaje: {exc}"})
 
@@ -2230,7 +2461,7 @@ class Engine:
             "overlay": self.overlay,
             "interval": self.interval,
             "autoInterval": self.auto_interval,
-            "intensity": self.intensity,
+            "lektorVolume": self.lektor_volume,
             "game": self.game,
             "games": [{"id": key, "label": item["label"]} for key, item in GAME_PROFILES.items()],
             "gameHint": GAME_PROFILES[self.game]["hint"],
@@ -2241,6 +2472,11 @@ class Engine:
             "showRegion": self.show_region,
             "dockCorner": self.dock_corner,
             "collapsed": self.collapsed,
+            "autoStart": self.auto_start,
+            "duckAmount": self.duck_amount,
+            "source": self.source,
+            "sourceKind": self._source_kind(),
+            "sourceLabel": self._source_label() if self.source_info else None,
         }
 
     def persist(self):
@@ -2250,7 +2486,7 @@ class Engine:
                 "overlay": self.overlay,
                 "interval": self.interval,
                 "autoInterval": self.auto_interval,
-                "intensity": self.intensity,
+                "lektorVolume": self.lektor_volume,
                 "mode": self.mode,
                 "device": self.device,
                 "game": self.game,
@@ -2259,7 +2495,11 @@ class Engine:
                 "showRegion": self.show_region,
                 "dockCorner": self.dock_corner,
                 "collapsed": self.collapsed,
-                "ttsEngine": getattr(self.lektor, "preferred", "piper"),
+                "autoStart": self.auto_start,
+                "duckAmount": self.duck_amount,
+                "source": self.source,
+                "gta6Added": True,
+                "lektorVoice": self.lektor.voice,
             }
         )
 
@@ -2283,8 +2523,8 @@ class Engine:
             self.device = data["device"]
         if "overlay" in data:
             self.overlay = bool(data["overlay"])
-        if "intensity" in data:
-            self.intensity = float(data["intensity"])
+        if "lektorVolume" in data:
+            self.lektor_volume = max(0, min(100, int(data["lektorVolume"])))
         if "game" in data:
             self.apply_game(data["game"], persist=False, announce=True, reset_lock=True)
         if "autoInterval" in data:
@@ -2302,6 +2542,27 @@ class Engine:
             self.lock_region = bool(data["lockRegion"])
         if "collapsed" in data:
             self.collapsed = bool(data["collapsed"])
+        if "autoStart" in data:
+            self.auto_start = bool(data["autoStart"])
+        if "duckAmount" in data:
+            was = self.duck
+            self.duck_amount = max(0, min(100, int(data["duckAmount"])))
+            if self.duck != was and self.running:
+                # włączenie/wyłączenie ściszania = inny rodzaj przejęcia dźwięku — podepnij od nowa
+                auto = self._auto_started
+                self.stop()
+                threading.Timer(0.6, lambda: self.start(auto=auto)).start()
+        if data.get("source") in SOURCES and data["source"] != self.source:
+            self.source = data["source"]
+            self.source_info = find_source_window(self.source, GAME_PROFILES[self.game].get("prefer", "ps"))
+            self.ps_window = self.source_info[:4] if self.source_info else None
+            self.lock_region = False
+            self._sync_remote_band(force=True)
+            # inne okno/dźwięk — podepnij od nowa
+            if self.running:
+                auto = self._auto_started
+                self.stop()
+                threading.Timer(0.6, lambda: self.start(auto=auto)).start()
         self.persist()
         self.emit({"event": "state", **self.snapshot()})
 
@@ -2334,9 +2595,9 @@ class Engine:
                 self.emit({"event": "status", "text": f"{profile['label']}: mam zapisany ręczny pasek."})
             elif self.ps_window:
                 _l, _t, width, height = self.ps_window
-                self.emit({"event": "status", "text": f"{profile['label']}: mam okno PS Remote Play {width}×{height}."})
+                self.emit({"event": "status", "text": f"{profile['label']}: mam {self._source_label()} {width}×{height}."})
             else:
-                self.emit({"event": "status", "text": f"{profile['label']}: nie widzę okna PS Remote Play. Odpal Remote Play."})
+                self.emit({"event": "status", "text": f"{profile['label']}: czekam na grę (PS Remote Play albo Netflix w Chrome)."})
 
     def _region_overlap(self, region, win):
         if not region or not win:
@@ -2355,14 +2616,16 @@ class Engine:
         if not force and now - self._last_win_sync < 1.2:
             return self.ps_window is not None or self.region is not None
         self._last_win_sync = now
-        win = find_remote_play_window()
+        info = find_source_window(self.source, GAME_PROFILES[self.game].get("prefer", "ps"))
+        self.source_info = info
+        win = info[:4] if info else None
         self.ps_window = win
         if self.lock_region and self.region:
             # Ręcznie zapisany pasek zostaje — nie kasuj go przez overlap/automatu.
             if win is None or self._region_overlap(self.region, win) >= 0.12:
                 return True
             # okno się przesunęło: dociągnij pasek do dolnego pasa, zachowaj lock
-            band = window_subtitle_band(win, GAME_PROFILES[self.game])
+            band = window_subtitle_band(win, self._band_profile())
             # jeśli stary pasek był wyżej/niżej, zachowaj względną wysokość w oknie
             rx, ry, rw, rh = [int(v) for v in self.region]
             _wx, wy, _ww, wh = [int(v) for v in win]
@@ -2377,7 +2640,7 @@ class Engine:
             return True
         if win is None:
             return self.region is not None
-        band = window_subtitle_band(win, GAME_PROFILES[self.game])
+        band = window_subtitle_band(win, self._band_profile())
         if band != self.region:
             self.region = band
             self.emit({"event": "state", **self.snapshot()})
@@ -2403,20 +2666,24 @@ class Engine:
 
     def test(self):
         if not self._sync_remote_band(force=True) and self.region is None:
-            self.emit({"event": "status", "text": "Nie widzę PS Remote Play. Odpal grę albo zaznacz pasek."})
+            self.emit({"event": "status", "text": "Nie widzę gry. Odpal PS Remote Play albo Netflix w Chrome."})
             return
         self.persist()
         self.emit({"event": "status", "text": "Robię test napisów…"})
         self._preview_and_ocr(speak=True)
 
-    def start(self):
+    def start(self, auto=False):
         if self.running:
             return
+        self._user_stopped = False
+        self._auto_started = auto
         self.running = True
         self.last_key = ""
         self.last_subtitle = ""
         self.subtitle_until = 0.0
         self.speaking_text = ""
+        self.speaking_full = ""
+        self.last_full = ""
         self._ocr_candidate = ""
         self._ocr_candidate_n = 0
         self._spoken_folds = {}
@@ -2424,25 +2691,29 @@ class Engine:
         self._flush_line_q()
         self.emit({"event": "running", "on": True})
         if self.mode == "audio":
-            self.emit({"event": "status", "text": "Podpinam dźwięk PS Remote Play…"})
+            self.emit({"event": "status", "text": f"Podpinam dźwięk: {self._source_label()}…"})
             target = self._audio_loop
         elif self.mode == "ocr":
             if not self._sync_remote_band(force=True) and not self.lock_region:
                 self.running = False
                 self.emit({"event": "running", "on": False})
-                self.emit({"event": "status", "text": "Nie widzę PS Remote Play. Odpal Remote Play albo zaznacz pasek."})
+                self.emit({"event": "status", "text": "Nie widzę gry. Odpal PS Remote Play albo Netflix w Chrome."})
                 return
-            self.emit({"event": "status", "text": "Tylko napisy — pasek z okna PS Remote Play."})
+            self.emit({"event": "status", "text": f"Tylko napisy — {self._source_label()}."})
             target = self._ocr_only_loop
         elif not self._sync_remote_band(force=True) and not self.lock_region:
-            self.emit({"event": "status", "text": "Brak okna PS Remote Play — czytam z dźwięku."})
+            self.emit({"event": "status", "text": "Nie widzę okna gry — czytam z dźwięku."})
             target = self._audio_loop
         else:
-            self.emit({"event": "status", "text": "Napisy z okna PS Remote Play. Dźwięk EN→PL w tle."})
+            self.emit({"event": "status", "text": f"Napisy z {self._source_label()}, dźwięk EN→PL w tle."})
             target = self._hybrid_loop
         threading.Thread(target=target, daemon=True).start()
 
-    def stop(self):
+    def stop(self, user=False):
+        if user:
+            # ręczny Stop: nie odpalaj się sam, dopóki Remote Play nie zniknie
+            self._user_stopped = True
+            self._auto_started = False
         self.running = False
         self._flush_line_q()
         self.speaking_text = ""
@@ -2488,7 +2759,7 @@ class Engine:
         left, top, width, height = [int(v) for v in self.region]
         if width < 8 or height < 8:
             raise RuntimeError("za mały obszar")
-        frame = capture_remote_play_band(left, top, width, height)
+        frame = capture_remote_play_band(left, top, width, height, info=self.source_info)
         if frame is not None:
             return frame
         path = os.path.join(tempfile.gettempdir(), f"gamereader_cap_{time.time_ns()}.png")
@@ -2588,8 +2859,17 @@ class Engine:
         self._prune_spoken()
         self._spoken_folds[fold] = time.monotonic() + float(self.speak_cooldown or 5.5)
 
+    def _offer_tail(self, tail, full):
+        """Dopisana końcówka napisu — przeczytaj ją po bieżącej kwestii (nowsza zastępuje starszą)."""
+        tail = strip_fillers(tail)
+        if not tail:
+            return
+        with self.pending_lock:
+            self.pending = (tail, False, full)
+            self.has_pending.set()
+
     def _offer_line(self, src, translate):
-        src = normalize_text(src)
+        src = strip_fillers(src)
         if not src:
             return
         if same_utterance(src, self.speaking_text):
@@ -2606,11 +2886,11 @@ class Engine:
                     return
                 # nowa kwestia — nie przerywaj bieżącej (Hogwarts OCR miga jak szalony)
                 if self.no_barge_in:
-                    self.pending = (src, translate)
+                    self.pending = (src, translate, src)
                     self.has_pending.set()
                     return
             with self.pending_lock:
-                self.pending = (src, translate)
+                self.pending = (src, translate, src)
                 self.has_pending.set()
             self._tts_interrupt.set()
             self.lektor.stop()
@@ -2619,10 +2899,10 @@ class Engine:
             if self.pending and same_utterance(src, self.pending[0]):
                 return
             if self.pending and extends_utterance(self.pending[0], src):
-                self.pending = (src, translate)
+                self.pending = (src, translate, src)
                 self.has_pending.set()
                 return
-            self.pending = (src, translate)
+            self.pending = (src, translate, src)
             self.has_pending.set()
 
     def _take_pending(self):
@@ -2639,16 +2919,24 @@ class Engine:
             item = self._take_pending()
             if item is None:
                 continue
-            src, translate = item
+            src, translate, full = item
             if same_utterance(src, self.speaking_text) or self._recently_spoken(src):
                 continue
             try:
                 text = self.translator.translate(src) if translate else src
-                text = normalize_text(text)
-                if not text:
+                text = strip_fillers(text)
+                segments = self.lektor.plan(text) if text else []
+                if not segments:
                     continue
-                source = src if translate else None
-                mood, path = self.lektor.prepare(text, source=source, volume=self.intensity)
+                # dźwięk: cała wypowiedź postaci; napisy: ostatnie ~1,6 s tego, co postać mówi
+                arousal = self._heard_arousal.pop(text_key(src), None) if translate else None
+                if arousal is None:
+                    arousal = self.prosody.recent()
+                arousal = float(arousal or 0.0)
+                # pierwsze zdanie od razu — reszta syntezuje się, gdy lektor już mówi
+                path = self.lektor.prepare(
+                    segments[0][0], volume=self.lektor_volume / 100.0, mood=segments[0][1], arousal=arousal
+                )
                 with self.pending_lock:
                     newer = self.pending
                 # przy no_barge_in dokończ obecną syntezę; nowszy zostanie na kolejkę
@@ -2656,35 +2944,63 @@ class Engine:
                     continue
                 self._tts_interrupt.clear()
                 self.speaking_text = src
+                if not translate:
+                    self.speaking_full = full
                 self.last_key = text_key(src)
                 self.last_subtitle = src
-                self.lektor._play_file(path)
-                self.emit({"event": "line", "text": text, "mood": mood, "label": MOODS[mood]["label"]})
-                if self.no_barge_in:
-                    self.lektor.wait()
-                else:
-                    self.lektor.wait(
-                        interrupt_check=lambda: self._tts_interrupt.is_set()
-                        or (
-                            self.pending is not None
-                            and not same_utterance(self.pending[0] if self.pending else "", src)
-                        )
-                    )
+                self.emit({"event": "line", "text": text, "arousal": round(arousal, 2)})
+                self._duck_on()
+                gen = self._speech_gen
+                for idx in range(len(segments)):
+                    self.lektor.play(path)
+                    nxt = None
+                    if idx + 1 < len(segments):
+                        seg, mood = segments[idx + 1]
+                        nxt = self.lektor.prepare(seg, volume=self.lektor_volume / 100.0, mood=mood, arousal=arousal)
+                    if self._wait_segment(src) or gen != self._speech_gen:
+                        break
+                    path = nxt
                 self._mark_spoken(src)
+                if not translate:
+                    self._mark_spoken(full)
+                    self.last_full = full
             except Exception as exc:
                 self.emit({"event": "status", "text": f"Błąd głosu: {exc}"})
             finally:
                 self.speaking_text = ""
+                self.speaking_full = ""
                 self._tts_interrupt.clear()
+                self._duck_release()
 
-    def _on_draft(self, text):
-        self.emit({"event": "heard", "text": text})
+    def _wait_segment(self, src):
+        """Czeka na koniec fragmentu; True = przerwano (Stop albo nowa kwestia przy barge-in)."""
+        if self.no_barge_in:
+            self.lektor.wait(interrupt_check=self._tts_interrupt.is_set)
+        else:
+            self.lektor.wait(
+                interrupt_check=lambda: self._tts_interrupt.is_set()
+                or (self.pending is not None and not same_utterance(self.pending[0] if self.pending else "", src))
+            )
+        return self._tts_interrupt.is_set()
 
-    def _on_heard(self, heard):
+    def _on_heard(self, heard, audio=None):
         if not heard or heard.lower() in JUNK_HEARD:
             return
+        # jak postać to powiedziała — liczone zawsze, żeby miernik uczył się mowy w tej grze
+        quiet = audio is not None and self.prosody.is_quiet(audio)
+        arousal = self.prosody.analyze(audio) if audio is not None else None
+        # gra ma napisy: dialogi czytamy z napisów, a dźwięk bez napisu to gadanie w tle
+        if self.mode != "audio" and time.monotonic() - self._last_subtitle_seen < SUBTITLE_PRIORITY_SEC:
+            return
+        # ciche mruczenie pod nosem i tłum w tle — pomijamy
+        if quiet:
+            return
         self.emit({"event": "heard", "text": heard})
-        if self.speaking_text or time.monotonic() < self.subtitle_until:
+        if arousal is not None:
+            if len(self._heard_arousal) > 64:
+                self._heard_arousal.clear()
+            self._heard_arousal[text_key(strip_fillers(heard))] = arousal
+        if time.monotonic() < self.subtitle_until:
             return
         if text_key(heard) == self.last_key or self._recently_spoken(heard):
             return
@@ -2699,6 +3015,7 @@ class Engine:
         with self.pending_lock:
             self.pending = None
             self.has_pending.clear()
+        self._speech_gen += 1
         self._tts_interrupt.set()
         self.lektor.stop()
         self._tts_interrupt.clear()
@@ -2706,47 +3023,51 @@ class Engine:
     def _on_subtitle(self, src):
         if not usable_ocr(src):
             return
-        if self._recently_spoken(src):
+        if self._source_kind() == "chrome":
+            if player_paused(src):
+                return
+            src = strip_player_ui(src)
+            if not usable_ocr(src) or is_player_ui_text(src):
+                return
+        self._last_subtitle_seen = time.monotonic()
+        now = time.monotonic()
+        base = self.speaking_full or self.last_full
+        # napis dopisał resztę zdania — doczytaj tylko końcówkę, nic nie ucinaj
+        if base and extends_utterance(base, src):
             self.last_subtitle = src
+            self.subtitle_until = now + 2.5
+            tail = utterance_tail(base, src)
+            if _speakable(tail) and not self._recently_spoken(tail):
+                self._offer_tail(tail, src)
             return
-        # OCR dogląda reszty — nie restartuj lektora w środku
-        if extends_utterance(self.speaking_text, src):
+        if (base and same_utterance(src, base)) or self._recently_spoken(src):
             self.last_subtitle = src
+            self.subtitle_until = now + 2.5
             self._ocr_candidate = ""
             self._ocr_candidate_n = 0
             return
-        if extends_utterance(self.last_subtitle, src):
-            self.last_subtitle = src
-            self.last_key = text_key(src)
-            self.subtitle_until = time.monotonic() + 2.0
-            # jeśli nic nie czytamy, dopisz pełniejszą wersję
-            if not self.speaking_text:
-                self._offer_line(src, False)
-            return
-        if same_utterance(src, self.speaking_text) or same_utterance(src, self.last_subtitle):
-            self._ocr_candidate = ""
-            self._ocr_candidate_n = 0
-            return
+        # czekaj, aż napis przestanie się zmieniać (pisanie literka po literce, druga linia)
         need = max(1, int(getattr(self, "confirm_frames", OCR_CONFIRM_FRAMES)))
-        if not same_utterance(src, self._ocr_candidate):
+        if self._ocr_candidate and same_utterance(src, self._ocr_candidate) and not extends_utterance(self._ocr_candidate, src):
+            self._ocr_candidate_n += 1
+        else:
             self._ocr_candidate = src
             self._ocr_candidate_n = 1
-            if need > 1:
-                return
-        else:
-            self._ocr_candidate_n += 1
-            if self._ocr_candidate_n < need:
-                return
+        if self._ocr_candidate_n < need:
+            return
+        src = self._ocr_candidate
         self._ocr_candidate = ""
         self._ocr_candidate_n = 0
         self.last_subtitle = src
         self.last_key = text_key(src)
-        self.subtitle_until = time.monotonic() + 2.5
-        mood = detect_mood(src)
-        self.emit({"event": "status", "text": f"Napisy PL · {MOODS[mood]['label']}."})
-        self._offer_line(src, False)
+        self.subtitle_until = now + 2.5
+        # napisy po angielsku (gra albo Netflix bez PL) — tłumacz automatycznie
+        self._offer_line(src, should_translate(src))
 
     def _ocr_only_loop(self):
+        if self.duck:
+            # bez tłumaczenia z dźwięku — tylko ściszanie gry i emocje z głosu postaci
+            threading.Thread(target=self._audio_loop_ps_remote, kwargs={"transcribe": False}, daemon=True).start()
         try:
             self._ocr_scan_loop()
         finally:
@@ -2764,12 +3085,23 @@ class Engine:
             started = time.time()
             try:
                 self._sync_remote_band()
+                # przeglądarka: przy widocznym pasku sterowania nie czytaj (tytuł filmu to nie dialog)
+                if self._source_kind() == "chrome" and player_controls_visible(self.source_info):
+                    now = time.monotonic()
+                    if now - self._controls_logged > 5.0:
+                        self._controls_logged = now
+                        self.emit({"event": "debug", "text": "pasek sterowania odtwarzacza widoczny — pomijam klatki"})
+                    time.sleep(max(MIN_INTERVAL, self.interval))
+                    continue
                 frame = self._capture_region()
                 last_err = ""
                 digest = hashlib.sha1(frame.tobytes()).hexdigest()[:20]
                 if digest != last_hash or not self.last_subtitle:
                     last_hash = digest
                     src = self.ocr.read(frame)
+                    if src and src != self._last_ocr_logged:
+                        self._last_ocr_logged = src
+                        self.emit({"event": "debug", "text": f"OCR: {src}"})
                     if src:
                         empty_streak = 0
                         self._on_subtitle(src)
@@ -2778,6 +3110,7 @@ class Engine:
                         # nie czyść last_subtitle zbyt szybko — inaczej ta sama kwestia leci w kółko
                         if empty_streak >= 18 and not self.speaking_text:
                             self.last_subtitle = ""
+                            self.last_full = ""
                         if empty_streak >= 40 and self.lock_region and self.game not in self.game_regions:
                             self.lock_region = False
                             self.persist()
@@ -2785,6 +3118,10 @@ class Engine:
                             empty_streak = 0
                             last_hash = ""
                             self.emit({"event": "status", "text": "Ręczny pasek nic nie widzi — wracam do automatu."})
+                elif self._ocr_candidate:
+                    # ta sama klatka = ten sam tekst: potwierdź czekający napis bez ponownego OCR
+                    # (Netflix: wideo czarne przez DRM, więc przy stojącym napisie obraz się nie zmienia)
+                    self._on_subtitle(self._ocr_candidate)
             except Exception as exc:
                 text = str(exc).strip() or "błąd"
                 if "timed out" in text.lower() or "timeout" in text.lower():
@@ -2796,12 +3133,18 @@ class Engine:
             if wait > 0:
                 time.sleep(wait)
 
+    def _warmup_translator(self):
+        try:
+            self.translator.translate("Hello there.")
+        except Exception as exc:
+            self.emit({"event": "status", "text": f"Tłumacz nie wstaje: {exc}"})
+
     def _audio_loop(self):
         self.emit({"event": "status", "text": "Podpinam dźwięk w tle…"})
+        threading.Thread(target=self._warmup_translator, daemon=True).start()
         self.transcriber = LiveTranscriber(
             self.stt,
             self._on_heard,
-            on_draft=self._on_draft,
             on_error=lambda msg: self.emit({"event": "status", "text": f"Błąd STT: {msg}"}),
             on_ready=lambda: self.emit({"event": "status", "text": "Nasłuch EN→PL w tle. Napisy PL mają pierwszeństwo."}),
         )
@@ -2814,14 +3157,18 @@ class Engine:
                 self.transcriber = None
         self.emit({"event": "running", "on": False})
 
-    def _audio_loop_ps_remote(self):
-        tap = GameAudioTap()
-        live = self.transcriber
+    def _audio_loop_ps_remote(self, transcribe=True):
+        tap = GameAudioTap("chrome" if self._source_kind() == "chrome" else "ps", duck=self.duck)
+        live = self.transcriber if transcribe else None
         try:
             tap.start()
-            heard_from = tap.message.replace("LISTENING ", "") if tap.message.startswith("LISTENING") else "PS Remote Play"
-            self.emit({"event": "status", "text": f"Słucham {heard_from} · EN→PL, napisy PL bez tłumaczenia."})
-            state = [False, 0.0, 0.0]
+            self._tap = tap
+            duck_note = " · ściszam grę, gdy mówi lektor" if tap.ducking else ""
+            if self.duck and not tap.ducking:
+                duck_note = " · ściszanie niedostępne"
+            if transcribe:
+                self.emit({"event": "status", "text": f"Słucham {self._source_label()}{duck_note}."})
+            state = UtteranceCutter()
             while self.running:
                 chunk = tap.read(0.03)
                 if chunk is None:
@@ -2829,35 +3176,30 @@ class Engine:
                         tap.sock is not None and not tap.alive
                     )
                     if dead:
-                        raise RuntimeError(tap.message or "PS Remote Play się rozłączył.")
+                        raise RuntimeError(tap.message or "Źródło dźwięku się rozłączyło.")
                     continue
-                state = self._ingest_live(chunk, state, live)
+                self.prosody.feed(chunk)
+                if live is None:
+                    continue
+                audio = state.feed(chunk)
+                if audio is not None:
+                    live.submit(audio)
         except PermissionError as exc:
             self.emit({"event": "perm", "text": str(exc)})
-            self.running = False
+            if transcribe:
+                self.running = False
         except Exception as exc:
             text = str(exc)
             if any(word in text.lower() for word in ("tcc", "zgody", "przechwytywania", "denied", "not permitted")):
                 self.emit({"event": "perm", "text": text})
+            elif transcribe:
+                self.emit({"event": "status", "text": f"Dźwięk gry: {exc}"})
             else:
-                self.emit({"event": "status", "text": f"Błąd PS Remote: {exc}"})
-            self.running = False
+                self.emit({"event": "status", "text": f"Ściszanie gry niedostępne: {exc}"})
+            # w trybie „Napisy” problem z dźwiękiem nie wyłącza czytania napisów
+            if transcribe:
+                self.running = False
         finally:
+            self._tap = None
             tap.stop()
-
-    def _ingest_live(self, mono, state, live):
-        voiced, quiet, spoken = state
-        rms = float(np.sqrt(np.mean(np.square(mono)))) if mono.size else 0.0
-        duration = mono.size / float(SAMPLE_RATE)
-        if rms >= SPEECH_RMS:
-            voiced = True
-            quiet = 0.0
-            spoken += duration
-            live.feed(mono)
-        elif voiced:
-            quiet += duration
-        if voiced and spoken >= MIN_SPEECH_SEC and (quiet >= SILENCE_SEC or spoken >= MAX_SPEECH_SEC):
-            live.flush()
-            return [False, 0.0, 0.0]
-        return [voiced, quiet, spoken]
 

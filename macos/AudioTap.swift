@@ -75,6 +75,8 @@ final class AudioSink: NSObject, SCStreamOutput, SCStreamDelegate {
 func isRemotePlay(_ app: SCRunningApplication) -> Bool {
     let bundle = app.bundleIdentifier.lowercased()
     let name = app.applicationName.lowercased()
+    // systemowe usługi Apple (np. ThemeWidgetControlViewService (PS Remote Play)) to nie gra
+    if bundle.hasPrefix("com.apple.") { return false }
     return bundle.contains("playstation")
         || bundle.contains("remoteplay")
         || name.contains("remote play")

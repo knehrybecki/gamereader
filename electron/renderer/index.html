@@ -3,78 +3,85 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>GameReader</title>
+  <title>LiveDub</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <div class="page">
     <header class="drag">
-      <button id="collapse" class="btn icon" title="Zwiń">−</button>
+      <span id="dot" class="dot" aria-hidden="true"></span>
       <div class="brand">
-        <h1>GameReader</h1>
-        <p class="sub">⋮⋮  tu przeciągnij</p>
+        <h1>Live<span class="accent">Dub</span></h1>
+        <p id="psWin" class="sub">Czekam na grę…</p>
       </div>
       <div id="live" class="pill off">WYŁ</div>
       <button id="startMini" class="btn tiny primary">Czytaj</button>
+      <button id="collapse" class="btn icon" title="Zwiń">−</button>
+      <button id="quit" class="btn icon quit" title="Wyłącz LiveDub" aria-label="Wyłącz LiveDub">⏻</button>
     </header>
 
     <div id="panel" class="panel">
-      <div class="modes">
-        <button id="modeAuto" class="btn primary">Napisy + dźwięk</button>
-        <button id="modeOcr" class="btn">Napisy</button>
-        <button id="modeAudio" class="btn">Dźwięk</button>
+      <div class="seg src" role="group" aria-label="Skąd czytać">
+        <button id="srcAuto" class="seg-btn" title="PS Remote Play, a bez niego Netflix/YouTube w Chrome">Auto</button>
+        <button id="srcPs" class="seg-btn" title="PS Remote Play (PS5)">PS5</button>
+        <button id="srcChrome" class="seg-btn" title="Netflix, YouTube i inne w Chrome — do testów">Chrome</button>
       </div>
 
-      <div class="row">
-        <label class="muted">Gra</label>
-        <select id="game">
-          <option value="rdr2">Red Dead Redemption 2</option>
-          <option value="tlou">The Last of Us</option>
-          <option value="gow">God of War</option>
-          <option value="gta">GTA / Uncharted</option>
-          <option value="souls">Souls / Elden Ring</option>
-          <option value="hogwarts">Hogwarts Legacy</option>
-          <option value="generic">Inna gra</option>
-        </select>
-      </div>
-      <p id="gameHint" class="hint">Napisy biorą się z okna PS Remote Play.</p>
-      <p id="psWin" class="hint">Szukam PS Remote Play…</p>
-
-      <div class="row">
-        <button id="start" class="btn primary grow">Czytaj</button>
-        <button id="test" class="btn">Test</button>
-        <button id="pick" class="btn">Ręcznie</button>
-      </div>
-      <div class="row">
-        <label class="toggle"><input id="showRegion" type="checkbox" /> Pokaż obszar skanu</label>
-        <button id="save" class="btn tiny grow">Zapisz</button>
-      </div>
-
-      <p id="status" class="status">Szukam okna PS Remote Play…</p>
+      <button id="start" class="btn primary big">Czytaj</button>
 
       <section class="card">
-        <div class="card-h">LEKTOR <span id="mood" class="gold">—</span></div>
-        <div id="line" class="line"></div>
-      </section>
-
-      <section class="card slim">
-        <div class="card-h">USŁYSZANE</div>
-        <p id="heard" class="heard">Czekam na dźwięk EN.</p>
+        <div id="line" class="line">Włącz grę w PS Remote Play albo Netflixa w Chrome — LiveDub wystartuje sam.</div>
+        <div class="emo" title="Emocja z głosu postaci"><span id="emoBar"></span></div>
+        <p id="heard" class="heard"></p>
       </section>
 
       <div class="row sliders">
-        <label class="muted">Głośność</label>
-        <input id="intensity" type="range" min="0.6" max="1.6" step="0.1" value="1" />
-        <span id="intensityVal" class="num">1,0</span>
+        <label class="muted" for="lektorVolume">Lektor</label>
+        <input id="lektorVolume" type="range" min="0" max="100" step="5" value="80" />
+        <span id="lektorVolumeVal" class="num">80%</span>
       </div>
       <div class="row sliders">
-        <label class="muted">Skan</label>
-        <input id="interval" type="range" min="0.12" max="0.8" step="0.02" value="0.16" />
-        <span id="intervalVal" class="num">0,16 s</span>
-        <button id="scanAuto" class="btn tiny primary">Auto</button>
+        <label class="muted" for="duckAmount" title="O ile ściszyć grę, gdy mówi lektor (0% = wcale)">Ścisz grę</label>
+        <input id="duckAmount" type="range" min="0" max="100" step="5" value="70" />
+        <span id="duckAmountVal" class="num">70%</span>
       </div>
 
-      <div class="row hidden">
+      <p id="status" class="status">Ładuję lektora…</p>
+
+      <details class="more">
+        <summary>Więcej</summary>
+
+        <div class="seg" role="group" aria-label="Źródło">
+          <button id="modeAuto" class="seg-btn">Napisy + dźwięk</button>
+          <button id="modeOcr" class="seg-btn">Napisy</button>
+          <button id="modeAudio" class="seg-btn">Dźwięk</button>
+        </div>
+
+        <div class="row">
+          <label class="muted" for="game">Gra</label>
+          <select id="game"></select>
+        </div>
+        <p id="gameHint" class="hint"></p>
+
+        <label class="toggle"><input id="autoStart" type="checkbox" checked /> Startuj sam, gdy wykryję grę</label>
+
+        <div class="row">
+          <button id="test" class="btn grow">Test napisu</button>
+          <button id="pick" class="btn grow">Zaznacz obszar</button>
+        </div>
+        <div class="row">
+          <label class="toggle"><input id="showRegion" type="checkbox" /> Pokaż obszar</label>
+          <button id="save" class="btn tiny">Zapisz</button>
+        </div>
+        <div class="row sliders">
+          <label class="muted" for="interval">Skan</label>
+          <input id="interval" type="range" min="0.12" max="0.8" step="0.02" value="0.16" />
+          <span id="intervalVal" class="num">0,16 s</span>
+          <button id="scanAuto" class="btn tiny">Auto</button>
+        </div>
+      </details>
+
+      <div class="hidden">
         <select id="device"></select>
         <input id="overlay" type="checkbox" />
       </div>

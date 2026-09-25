@@ -10,4 +10,5 @@ contextBridge.exposeInMainWorld("gr", {
   releaseFocus: () => ipcRenderer.send("release-focus"),
   openScreen: () => ipcRenderer.send("open-screen"),
   openMic: () => ipcRenderer.send("open-mic"),
+  quit: () => ipcRenderer.send("quit-app"),
 });

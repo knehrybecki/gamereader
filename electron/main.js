@@ -4,7 +4,7 @@ const BrowserWindow = electron.BrowserWindow;
 const ipcMain = electron.ipcMain;
 const shell = electron.shell;
 if (!app) {
-  console.error("GameReader musi startować przez Electron, nie Node.", typeof electron, electron);
+  console.error("LiveDub musi startować przez Electron, nie Node.", typeof electron, electron);
   process.exit(1);
 }
 const { spawn, spawnSync } = require("child_process");
@@ -14,8 +14,8 @@ const os = require("os");
 const path = require("path");
 const { desktopCapturer, session, screen } = electron;
 
-const WIDGET = { width: 340, height: 548 };
-const WIDGET_COLLAPSED = { width: 220, height: 44 };
+const WIDGET = { width: 340, height: 480 };
+const WIDGET_COLLAPSED = { width: 260, height: 44 };
 const CORNERS = ["tl", "tr", "bl", "br"];
 
 let mainWindow = null;
@@ -53,7 +53,7 @@ function helperPath() {
   const candidates = [
     path.join(process.resourcesPath, "GameReaderHelper"),
     path.join(__dirname, "build", "GameReaderHelper"),
-    path.join(HOME, "Applications/GameReader.app/Contents/Resources/GameReaderHelper"),
+    path.join(HOME, "Applications/LiveDub.app/Contents/Resources/GameReaderHelper"),
   ];
   return candidates.find((item) => fs.existsSync(item)) || candidates[0];
 }
@@ -62,7 +62,7 @@ function pythonBin() {
   const bundled = [
     path.join(process.resourcesPath, "..", "Helpers", "Engine.app", "Contents", "MacOS", "Engine"),
     path.join(__dirname, "build", "Engine.app", "Contents", "MacOS", "Engine"),
-    path.join(HOME, "Applications/GameReader.app/Contents/Helpers/Engine.app/Contents/MacOS/Engine"),
+    path.join(HOME, "Applications/LiveDub.app/Contents/Helpers/Engine.app/Contents/MacOS/Engine"),
   ];
   const found = bundled.find((item) => fs.existsSync(item));
   if (found) return found;
@@ -473,7 +473,7 @@ function startWorker() {
   workerProc.stderr.on("data", (chunk) => {
     const text = chunk.toString("utf8").trim();
     const last = text.split("\n").pop() || "";
-    if (last && !/warning:|userwarning|futurewarning|expects mwt|deprecation/i.test(last)) {
+    if (last && !/warning:|userwarning|futurewarning|expects mwt|deprecation|context leak|coreanalytics|onnxruntime|fetching|%\||\[W:/i.test(last)) {
       sendToWindow({ event: "status", text: last });
     }
   });
@@ -616,7 +616,7 @@ function createMain() {
     minHeight: WIDGET_COLLAPSED.height,
     maxWidth: WIDGET.width,
     frame: false,
-    title: "GameReader",
+    title: "LiveDub",
     backgroundColor: "#0B0D12",
     alwaysOnTop: true,
     fullscreenable: false,
@@ -653,7 +653,7 @@ function log(line) {
 
 app.whenReady().then(() => {
   log("ready");
-  app.setName("GameReader");
+  app.setName("LiveDub");
   try {
     startHub();
     createMain();
@@ -709,6 +709,7 @@ ipcMain.on("tap-pcm", (_e, buffer) => {
   }
 });
 ipcMain.on("engine", (_e, msg) => engineSend(msg));
+ipcMain.on("quit-app", () => app.quit());
 ipcMain.on("region-guide", (_e, on) => setRegionGuide(!!on));
 ipcMain.on("set-collapsed", (_e, on) => setCollapsed(!!on, true));
 ipcMain.on("release-focus", () => releaseGameFocus());
