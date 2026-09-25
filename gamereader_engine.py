@@ -1461,6 +1461,7 @@ ENGLISH_NAMES = {
     "Norton": "Norton", "Townley": "Taunli", "Philips": "Filips", "Chop": "Czop", "Brad": "Bred",
     "Niko": "Niko", "Claude": "Klod", "Tommy": "Tomi", "Vercetti": "Wersetti", "Johnson": "Dżonson",
     "Ryder": "Rajder", "Sweet": "Słit", "Cal": "Kel", "Boobie": "Bubi", "Raul": "Raul",
+    "Raymond": "Rejmond", "Ray": "Rej", "Nesto": "Nesto", "Joł": "Joł",
     # imiona
     "Mike": "Majk", "John": "Dżon", "Johnny": "Dżoni", "James": "Dżejms", "Jack": "Dżek", "Jake": "Dżejk",
     "Jim": "Dżim", "Joe": "Dżo", "Joey": "Dżoi", "Josh": "Dżosz", "Joshua": "Dżoszua", "Justin": "Dżastin",
@@ -1536,7 +1537,7 @@ def _spanish_word(match):
 
 
 # polskie końcówki odmiany doklejane do imienia (także po apostrofie: Mike'a, Tony'ego)
-_PL_ENDINGS = "ami|ach|owi|owie|ów|om|em|ie|ego|emu|iego|iemu|a|u|y|i|ii|ę|ą|o|e"
+_PL_ENDINGS = "ami|ach|owi|owie|ów|om|em|zie|ie|ego|emu|iego|iemu|a|u|y|i|ii|ę|ą|o|e"
 
 
 def _name_pattern():
@@ -1589,7 +1590,7 @@ def english_names_pl(text):
 _CONDENSE_FILLERS = (
     "no wiesz", "wiesz co", "to znaczy", "tak naprawdę", "w sumie", "po prostu", "w ogóle", "no więc",
     "posłuchaj", "słuchaj", "wiesz", "stary", "stara", "kurczę", "kurde", "właściwie", "jakby", "no", "ej",
-    "okej", "ok", "hej",
+    "okej", "ok", "hej", "joł", "ej ty",
 )
 _FILLER_ALT = "|".join(re.escape(f) for f in sorted(_CONDENSE_FILLERS, key=len, reverse=True))
 _FILLER_START = re.compile(rf"^(?:(?:{_FILLER_ALT})\b[,!.]?\s+)+", re.IGNORECASE)
@@ -1599,6 +1600,16 @@ _REPEAT = re.compile(r"\b(\w+)(?:[,\s]+\1\b)+", re.IGNORECASE)
 
 
 _ONLY_FILLER = re.compile(rf"^(?:(?:{_FILLER_ALT})\b[\s,]*)+[.!?…]*$", re.IGNORECASE)
+
+
+def _join_parts(srcs):
+    """Kilka napisów → jedna wypowiedź (każdy zamknięty znakiem końca zdania)."""
+    return " ".join(p if re.search(r"[.!?…]$", p) else p + "." for p in srcs)
+
+
+def _only_names(sentence):
+    words = re.findall(r"[\wÀ-ÿ']+", sentence)
+    return bool(words) and all(w in ENGLISH_NAMES or w.lower() in _CONDENSE_FILLERS for w in words)
 
 
 def condense_polish(text, level=1):
@@ -1611,6 +1622,8 @@ def condense_polish(text, level=1):
             continue
         if _ONLY_FILLER.match(sentence):
             continue  # całe zdanie to wtrącenie („Słuchaj.”, „No.”) — wypada
+        if level >= 2 and _only_names(sentence):
+            continue  # samo wołanie („Raymond.”, „Jason!”) — przy dużym spóźnieniu wypada
         kept.append(_condense_sentence(sentence, level))
     out = normalize_text(" ".join(kept))
     if sum(ch.isalpha() for ch in out) < max(4, len(original) // 4):
@@ -1657,6 +1670,162 @@ def lektor_pace(text):
     return 1.0
 
 
+# Odtwarzacz w OSOBNYM procesie z ciągle otwartym strumieniem audio: fragment rusza od razu
+# (bez startu afplay przy każdym fragmencie), a praca silnika (OCR, synteza) nie powoduje trzasków.
+_PLAYER_CODE = r"""
+import sys, threading, queue, wave
+import numpy as np
+import sounddevice as sd
+SR = 44100
+lock = threading.Lock()
+cur = [None, 0, None]
+done = queue.Queue()
+def cb(out, frames, _t, _st):
+    with lock:
+        d = cur[0]
+        if d is None:
+            out.fill(0)
+            return
+        p = cur[1]
+        n = min(frames, d.size - p)
+        out[:n, 0] = d[p:p + n]
+        out[n:, 0] = 0
+        cur[1] = p + n
+        if cur[1] >= d.size:
+            done.put(cur[2])
+            cur[0] = None
+def writer():
+    while True:
+        sys.stdout.write("DONE %s\n" % done.get())
+        sys.stdout.flush()
+threading.Thread(target=writer, daemon=True).start()
+def open_stream():
+    st = sd.OutputStream(samplerate=SR, channels=1, dtype="float32", blocksize=1024, callback=cb)
+    st.start()
+    return st, sd.query_devices(kind="output")["name"]
+stream, device = open_stream()
+sys.stdout.write("READY\n"); sys.stdout.flush()
+for line in sys.stdin:
+    cmd, _, arg = line.strip().partition(" ")
+    if cmd == "PLAY":
+        pid, _, path = arg.partition(" ")
+        try:
+            with wave.open(path, "rb") as w:
+                sr, ch, raw = w.getframerate(), w.getnchannels(), w.readframes(w.getnframes())
+            d = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+            if ch > 1:
+                d = d.reshape(-1, ch).mean(axis=1)
+            if sr != SR:
+                d = np.interp(np.arange(0, d.size, sr / SR), np.arange(d.size), d).astype(np.float32)
+        except Exception:
+            done.put(pid)
+            continue
+        try:  # zmiana wyjścia (np. słuchawki) — otwórz strumień na nowym urządzeniu
+            sd._terminate(); sd._initialize()
+            name = sd.query_devices(kind="output")["name"]
+            if name != device:
+                stream.close()
+                stream, device = open_stream()
+        except Exception:
+            pass
+        with lock:
+            if cur[0] is not None:
+                done.put(cur[2])
+            cur[0], cur[1], cur[2] = d, 0, pid
+    elif cmd == "STOP":
+        with lock:
+            if cur[0] is not None:
+                done.put(cur[2])
+                cur[0] = None
+"""
+
+
+class _PlayHandle:
+    """Udaje Popen (poll/terminate/wait/kill) dla fragmentu grającego w procesie odtwarzacza."""
+
+    def __init__(self, player, pid):
+        self.player, self.pid, self.done = player, pid, threading.Event()
+
+    def poll(self):
+        return 0 if self.done.is_set() or not self.player.alive() else None
+
+    def terminate(self):
+        self.player.send("STOP")
+        self.done.wait(0.3)
+        self.done.set()
+
+    kill = terminate
+
+    def wait(self, timeout=None):
+        self.done.wait(timeout)
+        return 0
+
+
+class PlayerProcess:
+    def __init__(self):
+        self.proc = None
+        self.lock = threading.Lock()
+        self.handles = {}
+        self.counter = 0
+        self.failed = False
+
+    def alive(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def _start(self):
+        self.proc = subprocess.Popen(
+            [sys.executable, "-u", "-c", _PLAYER_CODE],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+        if self.proc.stdout.readline().strip() != "READY":
+            self.proc.kill()
+            raise RuntimeError("odtwarzacz nie wstał")
+        threading.Thread(target=self._read, args=(self.proc,), daemon=True).start()
+
+    def _read(self, proc):
+        for line in proc.stdout:
+            if line.startswith("DONE "):
+                handle = self.handles.pop(line[5:].strip(), None)
+                if handle is not None:
+                    handle.done.set()
+        for handle in list(self.handles.values()):
+            handle.done.set()
+        self.handles.clear()
+
+    def send(self, line):
+        try:
+            self.proc.stdin.write(line + "\n")
+            self.proc.stdin.flush()
+        except Exception:
+            pass
+
+    def play(self, path):
+        with self.lock:
+            if self.failed:
+                return None
+            try:
+                if not self.alive():
+                    self._start()
+            except Exception:
+                self.failed = True  # brak sounddevice/urządzenia — zostaje afplay
+                return None
+            self.counter += 1
+            pid = str(self.counter)
+            handle = _PlayHandle(self, pid)
+            self.handles[pid] = handle
+            self.send(f"PLAY {pid} {path}")
+            return handle
+
+
+def log_timing(line):
+    """Czasy lektora do /tmp/livedub-engine.log — do szukania opóźnień."""
+    try:
+        with open("/tmp/livedub-engine.log", "a", encoding="utf-8") as handle:
+            handle.write(f"{time.strftime('%H:%M:%S')} {line}\n")
+    except OSError:
+        pass
+
+
 class MaleLektor:
     """Lektor filmowy: Supertonic 3 na GPU (CoreML), równy głos, zmasterowany przez ffmpeg."""
 
@@ -1669,6 +1838,7 @@ class MaleLektor:
         self.voice = DEFAULT_SUPERTONIC_VOICE
         self.tts_scale = 1.0
         self.cps1 = LEKTOR_CPS_PRIOR
+        self.out = PlayerProcess()
         self.ffmpeg = which_bin("ffmpeg") or bundled_ffmpeg()
 
     @property
@@ -1693,6 +1863,13 @@ class MaleLektor:
         other = model.get_voice_style(voice_name="M1" if self.voice != "M1" else "M4")
         # rozgrzewka: pierwsza synteza kompiluje grafy CoreML
         model.synthesize("Lektor gotowy.", voice_style=calm, lang="pl")
+        # proces odtwarzacza od razu — pierwsza kwestia nie czeka na jego start
+        with self.lock:
+            try:
+                if not self.out.alive() and not self.out.failed:
+                    self.out._start()
+            except Exception:
+                self.out.failed = True
         self.styles = {"calm": calm, "lively": other}
         self.model = model
 
@@ -1789,8 +1966,21 @@ class MaleLektor:
         if path.exists() and path.stat().st_size >= 64:
             return path
         raw = Path(str(path) + ".raw.wav")
+        t0 = time.monotonic()
         self._synth(text, raw, pace, self._style(params["blend"]), pause)
+        t1 = time.monotonic()
         self._master(raw, path, gain)
+        t2 = time.monotonic()
+        try:
+            with wave.open(str(path), "rb") as handle:
+                seconds = handle.getnframes() / float(handle.getframerate())
+        except Exception:
+            seconds = 0.0
+        self.last_timing = (
+            f"synteza {t1 - t0:.2f}s, ffmpeg {t2 - t1:.2f}s, nagranie {seconds:.2f}s "
+            f"({len(text)} zn. → {len(text) / max(seconds, 0.1):.1f} zn/s)"
+        )
+        log_timing(f"  fragment: {self.last_timing} | {text[:50]!r}")
         return path
 
     def _synth(self, text, path, pace, style, pause):
@@ -1857,6 +2047,11 @@ class MaleLektor:
     def play(self, path, rate=1.0):
         # afplay w osobnym procesie: OCR i synteza w silniku nie przerywają dźwięku (bez trzasków);
         # -r = szybsze odtwarzanie bez zmiany wysokości głosu (nadrabianie zaległości)
+        with self.lock:
+            handle = self.out.play(path)
+            if handle is not None:
+                self.player = handle
+                return
         cmd = ["afplay", str(path)]
         if rate and abs(rate - 1.0) > 0.01:
             cmd = ["afplay", "-r", f"{rate:.2f}", "-q", "1", str(path)]
@@ -2653,6 +2848,8 @@ class Engine:
         self._sub_prev = None
         # o ile sekund lektor spóźnia się za napisami — skracanie tylko przy prawdziwym spóźnieniu
         self._lag = 0.0
+        self._speaking_parts = []
+        self._prefetch_parts = None
         # kwestie przygotowane zawczasu: src → (tekst, fragmenty, przejęcie, wav)
         self._ready = {}
         self._ready_lock = threading.Lock()
@@ -3207,7 +3404,7 @@ class Engine:
         src = strip_fillers(src)
         if not src:
             return
-        if same_utterance(src, self.speaking_text):
+        if self._is_current(src):
             return
         if self._recently_spoken(src):
             return
@@ -3224,12 +3421,37 @@ class Engine:
             return
         self._enqueue((src, translate, src))
 
-    def _take_pending(self):
+    def _waiting_parts(self):
+        """Podgląd tego, co _take_pending weźmie jako następną wypowiedź: (src, translate, części)."""
         with self.pending_lock:
-            item = self._queue.pop(0) if self._queue else None
+            if not self._queue:
+                return None
+            first = self._queue[0]
+            items = [first] + [it for it in self._queue[1:] if it[1] == first[1]]
+        srcs = [it[0] for it in items]
+        return (_join_parts(srcs) if len(srcs) > 1 else srcs[0]), first[1], srcs
+
+    def _take_pending(self):
+        """Weź WSZYSTKO, co czeka, jako jedną wypowiedź (jak lektor w filmie: bez przerw między
+        napisami). Zwraca (src, translate, full, części) albo None."""
+        with self.pending_lock:
             if not self._queue:
                 self.has_pending.clear()
-        return item
+                return None
+            first = self._queue.pop(0)
+            parts = [first]
+            # przygotowane zawczasu: weź dokładnie ten zestaw, dla którego dźwięk już czeka
+            limit = len(self._prefetch_parts) if self._prefetch_parts and self._prefetch_parts[0] == first[0] else 99
+            while len(parts) < limit and self._queue and self._queue[0][1] == first[1]:
+                parts.append(self._queue.pop(0))
+            self._prefetch_parts = None
+            if not self._queue:
+                self.has_pending.clear()
+        if len(parts) == 1:
+            src, translate, full = first
+            return src, translate, full, [src]
+        srcs = [item[0] for item in parts]
+        return _join_parts(srcs), first[1], parts[-1][2], srcs
 
     def _tts_loop(self):
         while True:
@@ -3238,21 +3460,25 @@ class Engine:
             item = self._take_pending()
             if item is None:
                 continue
-            src, translate, full = item
-            if same_utterance(src, self.speaking_text) or self._recently_spoken(src):
+            src, translate, full, parts = item
+            parts = [p for p in parts if not self._recently_spoken(p)]
+            if not parts or same_utterance(src, self.speaking_text):
                 continue
+            if len(parts) == 1:
+                src = parts[0]
             try:
                 # przygotowana w tle, gdy lektor kończył poprzednią kwestię — start bez czekania
                 t0 = time.monotonic()
                 # ta kwestia właśnie syntezuje się na zapas — poczekaj, zamiast robić ją drugi raz
-                with self._spec_done:
-                    self._spec_done.wait_for(lambda: self._spec_busy != src, timeout=4.0)
+                if len(parts) == 1:
+                    with self._spec_done:
+                        self._spec_done.wait_for(lambda: self._spec_busy != src, timeout=4.0)
                 with self._ready_lock:
                     ready = self._ready.pop(src, None)
                 if ready:
                     text, segments, arousal, boost, path = ready
                 else:
-                    text, segments, arousal, boost = self._plan_line(src, translate)
+                    text, segments, arousal, boost = self._plan_line(src, translate, parts)
                     if not segments:
                         continue
                     # pierwsze zdanie od razu — reszta syntezuje się, gdy lektor już mówi
@@ -3266,7 +3492,8 @@ class Engine:
                 if newer and not same_utterance(newer[0], src) and not self.no_barge_in:
                     continue
                 self._tts_interrupt.clear()
-                seen = self._seen_at.pop(src, None)
+                seens = [self._seen_at.pop(p, None) for p in parts]
+                seen = min((t for t in seens if t), default=None)
                 if seen:
                     # spóźnienie: szybko rośnie, powoli maleje (fabuła zwalnia = skracanie się wyłącza)
                     lag = time.monotonic() - seen
@@ -3275,9 +3502,11 @@ class Engine:
                     f"{'GOTOWE' if ready else 'synteza'} {time.monotonic() - t0:.2f}s"
                     + (f", od napisu {time.monotonic() - seen:.2f}s" if seen else "")
                     + f", tempo x{boost:.2f}"
+                    + (f", połączone {len(parts)}" if len(parts) > 1 else "")
                     + f" | {text[:70]!r}"
                 )
                 self.speaking_text = src
+                self._speaking_parts = list(parts)
                 if not translate:
                     self.speaking_full = full
                 self.last_key = text_key(src)
@@ -3286,6 +3515,11 @@ class Engine:
                 self._duck_on()
                 gen = self._speech_gen
                 for idx in range(len(segments)):
+                    if idx and self._queue_len(src) >= 2:
+                        # dwa nowe napisy czekają — reszta starej kwestii jest już nieaktualna,
+                        # lektor przeskakuje do tego, co jest teraz na ekranie (jak w filmie)
+                        self._timing(f"przeskok: pomijam {len(segments) - idx} fragm. starej kwestii")
+                        break
                     self.lektor.play(path)
                     nxt = None
                     if idx + 1 < len(segments):
@@ -3301,6 +3535,8 @@ class Engine:
                         break
                     path = nxt
                 self._mark_spoken(src)
+                for part in parts:
+                    self._mark_spoken(part)
                 if not translate:
                     self._mark_spoken(full)
                     self.last_full = full
@@ -3308,6 +3544,7 @@ class Engine:
                 self.emit({"event": "status", "text": f"Błąd głosu: {exc}"})
             finally:
                 self.speaking_text = ""
+                self._speaking_parts = []
                 self.speaking_full = ""
                 self._tts_interrupt.clear()
                 self._duck_release()
@@ -3321,8 +3558,23 @@ class Engine:
         with self.pending_lock:
             return sum(1 for item in self._queue if not same_utterance(item[0], current))
 
-    def _plan_line(self, src, translate):
-        """Tłumaczenie, podział na zdania i emocja kwestii: (tekst, fragmenty, przejęcie)."""
+    def _is_current(self, src):
+        """Czy ten napis właśnie czyta lektor (także jako część połączonej wypowiedzi)."""
+        return same_utterance(src, self.speaking_text) or any(
+            same_utterance(src, part) for part in getattr(self, "_speaking_parts", ())
+        )
+
+    def _screen_budget(self, parts):
+        """Ile sekund zostało, zanim zniknie najnowszy z napisów (tyle ma lektor na wypowiedź)."""
+        cps = self._sub_cps or SUBTITLE_CPS_DEFAULT
+        now = time.monotonic()
+        natural = sum(len(p) for p in parts) / cps
+        deadline = max(self._seen_at.get(p, now) + len(p) / cps for p in parts)
+        # spóźniony lektor czyta szybciej, ale nie wymagamy cudów (min. 65% naturalnego czasu)
+        return max(0.65 * natural, deadline - now, 1.0)
+
+    def _plan_line(self, src, translate, parts=None):
+        """Tłumaczenie, podział na zdania i emocja kwestii: (tekst, fragmenty, przejęcie, tempo)."""
         text = self.translator.translate(src) if translate else src
         text = strip_fillers(text)
         segments = self.lektor.plan(text) if text else []
@@ -3330,18 +3582,25 @@ class Engine:
         arousal = self._heard_arousal.pop(text_key(src), None) if translate else None
         if arousal is None:
             arousal = self.prosody.recent()
-        # tempo dopasowane do napisów: zmieść się w czasie, w jakim gra zwykle pokazuje taki napis
-        seconds = len(src) / (self._sub_cps or SUBTITLE_CPS_DEFAULT)
-        # skracanie tylko, gdy lektor naprawdę nie nadąża (spóźnia się albo gubi napisy);
-        # przy spokojnej fabule czyta całość
-        waiting = self._queue_len(src)
-        level = 2 if self._lag >= LAG_CONDENSE_STRONG or waiting >= 2 else 1 if self._lag >= LAG_CONDENSE or waiting >= 1 else 0
-        if text and level:
-            short = condense_polish(text, level=level)
-            if short != text:
-                self._timing(f"skrót (spóźnienie {self._lag:.1f}s): {text[:60]!r} -> {short[:60]!r}")
-                text = short
-                segments = self.lektor.plan(text)
+        # jak w filmie: wypowiedź ma się zmieścić, zanim zniknie napis z ekranu.
+        # Kolejno: szybsze tempo → skrót (wtrącenia, powtórzenia) → mocniejszy skrót →
+        # najstarsze zdania wypadają (pierwszeństwo ma to, co jest teraz na ekranie).
+        # Przy spokojnej fabule wszystko się mieści i lektor czyta całość.
+        seconds = self._screen_budget(parts or [src])
+        before = text
+        for level in (1, 2):
+            if not text or self.lektor.overload(text, seconds) <= 1.0:
+                break
+            text = condense_polish(text, level=level)
+        sentences = re.findall(r"[^.!?…]+(?:[.!?…]+|$)", text or "")
+        # całe zdania wypadają tylko przy dużym zatorze (3+ zaległe napisy) — inaczej ginie kontekst
+        while len(parts or []) >= 3 and len(sentences) > 1 and self.lektor.overload(" ".join(sentences), seconds) > 1.15:
+            sentences.pop(0)
+        if len(sentences) > 1 or (sentences and self.lektor.overload(text, seconds) > 1.0):
+            text = normalize_text(" ".join(s.strip() for s in sentences))
+        if text != before:
+            self._timing(f"skrót (na {seconds:.1f}s): {before[:70]!r} -> {text[:70]!r}")
+            segments = self.lektor.plan(text)
         boost = self.lektor.line_boost(text, seconds)
         return text, segments, float(arousal or 0.0), boost
 
@@ -3349,18 +3608,17 @@ class Engine:
         """Gdy lektor czyta ostatni fragment: przetłumacz i zsyntezuj początek następnej kwestii."""
         if not self.no_barge_in:
             return  # bez kolejki nowa kwestia i tak przerywa bieżącą
-        with self.pending_lock:
-            item = self.pending
-        if not item:
+        peek = self._waiting_parts()
+        if not peek:
             return
-        src, translate, _full = item
-        if same_utterance(src, current) or self._recently_spoken(src):
+        src, translate, parts = peek
+        if same_utterance(src, current) or all(self._recently_spoken(p) for p in parts):
             return
         with self._ready_lock:
             if src in self._ready:
                 return
         try:
-            text, segments, arousal, boost = self._plan_line(src, translate)
+            text, segments, arousal, boost = self._plan_line(src, translate, parts)
             if not segments:
                 return
             path = self.lektor.prepare(
@@ -3368,6 +3626,7 @@ class Engine:
                 boost=boost,
             )
             self._store_ready(src, (text, segments, arousal, boost, path))
+            self._prefetch_parts = list(parts)
         except Exception:
             pass
 
@@ -3412,12 +3671,7 @@ class Engine:
                     self._spec_done.notify_all()
 
     def _timing(self, line):
-        """Czasy lektora do /tmp/livedub-engine.log — do szukania opóźnień."""
-        try:
-            with open("/tmp/livedub-engine.log", "a", encoding="utf-8") as handle:
-                handle.write(f"{time.strftime('%H:%M:%S')} {line}\n")
-        except OSError:
-            pass
+        log_timing(line)
 
     def _wait_segment(self, src):
         """Czeka na koniec fragmentu; True = przerwano (Stop albo nowa kwestia przy barge-in)."""
