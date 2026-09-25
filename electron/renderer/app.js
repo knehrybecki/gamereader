@@ -7,7 +7,6 @@ const GAMES = [
 const state = {
   running: false,
   mode: "auto",
-  autoInterval: true,
   expectPick: false,
   regionGuide: false,
   collapsed: false,
@@ -15,19 +14,6 @@ const state = {
 
 function fmtNum(value, digits) {
   return Number(value).toFixed(digits).replace(".", ",");
-}
-
-function setScanLabel(sec, auto) {
-  const el = document.getElementById("intervalVal");
-  if (!el) return;
-  const perSec = sec > 0 ? Math.round(1 / sec) : 0;
-  el.textContent = auto ? `auto ${fmtNum(sec, 2)} s` : `${fmtNum(sec, 2)} s · ${perSec}/s`;
-}
-
-function setAutoScan(on) {
-  state.autoInterval = !!on;
-  const btn = document.getElementById("scanAuto");
-  if (btn) btn.classList.toggle("primary", state.autoInterval);
 }
 
 function fillGames(items, current) {
@@ -95,11 +81,6 @@ function applyState(msg) {
       document.getElementById(key).value = String(msg[key]);
       setPct(key, msg[key]);
     }
-  }
-  if (typeof msg.autoInterval === "boolean") setAutoScan(msg.autoInterval);
-  if (typeof msg.interval === "number") {
-    document.getElementById("interval").value = String(msg.interval);
-    setScanLabel(msg.interval, state.autoInterval);
   }
   if (Array.isArray(msg.games) || msg.game) {
     fillGames(msg.games, msg.game);
@@ -189,15 +170,6 @@ const device = document.getElementById("device");
 if (device) device.onchange = (e) => send({ cmd: "config", device: e.target.value });
 const overlay = document.getElementById("overlay");
 if (overlay) overlay.onchange = (e) => send({ cmd: "config", overlay: e.target.checked });
-document.getElementById("interval").oninput = (e) => {
-  setAutoScan(false);
-  setScanLabel(Number(e.target.value), false);
-};
-document.getElementById("interval").onchange = (e) => {
-  send({ cmd: "config", interval: Number(e.target.value) });
-  window.gr.releaseFocus();
-};
-document.getElementById("scanAuto").onclick = () => send({ cmd: "config", autoInterval: true });
 for (const key of ["lektorVolume", "duckAmount"]) {
   const el = document.getElementById(key);
   el.oninput = (e) => setPct(key, Number(e.target.value));
@@ -218,7 +190,6 @@ document.getElementById("autoStart").onchange = (e) => {
 };
 document.getElementById("game").onchange = (e) => send({ cmd: "config", game: e.target.value });
 fillGames(GAMES, "gta6");
-setScanLabel(0.16, true);
 
 window.gr.onEvent((msg) => {
   if (msg.event === "ready" || msg.event === "state") applyState(msg);

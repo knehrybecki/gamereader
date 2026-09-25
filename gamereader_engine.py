@@ -2582,8 +2582,9 @@ class Engine:
         self.mode = normalize_mode(self.cfg.get("mode", "auto"))
         self.device = self.cfg.get("device") or PS_REMOTE
         self.overlay = False
-        self.auto_interval = bool(self.cfg.get("autoInterval", True))
-        self.interval = max(MIN_INTERVAL, min(0.8, float(self.cfg.get("interval", DEFAULT_INTERVAL))))
+        # skan zawsze według wybranej gry (bez ręcznego suwaka)
+        self.auto_interval = True
+        self.interval = DEFAULT_INTERVAL
         # głośność lektora 0–100 %
         self.lektor_volume = max(0, min(100, int(self.cfg.get("lektorVolume", 80))))
         self.running = False
@@ -2828,13 +2829,6 @@ class Engine:
             self.lektor_volume = max(0, min(100, int(data["lektorVolume"])))
         if "game" in data:
             self.apply_game(data["game"], persist=False, announce=True, reset_lock=True)
-        if "autoInterval" in data:
-            self.auto_interval = bool(data["autoInterval"])
-            if self.auto_interval:
-                self.interval = float(GAME_PROFILES[self.game]["interval"])
-        if "interval" in data:
-            self.auto_interval = False
-            self.interval = max(MIN_INTERVAL, min(0.8, float(data["interval"])))
         if "showRegion" in data:
             self.show_region = bool(data["showRegion"])
         if "dockCorner" in data and data["dockCorner"] in ("tl", "tr", "bl", "br"):
