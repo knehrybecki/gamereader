@@ -657,89 +657,19 @@ _SOFT_WORDS = (
 )
 # 5 kroków dyfuzji: ~30% szybciej niż domyślne 8, wymowa bez zmian
 SUPERTONIC_STEPS = 5
-# Emocje lektora bez zmiany głosu: zawsze ta sama barwa (jeden styl Supertonic), a przejęcie
-# słychać w głośności, lekko w tempie i w pauzach. Tempo jest jedno na całą kwestię.
-# Przejęcie z głosu postaci jest zaszumione — trzy poziomy z martwą strefą zamiast płynnej skali.
-LEKTOR_AROUSAL_DEADZONE = 0.4
+# nastrój z tekstu przesuwa „przejęcie” (z głosu postaci): -1 szept … +1 krzyk
+LEKTOR_MOOD_BIAS = {"calm": 0.0, "lively": 0.35, "soft": -0.4}
 
 
-def lektor_arousal_level(arousal):
-    """Przejęcie -1…1 → -1 (cicho), 0 (normalnie), +1 (głośno/żywo)."""
-    a = float(arousal or 0.0)
-    if a >= LEKTOR_AROUSAL_DEADZONE:
-        return 1
-    if a <= -LEKTOR_AROUSAL_DEADZONE:
-        return -1
-    return 0
-
-
-def lektor_voice_params(level):
-    """Poziom przejęcia → tempo (wąsko, ±4 %) i głośność całej kwestii."""
-    level = max(-1, min(1, int(level)))
+def lektor_voice_params(arousal):
+    """Przejęcie -1…1 → domieszka żywego głosu, tempo, głośność, pauza."""
+    a = max(-1.0, min(1.0, float(arousal)))
     return {
-        "speed": {1: 1.04, 0: 1.0, -1: 0.96}[level],
-        "gain": {1: 1.18, 0: 1.0, -1: 0.82}[level],
+        "blend": max(0.0, min(0.75, 0.1 + 0.65 * a)) if a > -0.15 else 0.0,
+        "speed": 1.0 + (0.14 * a if a > 0 else 0.10 * a),
+        "gain": 1.0 + (0.32 * a if a > 0 else 0.35 * a),
+        "pause": max(0.05, 0.10 - 0.06 * a),
     }
-
-
-# Tempo nadąża za postacią: jak mówi szybko, lektor też przyspiesza (jedno tempo na kwestię).
-LEKTOR_BASE_SPEED = 1.05  # parametr speed Supertonic przy zwykłej kwestii
-LEKTOR_MAX_SPEED = 1.5  # szybciej robi się niewyraźnie
-LEKTOR_CPS_PRIOR = 14.0  # znaki/s lektora przy speed=1,0 — potem uczy się z własnych syntez
-# lektor może kończyć trochę po postaci (polski tekst jest dłuższy od angielskiego)
-LEKTOR_TARGET_SLACK = 1.12
-LEKTOR_TARGET_EXTRA = 0.35
-
-
-def speech_duration(audio):
-    """Czas samej mowy w wypowiedzi (bez ciszy na brzegach), w sekundach; None gdy za mało mowy."""
-    audio = np.asarray(audio, dtype=np.float32).reshape(-1)
-    frame = 512
-    n = audio.size // frame
-    if n < 4:
-        return None
-    rms = np.sqrt(np.mean(audio[: n * frame].reshape(n, frame) ** 2, axis=1))
-    gate = max(SPEECH_RMS, float(np.max(rms)) * 0.12)
-    loud = np.flatnonzero(rms >= gate)
-    if loud.size < 3:
-        return None
-    return (loud[-1] - loud[0] + 1) * frame / float(SAMPLE_RATE)
-
-
-# nastrój zdania (z interpunkcji i słów) — tylko głośność, tempo zostaje równe
-LEKTOR_MOOD_GAIN = {"lively": 1.1, "calm": 1.0, "question": 1.0, "soft": 0.88}
-
-
-def lektor_pause(text):
-    """Pauza po fragmencie wg interpunkcji na jego końcu (sekundy)."""
-    end = (text or "").rstrip().rstrip("\"'„”«»)]")
-    if end.endswith(("…", "...")):
-        return 0.5
-    if end.endswith(("!", "?")):
-        return 0.32
-    if end.endswith("."):
-        return 0.3
-    if end.endswith((";", ":", "—", "–", "-")):
-        return 0.22
-    if end.endswith(","):
-        return 0.14
-    return 0.3
-
-
-def lektor_tts_text(text):
-    """Tekst dla syntezy: zdanie zawsze zamknięte znakiem — opadająca intonacja na kropce,
-    pytająca na „?”, mocniejsza na „!”. Wielokropek w środku = przecinek, na końcu = kropka
-    (Supertonic potrafi go przeczytać dziwnie); pauzę po nim i tak dokłada lektor."""
-    text = normalize_text(text or "")
-    text = re.sub(r"\s*(?:…|\.{2,})[\s…. ]*$", ".", text)
-    text = re.sub(r"\s*(?:…|\.{2,})(?!\.)\s*", ", ", text)
-    # spacja przed znakiem to błąd OCR; liczb („3,5”, „10:30”) nie ruszamy
-    text = re.sub(r"\s+([,.!?;:])(?=\s|$)", r"\1", text)
-    text = re.sub(r"^[,;:.\s]+", "", text)
-    core = text.rstrip("\"'„”«»)] ")
-    if core and core[-1] not in ".!?,;:":
-        text = core + "."
-    return text
 
 
 def _sentence_mood(sentence):
@@ -748,14 +678,7 @@ def _sentence_mood(sentence):
         return "lively"
     if "…" in sentence or "..." in sentence or any(w in low for w in _SOFT_WORDS):
         return "soft"
-    if sentence.rstrip().endswith("?"):
-        return "question"
     return "calm"
-
-
-# maks. długość fragmentu (znaki): pierwszy krótki = szybki start, reszta syntezuje się w trakcie
-LEKTOR_FIRST_SEGMENT = 60
-LEKTOR_SEGMENT = 110
 
 
 def lektor_segments(text):
@@ -767,13 +690,10 @@ def lektor_segments(text):
             continue
         mood = _sentence_mood(piece)
         # krótkie zdanie („Jedź, jedź!”, „Hej!”) samo brzmi sztucznie — sklej z sąsiednim;
-        # wygrywa mocniejszy nastrój (ożywiony > cichy > spokojny). Fragmenty trzymamy krótkie,
-        # zwłaszcza pierwszy: lektor rusza dopiero, gdy pierwszy fragment jest zsyntezowany.
-        limit = LEKTOR_FIRST_SEGMENT if len(groups) == 1 else LEKTOR_SEGMENT
-        short = len(piece) < 25 or (groups and len(groups[-1][0]) < 25)
-        if groups and len(groups[-1][0]) + len(piece) < limit and (short or groups[-1][1] == mood):
+        # wygrywa mocniejszy nastrój (ożywiony > cichy > spokojny)
+        if groups and (groups[-1][1] == mood or len(piece) < 25 or len(groups[-1][0]) < 25):
             prev_text, prev_mood = groups[-1]
-            rank = {"lively": 3, "soft": 2, "question": 1, "calm": 0}
+            rank = {"lively": 2, "soft": 1, "calm": 0}
             mood = max(mood, prev_mood, key=rank.get)
             groups[-1] = (f"{prev_text} {piece}", mood)
         else:
@@ -782,8 +702,8 @@ def lektor_segments(text):
         return [(normalize_text(text), "calm")] if _speakable(text) else []
     # długi początek tnij na przecinku — lektor rusza szybciej, reszta syntezuje się w trakcie
     head, mood = groups[0]
-    if len(head) > LEKTOR_FIRST_SEGMENT:
-        cut = head.find(", ", 20)
+    if len(head) > 70:
+        cut = head.find(", ", 25)
         if 0 < cut < len(head) - 20:
             groups[0:1] = [(head[: cut + 1], mood), (head[cut + 2 :], mood)]
     return groups
@@ -1511,7 +1431,7 @@ def polish_pronounce(text):
 
 
 def lektor_pace(text):
-    """Długie kwestie lekko szybciej, żeby lektor nadążał za napisami (liczone dla całej kwestii)."""
+    """Długie kwestie lekko szybciej, żeby lektor nadążał za napisami."""
     n = len(text or "")
     if n > 220:
         return 0.88
@@ -1528,10 +1448,9 @@ class MaleLektor:
         self.lock = threading.Lock()
         self.synth_lock = threading.Lock()
         self.model = None
-        self.style = None
+        self.styles = {}
         self.voice = DEFAULT_SUPERTONIC_VOICE
         self.tts_scale = 1.0
-        self.cps1 = LEKTOR_CPS_PRIOR
         self.ffmpeg = which_bin("ffmpeg")
 
     @property
@@ -1551,10 +1470,12 @@ class MaleLektor:
         model = TTS(auto_download=True)
         if self.voice not in SUPERTONIC_VOICES:
             self.voice = DEFAULT_SUPERTONIC_VOICE
-        # jeden styl na zawsze — mieszanie z innym głosem zmieniało barwę lektora w trakcie
-        self.style = model.get_voice_style(voice_name=self.voice)
+        calm = model.get_voice_style(voice_name=self.voice)
+        # M1 = żywszy głos; domieszka daje więcej melodii przy tej samej barwie lektora
+        other = model.get_voice_style(voice_name="M1" if self.voice != "M1" else "M4")
         # rozgrzewka: pierwsza synteza kompiluje grafy CoreML
-        model.synthesize("Lektor gotowy.", voice_style=self.style, lang="pl")
+        model.synthesize("Lektor gotowy.", voice_style=calm, lang="pl")
+        self.styles = {"calm": calm, "lively": other}
         self.model = model
 
     def stop(self):
@@ -1584,80 +1505,51 @@ class MaleLektor:
     def plan(self, text):
         return lektor_segments(text)
 
-    def line_params(self, text, arousal=0.0, target=None, catchup=0.0, segments=None):
-        """Tempo i głośność wspólne dla całej kwestii — fragmenty nie skaczą szybko/wolno.
+    def _style(self, blend):
+        if blend <= 0.0:
+            return self.styles["calm"]
+        calm, other = self.styles["calm"], self.styles["lively"]
+        style = copy.copy(calm)
+        style.ttl = (1 - blend) * calm.ttl + blend * other.ttl
+        style.dp = (1 - blend) * calm.dp + blend * other.dp
+        return style
 
-        target: ile sekund mówiła postać (lektor ma się zmieścić mniej więcej w tym czasie),
-        catchup: 0…0,3 — lektor jest w tyle za napisami, trzeba nadrobić."""
-        level = lektor_arousal_level(arousal)
-        params = lektor_voice_params(level)
-        pace = lektor_pace(text) * float(self.tts_scale or 1.0) / params["speed"]
-        speed = LEKTOR_BASE_SPEED / max(0.5, pace)
-        pause_scale = 1.0
-        if target:
-            pieces = [seg for seg, _mood in segments] if segments else [text]
-            pauses = sum(lektor_pause(seg) for seg in pieces[:-1])
-            room = float(target) * LEKTOR_TARGET_SLACK + LEKTOR_TARGET_EXTRA - pauses * 0.6
-            needed = len(text) / (self.cps1 * max(0.6, room))
-            if needed > speed:
-                speed = needed
-                pause_scale = 0.6
-        catchup = max(0.0, min(0.3, float(catchup or 0.0)))
-        if catchup > 0:
-            speed *= 1.0 + catchup
-            pause_scale = min(pause_scale, 1.0 - catchup)
-        speed = max(0.9, min(LEKTOR_MAX_SPEED, speed))
-        # stopnie co 0,05 — cache się powtarza, a różnica i tak niesłyszalna
-        return {
-            "level": level,
-            "speed": round(speed * 20) / 20,
-            "gain": params["gain"],
-            "pause_scale": round(pause_scale, 1),
-        }
-
-    def prepare(self, text, volume=1.0, mood="calm", line=None):
+    def prepare(self, text, volume=1.0, mood="calm", arousal=0.0):
         """Zwraca ścieżkę gotowego WAV (z cache, jeśli ta sama kwestia już była).
 
-        line: wynik line_params() dla całej kwestii, mood: nastrój zdania (z interpunkcji)."""
+        arousal: jak mówi postać (-1 szept … +1 krzyk), mood: wskazówka z tekstu."""
         self.ensure()
-        line = line or self.line_params(text)
-        speed = line["speed"]
-        # suwak Głośność = głośność lektora; przejęcie i nastrój zdania ją modulują
+        a = max(-1.0, min(1.0, float(arousal or 0.0) + LEKTOR_MOOD_BIAS.get(mood, 0.0)))
+        a = round(a * 5) / 5  # stopnie co 0,2 — cache się powtarza
+        params = lektor_voice_params(a)
+        pace = lektor_pace(text) * float(self.tts_scale or 1.0) / params["speed"]
+        # suwak Głośność = głośność lektora; przejęcie ją moduluje
         # volume 0…1 (suwak 0–100 %); 100 % = 1,3× — limiter i tak nie przepuści przesteru
-        gain = 1.3 * max(0.0, min(1.0, float(volume))) * line["gain"] * LEKTOR_MOOD_GAIN.get(mood, 1.0)
-        pause = lektor_pause(text) * line.get("pause_scale", 1.0)
-        key = f"st6|{self.voice}|{text}|{speed:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
+        gain = 1.3 * max(0.0, min(1.0, float(volume))) * params["gain"]
+        key = f"st4|{self.voice}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{bool(self.ffmpeg)}"
         path = CACHE_DIR / f"{text_key(key)}.wav"
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         if path.exists() and path.stat().st_size >= 64:
             return path
         raw = Path(str(path) + ".raw.wav")
-        self._synth(text, raw, speed, pause)
+        self._synth(text, raw, pace, self._style(params["blend"]), params["pause"])
         self._master(raw, path, gain)
         return path
 
-    def _synth(self, text, path, speed, pause):
+    def _synth(self, text, path, pace, style, pause):
+        # pace < 1 = szybciej
+        speed = max(0.85, min(1.45, 1.05 / max(0.5, pace)))
         with self.synth_lock:
             wav, _dur = self.model.synthesize(
-                polish_pronounce(lektor_tts_text(text)),
-                voice_style=self.style,
-                total_steps=SUPERTONIC_STEPS,
-                speed=speed,
-                lang="pl",
+                polish_pronounce(text), voice_style=style, total_steps=SUPERTONIC_STEPS, speed=speed, lang="pl"
             )
         audio = np.asarray(wav, dtype=np.float32).reshape(-1)
         sr = int(self.model.sample_rate)
-        # przytnij ciszę na brzegach (szybszy start), dodaj pauzę wg interpunkcji
+        # przytnij ciszę na brzegach (szybszy start), dodaj pauzę zależną od nastroju
         # próg niski i zapas na końcu: ciche „dź”, „ś”, „ć” nie mogą zostać ucięte
         loud = np.flatnonzero(np.abs(audio) > 0.004)
         if loud.size:
             audio = audio[max(0, loud[0] - int(sr * 0.04)) : loud[-1] + int(sr * 0.15)]
-            # ucz się, jak szybko czyta lektor (znaki/s przy speed=1) — do liczenia tempa kwestii
-            spoken = (loud[-1] - loud[0]) / float(sr)
-            if spoken > 0.6 and len(text) >= 12:
-                cps1 = len(text) / spoken / max(0.5, speed)
-                if 6.0 < cps1 < 30.0:
-                    self.cps1 += 0.25 * (cps1 - self.cps1)
         # wyrównaj poziom (RMS części z głosem), bez przekraczania szczytu
         voiced = audio[np.abs(audio) > 0.01]
         if voiced.size:
@@ -2469,12 +2361,6 @@ class Engine:
         # kiedy ostatnio gra pokazała napis — wtedy dialogi bierzemy tylko z napisów
         self._last_subtitle_seen = 0.0
         self._heard_arousal = {}
-        # tempo postaci: ile trwała dana wypowiedź (z dźwięku) i średnie znaki/s w tej grze
-        self._heard_dur = {}
-        self._src_cps = None
-        self._sub_prev = None
-        # 0…0,3: lektor nie nadąża za napisami — kolejne kwestie czyta szybciej
-        self._catchup = 0.0
         self.line_q = queue.Queue()
         self.transcriber = None
         self.devices = [PS_REMOTE] + [name for _i, name in list_input_devices()]
@@ -2995,9 +2881,6 @@ class Engine:
             if extends_utterance(self.speaking_text, src):
                 self.last_subtitle = src
                 return
-            if not (self.pending and same_utterance(src, self.pending[0])):
-                # nowa kwestia, a lektor jeszcze czyta poprzednią — jest w tyle, przyspiesz
-                self._catchup = min(0.3, self._catchup + 0.1)
             with self.pending_lock:
                 if self.pending and same_utterance(src, self.pending[0]):
                     return
@@ -3029,14 +2912,6 @@ class Engine:
             self.has_pending.clear()
         return item
 
-    def _timing(self, line):
-        """Czasy lektora do /tmp/livedub-engine.log — do szukania opóźnień."""
-        try:
-            with open("/tmp/livedub-engine.log", "a", encoding="utf-8") as handle:
-                handle.write(f"{time.strftime('%H:%M:%S')} {line}\n")
-        except OSError:
-            pass
-
     def _tts_loop(self):
         while True:
             if not self.has_pending.wait(timeout=0.15):
@@ -3048,9 +2923,7 @@ class Engine:
             if same_utterance(src, self.speaking_text) or self._recently_spoken(src):
                 continue
             try:
-                t0 = time.monotonic()
                 text = self.translator.translate(src) if translate else src
-                t_tr = time.monotonic() - t0
                 text = strip_fillers(text)
                 segments = self.lektor.plan(text) if text else []
                 if not segments:
@@ -3060,28 +2933,9 @@ class Engine:
                 if arousal is None:
                     arousal = self.prosody.recent()
                 arousal = float(arousal or 0.0)
-                # tempo i przejęcie liczone raz dla całej kwestii: zmieść się w czasie,
-                # w którym mówiła postać, a jak lektor jest w tyle — nadrób
-                with self.pending_lock:
-                    behind = self.pending is not None
-                if not behind:
-                    self._catchup = max(0.0, self._catchup - 0.08)
-                line = self.lektor.line_params(
-                    text,
-                    arousal,
-                    target=self._line_target(src, translate),
-                    catchup=self._catchup + (0.1 if behind else 0.0),
-                    segments=segments,
-                )
                 # pierwsze zdanie od razu — reszta syntezuje się, gdy lektor już mówi
-                t1 = time.monotonic()
                 path = self.lektor.prepare(
-                    segments[0][0], volume=self.lektor_volume / 100.0, mood=segments[0][1], line=line
-                )
-                self._timing(
-                    f"tlum={t_tr:.2f}s synteza1={time.monotonic() - t1:.2f}s fragmenty={len(segments)} "
-                    f"dl1={len(segments[0][0])} tempo={line['speed']:.2f} {'EN' if translate else 'PL'} | "
-                    f"{src[:60]!r} -> {segments[0][0][:60]!r}"
+                    segments[0][0], volume=self.lektor_volume / 100.0, mood=segments[0][1], arousal=arousal
                 )
                 with self.pending_lock:
                     newer = self.pending
@@ -3102,7 +2956,7 @@ class Engine:
                     nxt = None
                     if idx + 1 < len(segments):
                         seg, mood = segments[idx + 1]
-                        nxt = self.lektor.prepare(seg, volume=self.lektor_volume / 100.0, mood=mood, line=line)
+                        nxt = self.lektor.prepare(seg, volume=self.lektor_volume / 100.0, mood=mood, arousal=arousal)
                     if self._wait_segment(src) or gen != self._speech_gen:
                         break
                     path = nxt
@@ -3135,14 +2989,6 @@ class Engine:
         # jak postać to powiedziała — liczone zawsze, żeby miernik uczył się mowy w tej grze
         quiet = audio is not None and self.prosody.is_quiet(audio)
         arousal = self.prosody.analyze(audio) if audio is not None else None
-        # tempo postaci (ile trwała wypowiedź) — uczy się także, gdy dialogi idą z napisów
-        dur = speech_duration(audio) if audio is not None and not quiet else None
-        if dur:
-            clean = strip_fillers(heard)
-            if len(self._heard_dur) > 64:
-                self._heard_dur.clear()
-            self._heard_dur[text_key(clean)] = dur
-            self._learn_src_cps(len(clean), dur)
         # gra ma napisy: dialogi czytamy z napisów, a dźwięk bez napisu to gadanie w tle
         if self.mode != "audio" and time.monotonic() - self._last_subtitle_seen < SUBTITLE_PRIORITY_SEC:
             return
@@ -3173,27 +3019,6 @@ class Engine:
         self._tts_interrupt.set()
         self.lektor.stop()
         self._tts_interrupt.clear()
-
-    def _learn_src_cps(self, chars, seconds):
-        """Średnie tempo mówienia postaci (znaki/s tekstu źródłowego)."""
-        if chars < 10 or seconds < 0.5:
-            return
-        cps = chars / seconds
-        if not 5.0 <= cps <= 35.0:
-            return
-        # szybkie dialogi łapiemy od razu, zwalnianie jest łagodniejsze
-        alpha = 0.5 if self._src_cps is None or cps > self._src_cps else 0.2
-        self._src_cps = cps if self._src_cps is None else self._src_cps + alpha * (cps - self._src_cps)
-
-    def _line_target(self, src, translate):
-        """Ile sekund lektor ma na kwestię: czas wypowiedzi postaci albo szacunek z tempa gry."""
-        dur = self._heard_dur.pop(text_key(src), None) if translate else None
-        if dur:
-            return dur
-        # napisy: z typowego tempa mówienia w tej grze
-        if self._src_cps:
-            return len(src) / self._src_cps
-        return None
 
     def _on_subtitle(self, src):
         if not usable_ocr(src):
@@ -3236,14 +3061,6 @@ class Engine:
         self.last_subtitle = src
         self.last_key = text_key(src)
         self.subtitle_until = now + 2.5
-        # tempo dialogu z napisów: poprzedni napis wisiał tyle, ile postać go mówiła
-        # (przy ciągłej rozmowie — po dłuższej przerwie to już nie jest tempo mowy)
-        if self._sub_prev:
-            prev_t, prev_len = self._sub_prev
-            gap = now - prev_t
-            if 0.5 < gap < 6.0:
-                self._learn_src_cps(prev_len, gap)
-        self._sub_prev = (now, len(src))
         # napisy po angielsku (gra albo Netflix bez PL) — tłumacz automatycznie
         self._offer_line(src, should_translate(src))
 
