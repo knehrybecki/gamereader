@@ -657,19 +657,61 @@ _SOFT_WORDS = (
 )
 # 5 kroków dyfuzji: ~30% szybciej niż domyślne 8, wymowa bez zmian
 SUPERTONIC_STEPS = 5
-# nastrój z tekstu przesuwa „przejęcie” (z głosu postaci): -1 szept … +1 krzyk
-LEKTOR_MOOD_BIAS = {"calm": 0.0, "lively": 0.35, "soft": -0.4}
+# Emocje lektora bez zmiany głosu: zawsze ta sama barwa (jeden styl Supertonic), a przejęcie
+# słychać w głośności, lekko w tempie i w pauzach. Tempo jest jedno na całą kwestię.
+# Przejęcie z głosu postaci jest zaszumione — trzy poziomy z martwą strefą zamiast płynnej skali.
+LEKTOR_AROUSAL_DEADZONE = 0.4
 
 
-def lektor_voice_params(arousal):
-    """Przejęcie -1…1 → domieszka żywego głosu, tempo, głośność, pauza."""
-    a = max(-1.0, min(1.0, float(arousal)))
+def lektor_arousal_level(arousal):
+    """Przejęcie -1…1 → -1 (cicho), 0 (normalnie), +1 (głośno/żywo)."""
+    a = float(arousal or 0.0)
+    if a >= LEKTOR_AROUSAL_DEADZONE:
+        return 1
+    if a <= -LEKTOR_AROUSAL_DEADZONE:
+        return -1
+    return 0
+
+
+def lektor_voice_params(level):
+    """Poziom przejęcia → tempo (wąsko, ±4 %) i głośność całej kwestii."""
+    level = max(-1, min(1, int(level)))
     return {
-        "blend": max(0.0, min(0.75, 0.1 + 0.65 * a)) if a > -0.15 else 0.0,
-        "speed": 1.0 + (0.14 * a if a > 0 else 0.10 * a),
-        "gain": 1.0 + (0.32 * a if a > 0 else 0.35 * a),
-        "pause": max(0.05, 0.10 - 0.06 * a),
+        "speed": {1: 1.04, 0: 1.0, -1: 0.96}[level],
+        "gain": {1: 1.18, 0: 1.0, -1: 0.82}[level],
     }
+
+
+# nastrój zdania (z interpunkcji i słów) — tylko głośność, tempo zostaje równe
+LEKTOR_MOOD_GAIN = {"lively": 1.1, "calm": 1.0, "question": 1.0, "soft": 0.88}
+
+
+def lektor_pause(text):
+    """Pauza po fragmencie wg interpunkcji na jego końcu (sekundy)."""
+    end = (text or "").rstrip().rstrip("\"'„”«»)]")
+    if end.endswith(("…", "...")):
+        return 0.5
+    if end.endswith(("!", "?")):
+        return 0.32
+    if end.endswith("."):
+        return 0.3
+    if end.endswith((";", ":", "—", "–", "-")):
+        return 0.22
+    if end.endswith(","):
+        return 0.14
+    return 0.3
+
+
+def lektor_tts_text(text):
+    """Tekst dla syntezy: wielokropek jako „...”, zdanie zawsze zamknięte znakiem — daje opadającą
+    intonację na kropce, pytającą na „?” i mocniejszą na „!”."""
+    text = normalize_text(text or "").replace("…", "...")
+    text = re.sub(r"\s+([,.!?;:])", r"\1", text)
+    text = re.sub(r"([,;:])(?=\S)", r"\1 ", text)
+    core = text.rstrip("\"'„”«»)] ")
+    if core and core[-1] not in ".!?,;:":
+        text = core + "."
+    return text
 
 
 def _sentence_mood(sentence):
@@ -678,6 +720,8 @@ def _sentence_mood(sentence):
         return "lively"
     if "…" in sentence or "..." in sentence or any(w in low for w in _SOFT_WORDS):
         return "soft"
+    if sentence.rstrip().endswith("?"):
+        return "question"
     return "calm"
 
 
@@ -693,7 +737,7 @@ def lektor_segments(text):
         # wygrywa mocniejszy nastrój (ożywiony > cichy > spokojny)
         if groups and (groups[-1][1] == mood or len(piece) < 25 or len(groups[-1][0]) < 25):
             prev_text, prev_mood = groups[-1]
-            rank = {"lively": 2, "soft": 1, "calm": 0}
+            rank = {"lively": 3, "soft": 2, "question": 1, "calm": 0}
             mood = max(mood, prev_mood, key=rank.get)
             groups[-1] = (f"{prev_text} {piece}", mood)
         else:
@@ -1431,7 +1475,7 @@ def polish_pronounce(text):
 
 
 def lektor_pace(text):
-    """Długie kwestie lekko szybciej, żeby lektor nadążał za napisami."""
+    """Długie kwestie lekko szybciej, żeby lektor nadążał za napisami (liczone dla całej kwestii)."""
     n = len(text or "")
     if n > 220:
         return 0.88
@@ -1448,7 +1492,7 @@ class MaleLektor:
         self.lock = threading.Lock()
         self.synth_lock = threading.Lock()
         self.model = None
-        self.styles = {}
+        self.style = None
         self.voice = DEFAULT_SUPERTONIC_VOICE
         self.tts_scale = 1.0
         self.ffmpeg = which_bin("ffmpeg")
@@ -1470,12 +1514,10 @@ class MaleLektor:
         model = TTS(auto_download=True)
         if self.voice not in SUPERTONIC_VOICES:
             self.voice = DEFAULT_SUPERTONIC_VOICE
-        calm = model.get_voice_style(voice_name=self.voice)
-        # M1 = żywszy głos; domieszka daje więcej melodii przy tej samej barwie lektora
-        other = model.get_voice_style(voice_name="M1" if self.voice != "M1" else "M4")
+        # jeden styl na zawsze — mieszanie z innym głosem zmieniało barwę lektora w trakcie
+        self.style = model.get_voice_style(voice_name=self.voice)
         # rozgrzewka: pierwsza synteza kompiluje grafy CoreML
-        model.synthesize("Lektor gotowy.", voice_style=calm, lang="pl")
-        self.styles = {"calm": calm, "lively": other}
+        model.synthesize("Lektor gotowy.", voice_style=self.style, lang="pl")
         self.model = model
 
     def stop(self):
@@ -1505,47 +1547,48 @@ class MaleLektor:
     def plan(self, text):
         return lektor_segments(text)
 
-    def _style(self, blend):
-        if blend <= 0.0:
-            return self.styles["calm"]
-        calm, other = self.styles["calm"], self.styles["lively"]
-        style = copy.copy(calm)
-        style.ttl = (1 - blend) * calm.ttl + blend * other.ttl
-        style.dp = (1 - blend) * calm.dp + blend * other.dp
-        return style
+    def line_params(self, text, arousal=0.0):
+        """Tempo i głośność wspólne dla całej kwestii — fragmenty nie skaczą szybko/wolno."""
+        level = lektor_arousal_level(arousal)
+        params = lektor_voice_params(level)
+        pace = lektor_pace(text) * float(self.tts_scale or 1.0) / params["speed"]
+        return {"level": level, "pace": round(pace, 2), "gain": params["gain"]}
 
-    def prepare(self, text, volume=1.0, mood="calm", arousal=0.0):
+    def prepare(self, text, volume=1.0, mood="calm", line=None):
         """Zwraca ścieżkę gotowego WAV (z cache, jeśli ta sama kwestia już była).
 
-        arousal: jak mówi postać (-1 szept … +1 krzyk), mood: wskazówka z tekstu."""
+        line: wynik line_params() dla całej kwestii, mood: nastrój zdania (z interpunkcji)."""
         self.ensure()
-        a = max(-1.0, min(1.0, float(arousal or 0.0) + LEKTOR_MOOD_BIAS.get(mood, 0.0)))
-        a = round(a * 5) / 5  # stopnie co 0,2 — cache się powtarza
-        params = lektor_voice_params(a)
-        pace = lektor_pace(text) * float(self.tts_scale or 1.0) / params["speed"]
-        # suwak Głośność = głośność lektora; przejęcie ją moduluje
+        line = line or self.line_params(text)
+        pace = line["pace"]
+        # suwak Głośność = głośność lektora; przejęcie i nastrój zdania ją modulują
         # volume 0…1 (suwak 0–100 %); 100 % = 1,3× — limiter i tak nie przepuści przesteru
-        gain = 1.3 * max(0.0, min(1.0, float(volume))) * params["gain"]
-        key = f"st4|{self.voice}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{bool(self.ffmpeg)}"
+        gain = 1.3 * max(0.0, min(1.0, float(volume))) * line["gain"] * LEKTOR_MOOD_GAIN.get(mood, 1.0)
+        pause = lektor_pause(text)
+        key = f"st5|{self.voice}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
         path = CACHE_DIR / f"{text_key(key)}.wav"
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         if path.exists() and path.stat().st_size >= 64:
             return path
         raw = Path(str(path) + ".raw.wav")
-        self._synth(text, raw, pace, self._style(params["blend"]), params["pause"])
+        self._synth(text, raw, pace, pause)
         self._master(raw, path, gain)
         return path
 
-    def _synth(self, text, path, pace, style, pause):
+    def _synth(self, text, path, pace, pause):
         # pace < 1 = szybciej
-        speed = max(0.85, min(1.45, 1.05 / max(0.5, pace)))
+        speed = max(0.9, min(1.25, 1.05 / max(0.5, pace)))
         with self.synth_lock:
             wav, _dur = self.model.synthesize(
-                polish_pronounce(text), voice_style=style, total_steps=SUPERTONIC_STEPS, speed=speed, lang="pl"
+                polish_pronounce(lektor_tts_text(text)),
+                voice_style=self.style,
+                total_steps=SUPERTONIC_STEPS,
+                speed=speed,
+                lang="pl",
             )
         audio = np.asarray(wav, dtype=np.float32).reshape(-1)
         sr = int(self.model.sample_rate)
-        # przytnij ciszę na brzegach (szybszy start), dodaj pauzę zależną od nastroju
+        # przytnij ciszę na brzegach (szybszy start), dodaj pauzę wg interpunkcji
         # próg niski i zapas na końcu: ciche „dź”, „ś”, „ć” nie mogą zostać ucięte
         loud = np.flatnonzero(np.abs(audio) > 0.004)
         if loud.size:
@@ -2933,9 +2976,11 @@ class Engine:
                 if arousal is None:
                     arousal = self.prosody.recent()
                 arousal = float(arousal or 0.0)
+                # tempo i przejęcie liczone raz dla całej kwestii
+                line = self.lektor.line_params(text, arousal)
                 # pierwsze zdanie od razu — reszta syntezuje się, gdy lektor już mówi
                 path = self.lektor.prepare(
-                    segments[0][0], volume=self.lektor_volume / 100.0, mood=segments[0][1], arousal=arousal
+                    segments[0][0], volume=self.lektor_volume / 100.0, mood=segments[0][1], line=line
                 )
                 with self.pending_lock:
                     newer = self.pending
@@ -2956,7 +3001,7 @@ class Engine:
                     nxt = None
                     if idx + 1 < len(segments):
                         seg, mood = segments[idx + 1]
-                        nxt = self.lektor.prepare(seg, volume=self.lektor_volume / 100.0, mood=mood, arousal=arousal)
+                        nxt = self.lektor.prepare(seg, volume=self.lektor_volume / 100.0, mood=mood, line=line)
                     if self._wait_segment(src) or gen != self._speech_gen:
                         break
                     path = nxt
