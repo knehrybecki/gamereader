@@ -482,6 +482,8 @@ MAX_SPEECH_SEC = 8.0
 PREROLL_SEC = 0.25
 # po ostatnim napisie przez tyle sekund dźwięk nie jest tłumaczony (napisy = główne dialogi)
 SUBTITLE_PRIORITY_SEC = 30.0
+# zanim silnik nauczy się tempa napisów w grze: typowy napis ~16 znaków na sekundę
+SUBTITLE_CPS_DEFAULT = 16.0
 # polskie napisy + angielski dźwięk: przez tyle sekund od ostatniego polskiego napisu dźwięku
 # nie rozpoznajemy ani nie tłumaczymy — służy tylko do emocji i ściszania gry
 PL_SUBS_HOLD_SEC = 600.0
@@ -690,9 +692,8 @@ SUPERTONIC_STEPS = 5
 # tempo lektora (parametr speed Supertonic przy zwykłej kwestii; było 1,05)
 LEKTOR_SPEED = 1.15
 LEKTOR_MAX_SPEED = 1.45
-# gdy w kolejce czeka już następny napis: gotowe fragmenty grają szybciej od razu
-# (afplay -r zachowuje wysokość głosu), a pauzy prawie znikają
-LEKTOR_CATCHUP_RATE = 1.15
+# gdy w kolejce czeka już następny napis: kolejne fragmenty syntezują się szybciej, bez pauz
+LEKTOR_CATCHUP_RATE = 1.12
 # tempo dopasowane do napisów: lektor ma się zmieścić w czasie, w którym napis wisi na ekranie
 LEKTOR_CPS_PRIOR = 15.0  # znaki/s lektora przy speed=1 — potem uczy się z własnych syntez
 # nastrój z napisu (słowa i interpunkcja): tylko głośność i pauza — bez domieszki innego głosu
@@ -1718,12 +1719,23 @@ class MaleLektor:
         return lektor_segments(text)
 
     def line_boost(self, text, seconds):
-        """Ile szybciej przeczytać kwestię, żeby zmieścić się w `seconds` (czas napisu na ekranie)."""
-        if not seconds or seconds <= 0:
-            return 1.0
-        base = LEKTOR_SPEED / max(0.5, lektor_pace(text) * float(self.tts_scale or 1.0))
-        needed = len(text) / (self.cps1 * max(0.6, seconds * 0.92))
-        boost = max(1.0, min(LEKTOR_MAX_SPEED / base, needed / base))
+        """Przyspieszenie CAŁEJ kwestii (jedno dla wszystkich jej fragmentów).
+
+        Dłuższa kwestia = szybciej (napis i tak zniknie), a do tego lektor ma się zmieścić
+        w `seconds` — czasie, przez jaki gra pokazuje taki napis."""
+        base = LEKTOR_SPEED / max(0.5, float(self.tts_scale or 1.0))
+        n = len(text or "")
+        if n <= 60:
+            by_length = 1.0
+        elif n <= 120:
+            by_length = 1.0 + 0.08 * (n - 60) / 60
+        elif n <= 200:
+            by_length = 1.08 + 0.08 * (n - 120) / 80
+        else:
+            by_length = 1.16
+        needed = len(text) / (self.cps1 * max(0.6, seconds * 0.92)) / base if seconds and seconds > 0 else 1.0
+        boost = max(1.0, by_length, min(LEKTOR_MAX_SPEED / base, needed))
+        boost = min(boost, LEKTOR_MAX_SPEED / base)
         return round(boost * 20) / 20  # stopnie co 0,05 — cache się powtarza
 
     def _style(self, blend):
@@ -1735,7 +1747,7 @@ class MaleLektor:
         style.dp = (1 - blend) * calm.dp + blend * other.dp
         return style
 
-    def prepare(self, text, volume=1.0, mood="calm", arousal=0.0, hurry=False, boost=1.0):
+    def prepare(self, text, volume=1.0, mood="calm", arousal=0.0, hurry=False, boost=None):
         """Zwraca ścieżkę gotowego WAV (z cache, jeśli ta sama kwestia już była).
 
         arousal: jak mówi postać (-1 szept … +1 krzyk), mood: wskazówka z tekstu."""
@@ -1743,7 +1755,9 @@ class MaleLektor:
         a = max(-1.0, min(1.0, float(arousal or 0.0)))
         a = round(a * 5) / 5  # stopnie co 0,2 — cache się powtarza
         params = lektor_voice_params(a)
-        pace = lektor_pace(text) * float(self.tts_scale or 1.0) / params["speed"]
+        # tempo całej kwestii przychodzi z line_boost(); bez niego — z długości tego fragmentu
+        length_pace = lektor_pace(text) if boost is None else 1.0
+        pace = length_pace * float(self.tts_scale or 1.0) / params["speed"]
         # interpunkcja napisu: „!” głośniej, „…” ciszej, pauza po „?” i „…”
         punct_gain, punct_pause = lektor_punctuation(text, mood)
         pause = max(params["pause"], punct_pause)
@@ -1752,11 +1766,13 @@ class MaleLektor:
         # boost: tempo całej kwestii dopasowane do tego, jak długo napis wisi na ekranie
         pace /= max(1.0, float(boost or 1.0))
         if hurry:
+            # następny napis już czeka: ten fragment syntezuje się szybciej i bez pauzy
+            pace /= LEKTOR_CATCHUP_RATE
             pause = min(pause, 0.03)
         # suwak Głośność = głośność lektora; przejęcie i interpunkcja ją modulują
         # volume 0…1 (suwak 0–100 %); 100 % = 1,3× — limiter i tak nie przepuści przesteru
         gain = 1.3 * max(0.0, min(1.0, float(volume))) * params["gain"] * punct_gain
-        key = f"st7|{self.voice}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
+        key = f"st8|{self.voice}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
         path = CACHE_DIR / f"{text_key(key)}.wav"
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         if path.exists() and path.stat().st_size >= 64:
@@ -1779,8 +1795,8 @@ class MaleLektor:
         # próg niski i zapas na końcu: ciche „dź”, „ś”, „ć” nie mogą zostać ucięte
         loud = np.flatnonzero(np.abs(audio) > 0.004)
         if loud.size:
-            # zapas na końcu 0,1 s: ciche głoski zostają, a przerwa między fragmentami jest krótsza
-            audio = audio[max(0, loud[0] - int(sr * 0.03)) : loud[-1] + int(sr * 0.1)]
+            # zapas na końcu 0,15 s: ciche końcówki („-ś”, „-ć”, „-dź”) nie mogą zostać ucięte
+            audio = audio[max(0, loud[0] - int(sr * 0.04)) : loud[-1] + int(sr * 0.15)]
             # ucz się, ile znaków na sekundę czyta lektor (przy speed=1) — do dopasowania tempa
             spoken = (loud[-1] - loud[0]) / float(sr)
             if spoken > 0.6 and len(text) >= 12:
@@ -3253,8 +3269,7 @@ class Engine:
                 self._duck_on()
                 gen = self._speech_gen
                 for idx in range(len(segments)):
-                    # następny napis już czeka — ten fragment gra szybciej od razu, bez nowej syntezy
-                    self.lektor.play(path, rate=LEKTOR_CATCHUP_RATE if self._queue_waiting(src) else 1.0)
+                    self.lektor.play(path)
                     nxt = None
                     if idx + 1 < len(segments):
                         seg, mood = segments[idx + 1]
@@ -3296,7 +3311,7 @@ class Engine:
         if arousal is None:
             arousal = self.prosody.recent()
         # tempo dopasowane do napisów: zmieść się w czasie, w jakim gra zwykle pokazuje taki napis
-        boost = self.lektor.line_boost(text, len(src) / self._sub_cps) if self._sub_cps else 1.0
+        boost = self.lektor.line_boost(text, len(src) / (self._sub_cps or SUBTITLE_CPS_DEFAULT))
         return text, segments, float(arousal or 0.0), boost
 
     def _prefetch_pending(self, current):
