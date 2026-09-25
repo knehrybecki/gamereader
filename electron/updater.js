@@ -105,6 +105,8 @@ async function checkForUpdates({ log, status }) {
   spawnSync("/usr/bin/xattr", ["-cr", fresh]);
   spawnSync("/usr/bin/codesign", ["--force", "--sign", "-", path.join(fresh, "Contents", "Resources", "GameReaderHelper")]);
   spawnSync("/usr/bin/codesign", ["--force", "--sign", "-", path.join(fresh, "Contents", "Helpers", "Engine.app")]);
+  // podmieniony silnik psuje podpis całości — bez tego macOS uzna aplikację za uszkodzoną
+  run("/usr/bin/codesign", ["--force", "--deep", "--sign", "-", fresh]);
 
   // podmiana po zamknięciu tej instancji; stara wersja zostaje jako kopia, gdyby coś poszło źle
   const script = path.join(work, "swap.sh");

@@ -67,6 +67,10 @@ codesign --force --sign - "$ENGINE_BUILD" || true
 if [ "${LIVEDUB_NO_INSTALL:-}" = "1" ]; then
   xattr -cr "$APP" || true
   codesign --force --sign - "$APP/Contents/Resources/GameReaderHelper" || true
+  # podpis całej aplikacji na końcu — po dopisaniu silnika i helpera stary podpis Electrona
+  # już się nie zgadza i macOS pokazuje „aplikacja jest uszkodzona”
+  codesign --force --deep --sign - "$APP"
+  codesign --verify --deep --strict "$APP"
   rm -f "$ELEC/dist/LiveDub-mac-arm64.zip"
   ditto -c -k --keepParent "$APP" "$ELEC/dist/LiveDub-mac-arm64.zip"
   printf 'ZIP_OK %s\n' "$ELEC/dist/LiveDub-mac-arm64.zip"
@@ -84,5 +88,6 @@ done
 cp -R "$APP" "$HOME/Applications/LiveDub.app"
 xattr -cr "$HOME/Applications/LiveDub.app" || true
 codesign --force --sign - "$HOME/Applications/LiveDub.app/Contents/Resources/GameReaderHelper" || true
+codesign --force --deep --sign - "$HOME/Applications/LiveDub.app" || true
 "$LSREG" -f "$HOME/Applications/LiveDub.app"
 printf 'APP_OK %s\n' "$HOME/Applications/LiveDub.app"
