@@ -1,0 +1,17 @@
+# Python
+gr/
+__pycache__/
+*.pyc
+*.ses
+
+# Electron
+electron/node_modules/
+electron/dist/
+electron/build/Engine.app/
+electron/build/GameReaderHelper
+
+# Build outputs / binaries
+dist/
+macos/GameReader
+macos/AudioTap
+.DS_Store

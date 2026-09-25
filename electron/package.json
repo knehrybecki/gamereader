@@ -1,0 +1,58 @@
+{
+  "name": "gamereader",
+  "productName": "GameReader",
+  "version": "1.2.0",
+  "description": "Lektor napisów i dźwięku z PS Remote Play",
+  "main": "main.js",
+  "author": "Kamil",
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --mac dir --arm64"
+  },
+  "build": {
+    "appId": "pl.kamil.gamereader.mac",
+    "productName": "GameReader",
+    "files": [
+      "main.js",
+      "preload.js",
+      "tap-preload.js",
+      "renderer/**"
+    ],
+    "extraResources": [
+      {
+        "from": "../gamereader_engine.py",
+        "to": "engine/gamereader_engine.py"
+      },
+      {
+        "from": "../gamereader_worker.py",
+        "to": "engine/gamereader_worker.py"
+      }
+    ],
+    "mac": {
+      "target": [
+        "dir"
+      ],
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "category": "public.app-category.utilities",
+      "extendInfo": {
+        "CFBundleDisplayName": "GameReader",
+        "CFBundleName": "GameReader",
+        "LSMinimumSystemVersion": "14.0",
+        "NSHighResolutionCapable": true,
+        "NSScreenCaptureUsageDescription": "GameReader musi widzieć fragment ekranu z napisami, żeby je odczytać i przeczytać na głos.",
+        "NSMicrophoneUsageDescription": "GameReader może użyć mikrofonu tylko jako zapasu. Docelowo słucha dźwięku PS Remote Play.",
+        "NSAudioCaptureUsageDescription": "GameReader nasłuchuje dźwięku z PS Remote Play, żeby tłumaczyć dialogi na żywo i czytać je lektorem."
+      }
+    },
+    "directories": {
+      "output": "dist"
+    }
+  },
+  "devDependencies": {
+    "electron": "^37.3.0",
+    "electron-builder": "^26.0.12"
+  }
+}

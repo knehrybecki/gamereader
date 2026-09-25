@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+<body>
+<script>
+(async () => {
+  try {
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: 1, width: 16, height: 16 },
+      audio: true,
+    });
+    const audioTracks = stream.getAudioTracks();
+    if (!audioTracks.length) {
+      window.tap.fail("brak ścieżki audio z ekranu");
+      return;
+    }
+    stream.getVideoTracks().forEach((track) => track.stop());
+    const ac = new AudioContext();
+    const src = ac.createMediaStreamSource(new MediaStream(audioTracks));
+    const proc = ac.createScriptProcessor(4096, 1, 1);
+    const hop = Math.max(1, Math.round(ac.sampleRate / 16000));
+    proc.onaudioprocess = (ev) => {
+      const input = ev.inputBuffer.getChannelData(0);
+      const n = Math.floor(input.length / hop);
+      if (n <= 0) return;
+      const out = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        let sum = 0;
+        const base = i * hop;
+        for (let k = 0; k < hop; k++) sum += input[base + k];
+        out[i] = sum / hop;
+      }
+      window.tap.pcm(out.buffer);
+    };
+    const mute = ac.createGain();
+    mute.gain.value = 0;
+    src.connect(proc);
+    proc.connect(mute);
+    mute.connect(ac.destination);
+    const label = audioTracks[0].label || "system-audio";
+    window.tap.ready(ac.sampleRate, label);
+  } catch (err) {
+    window.tap.fail(err && err.message ? err.message : err);
+  }
+})();
+</script>
+</body>
+</html>

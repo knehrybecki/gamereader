@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>pl</string>
+    <key>CFBundleDisplayName</key>
+    <string>GameReader</string>
+    <key>CFBundleExecutable</key>
+    <string>GameReader</string>
+    <key>CFBundleSignature</key>
+    <string>????</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIdentifier</key>
+    <string>pl.kamil.gamereader.mac</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>GameReader</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>4</string>
+    <key>CFBundleSupportedPlatforms</key>
+    <array>
+        <string>MacOSX</string>
+    </array>
+    <key>LSArchitecturePriority</key>
+    <array>
+        <string>arm64</string>
+    </array>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>GameReader musi widzieć fragment ekranu z napisami, żeby je odczytać i przeczytać na głos.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>GameReader może użyć mikrofonu tylko jako zapasu. Docelowo słucha dźwięku PS Remote Play.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>GameReader nasłuchuje dźwięku z PS Remote Play, żeby tłumaczyć dialogi na żywo i czytać je lektorem.</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>GameReader zapisuje tylko tymczasowy zrzut wybranego paska napisów.</string>
+</dict>
+</plist>
