@@ -466,6 +466,9 @@ MAX_SPEECH_SEC = 8.0
 PREROLL_SEC = 0.25
 # po ostatnim napisie przez tyle sekund dźwięk nie jest tłumaczony (napisy = główne dialogi)
 SUBTITLE_PRIORITY_SEC = 30.0
+# polskie napisy + angielski dźwięk: przez tyle sekund od ostatniego polskiego napisu dźwięku
+# nie rozpoznajemy ani nie tłumaczymy — służy tylko do emocji i ściszania gry
+PL_SUBS_HOLD_SEC = 600.0
 PARAKEET_MODEL = "mlx-community/parakeet-tdt-0.6b-v3"
 SPEECH_RMS = 0.0025
 JUNK_HEARD = {
@@ -2465,6 +2468,7 @@ class Engine:
         # kiedy ostatnio gra pokazała napis — wtedy dialogi bierzemy tylko z napisów
         self._last_subtitle_seen = 0.0
         self._heard_arousal = {}
+        self._pl_subs_at = 0.0
         # kwestie przygotowane zawczasu: src → (tekst, fragmenty, przejęcie, wav)
         self._ready = {}
         self._ready_lock = threading.Lock()
@@ -2681,6 +2685,8 @@ class Engine:
         self.emit({"event": "state", **self.snapshot()})
 
     def apply_game(self, game, persist=True, announce=True, reset_lock=True):
+        # inna gra = może mieć inne napisy; polskie wykryjemy od nowa
+        self._pl_subs_at = 0.0
         self.game = normalize_game(game)
         profile = GAME_PROFILES[self.game]
         if self.auto_interval:
@@ -3219,6 +3225,8 @@ class Engine:
         # gra ma napisy: dialogi czytamy z napisów, a dźwięk bez napisu to gadanie w tle
         if self.mode != "audio" and time.monotonic() - self._last_subtitle_seen < SUBTITLE_PRIORITY_SEC:
             return
+        if self._pl_subs_active:
+            return
         # ciche mruczenie pod nosem i tłum w tle — pomijamy
         if quiet:
             return
@@ -3246,6 +3254,11 @@ class Engine:
         self._tts_interrupt.set()
         self.lektor.stop()
         self._tts_interrupt.clear()
+
+    @property
+    def _pl_subs_active(self):
+        """Gra ma polskie napisy — lektor czyta tylko je, angielskiej mowy nie tłumaczy."""
+        return self.mode != "audio" and time.monotonic() - self._pl_subs_at < PL_SUBS_HOLD_SEC
 
     def _on_subtitle(self, src):
         if not usable_ocr(src):
@@ -3297,7 +3310,14 @@ class Engine:
         self.last_key = text_key(src)
         self.subtitle_until = now + 2.5
         # napisy po angielsku (gra albo Netflix bez PL) — tłumacz automatycznie
-        self._offer_line(src, should_translate(src))
+        translate = should_translate(src)
+        if not translate:
+            if not self._pl_subs_active:
+                self.emit(
+                    {"event": "status", "text": "Polskie napisy — czytam je, angielski dźwięk tylko do emocji i ściszania."}
+                )
+            self._pl_subs_at = now
+        self._offer_line(src, translate)
 
     def _ocr_only_loop(self):
         if self.duck:
@@ -3418,6 +3438,12 @@ class Engine:
                     continue
                 audio = state.feed(chunk)
                 if audio is not None:
+                    if self._pl_subs_active:
+                        # polskie napisy: angielskiej mowy nie rozpoznajemy (GPU zostaje dla lektora),
+                        # tylko uczymy miernik emocji, jak mówią postacie w tej grze
+                        if not self.prosody.is_quiet(audio):
+                            self.prosody.analyze(audio)
+                        continue
                     live.submit(audio)
         except PermissionError as exc:
             self.emit({"event": "perm", "text": str(exc)})
