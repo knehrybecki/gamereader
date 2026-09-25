@@ -1636,6 +1636,44 @@ def english_names_pl(text):
     return re.sub(r"[A-Za-zÀ-ÿ]+", _spanish_word, text)
 
 
+# Skracanie jak u lektora — TYLKO gdy kwestia nie zmieści się w czasie napisu nawet przy maks. tempie.
+# Poziom 1: wtrącenia i powtórzenia. Poziom 2: dodatkowo imię w wołaczu na początku/końcu.
+_CONDENSE_FILLERS = (
+    "no wiesz", "wiesz co", "to znaczy", "tak naprawdę", "w sumie", "po prostu", "w ogóle", "no więc",
+    "posłuchaj", "słuchaj", "wiesz", "stary", "stara", "kurczę", "kurde", "właściwie", "jakby", "no", "ej",
+    "okej", "ok", "hej",
+)
+_FILLER_ALT = "|".join(re.escape(f) for f in sorted(_CONDENSE_FILLERS, key=len, reverse=True))
+_FILLER_START = re.compile(rf"^(?:(?:{_FILLER_ALT})\b[,!.]?\s+)+", re.IGNORECASE)
+_FILLER_MID = re.compile(rf",\s*(?:{_FILLER_ALT})\s*(?=,)", re.IGNORECASE)
+_FILLER_END = re.compile(rf",\s*(?:{_FILLER_ALT})\s*(?=[.!?…]|$)", re.IGNORECASE)
+_REPEAT = re.compile(r"\b(\w+)(?:[,\s]+\1\b)+", re.IGNORECASE)
+
+
+def condense_polish(text, level=1):
+    """Skraca kwestię bez zmiany sensu. Zwraca oryginał, gdyby zostało za mało."""
+    original = normalize_text(text)
+    out = _REPEAT.sub(r"\1", original)
+    out = _FILLER_START.sub("", out)
+    out = _FILLER_MID.sub("", out)
+    # „…, wiesz?” / „…, no nie?” — pytajnik należał do dopisku; zostaje, jeśli reszta sama jest pytaniem
+    tag = re.search(r",\s*(?:wiesz|no nie|nie|prawda|tak)\s*\?+\s*$", out, flags=re.IGNORECASE)
+    if tag:
+        rest = out[: tag.start()]
+        asks = re.match(r"(?i)\s*(?:co|kto|kim|kogo|komu|czego|gdzie|kiedy|dlaczego|czemu|jak|czy|ile|któr|jak)", rest)
+        out = rest + ("?" if asks else ".")
+    out = _FILLER_END.sub("", out)
+    if level >= 2:
+        names = "|".join(re.escape(n) for n in sorted(ENGLISH_NAMES, key=len, reverse=True) if n[:1].isupper())
+        out = re.sub(rf"^(?:{names})\s*[,!]\s+", "", out)
+        out = re.sub(rf",\s*(?:{names})\s*(?=[.!?…]|$)", "", out)
+    out = normalize_text(re.sub(r"\s+([,.!?…])", r"\1", out))
+    out = out[:1].upper() + out[1:]
+    if sum(ch.isalpha() for ch in out) < max(4, len(original) // 4):
+        return original
+    return out
+
+
 def polish_pronounce(text):
     for pattern, repl in _PRONOUNCE_RULES:
         text = pattern.sub(repl, text)
@@ -1717,6 +1755,12 @@ class MaleLektor:
 
     def plan(self, text):
         return lektor_segments(text)
+
+    def overload(self, text, seconds):
+        """Ile razy za szybko musiałby czytać lektor, żeby zmieścić się w `seconds` (>1 = nie zdąży)."""
+        if not seconds or seconds <= 0:
+            return 0.0
+        return len(text or "") / (self.cps1 * max(0.6, seconds * 0.92)) / LEKTOR_MAX_SPEED
 
     def line_boost(self, text, seconds):
         """Przyspieszenie CAŁEJ kwestii (jedno dla wszystkich jej fragmentów).
@@ -3311,7 +3355,16 @@ class Engine:
         if arousal is None:
             arousal = self.prosody.recent()
         # tempo dopasowane do napisów: zmieść się w czasie, w jakim gra zwykle pokazuje taki napis
-        boost = self.lektor.line_boost(text, len(src) / (self._sub_cps or SUBTITLE_CPS_DEFAULT))
+        seconds = len(src) / (self._sub_cps or SUBTITLE_CPS_DEFAULT)
+        # nawet maks. tempo nie wystarczy albo czeka już następny napis — skróć jak lektor
+        over = self.lektor.overload(text, seconds)
+        if text and (over > 1.0 or self._queue_waiting(src)):
+            short = condense_polish(text, level=2 if over > 1.2 else 1)
+            if short != text:
+                self._timing(f"skrót x{over:.2f}: {text[:60]!r} -> {short[:60]!r}")
+                text = short
+                segments = self.lektor.plan(text)
+        boost = self.lektor.line_boost(text, seconds)
         return text, segments, float(arousal or 0.0), boost
 
     def _prefetch_pending(self, current):
