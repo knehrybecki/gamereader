@@ -412,21 +412,37 @@ def repair_polish_ocr(text):
     return normalize_text(fixed)
 
 
+# częste angielskie słowa — przeważają nad polskimi = tekst angielski
+EN_COMMON = EN_HINTS | {
+    "in", "on", "it", "do", "go", "be", "he", "she", "they", "with", "for", "get", "can", "just",
+    "know", "here", "there", "now", "come", "going", "want", "got", "all", "right", "okay", "yeah",
+    "no", "yes", "let's", "gonna", "him", "her", "us", "them", "out", "up", "if", "so", "but",
+}
+# słowa wspólne dla obu języków („to”, „i”, „we”…) nie rozstrzygają
+EN_PL_SHARED = {"to", "i", "a", "o", "we", "no", "na", "do", "on", "go", "ta", "tak"}
+
+
 def looks_polish(text):
     raw = normalize_text(text)
     if not raw:
         return False
     if any(ch in PL_MARK for ch in raw):
         return True
-    tokens = [polish_fold(part) for part in re.findall(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+", raw)]
+    words = re.findall(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż']+", raw.lower())
+    en_hits = sum(1 for word in words if word in EN_COMMON and word not in EN_PL_SHARED)
     hits = 0
-    for token in tokens:
-        if token in _POLISH_BY_FOLD or token in _POLISH_FOLDED:
-            hits += 1
+    pl_only = 0
+    for word in words:
+        if "'" in word:
             continue
-        if any(key.startswith(token) or token.startswith(key) for key in _POLISH_BY_FOLD if len(token) >= 4 and len(key) >= 4):
+        token = polish_fold(word)
+        if token in _POLISH_BY_FOLD or token in _POLISH_FOLDED or any(
+            key.startswith(token) or token.startswith(key) for key in _POLISH_BY_FOLD if len(token) >= 4 and len(key) >= 4
+        ):
             hits += 1
-    return hits >= 1
+            pl_only += word not in EN_PL_SHARED
+    # „to”, „i”, „we” są w obu językach — same nie przeważą nad angielskimi słowami
+    return hits >= 1 and pl_only >= en_hits
 
 
 def should_translate(text):
@@ -434,7 +450,7 @@ def should_translate(text):
     if not raw or looks_polish(raw):
         return False
     tokens = set(re.findall(r"[a-z']+", raw.lower()))
-    return len(tokens & EN_HINTS) >= 1 or (len(tokens) >= 4 and not looks_polish(raw))
+    return len(tokens & (EN_COMMON - EN_PL_SHARED)) >= 1 or (len(tokens) >= 4 and not looks_polish(raw))
 
 
 def usable_ocr(text):
@@ -2468,7 +2484,7 @@ class Engine:
         # kiedy ostatnio gra pokazała napis — wtedy dialogi bierzemy tylko z napisów
         self._last_subtitle_seen = 0.0
         self._heard_arousal = {}
-        self._pl_subs_at = 0.0
+        self._pl_subs_at = None
         # kwestie przygotowane zawczasu: src → (tekst, fragmenty, przejęcie, wav)
         self._ready = {}
         self._ready_lock = threading.Lock()
@@ -2686,7 +2702,7 @@ class Engine:
 
     def apply_game(self, game, persist=True, announce=True, reset_lock=True):
         # inna gra = może mieć inne napisy; polskie wykryjemy od nowa
-        self._pl_subs_at = 0.0
+        self._pl_subs_at = None
         self.game = normalize_game(game)
         profile = GAME_PROFILES[self.game]
         if self.auto_interval:
@@ -3258,7 +3274,8 @@ class Engine:
     @property
     def _pl_subs_active(self):
         """Gra ma polskie napisy — lektor czyta tylko je, angielskiej mowy nie tłumaczy."""
-        return self.mode != "audio" and time.monotonic() - self._pl_subs_at < PL_SUBS_HOLD_SEC
+        at = self._pl_subs_at
+        return self.mode != "audio" and at is not None and time.monotonic() - at < PL_SUBS_HOLD_SEC
 
     def _on_subtitle(self, src):
         if not usable_ocr(src):
