@@ -676,8 +676,32 @@ _SOFT_WORDS = (
 )
 # 5 kroków dyfuzji: ~30% szybciej niż domyślne 8, wymowa bez zmian
 SUPERTONIC_STEPS = 5
-# nastrój z tekstu przesuwa „przejęcie” (z głosu postaci): -1 szept … +1 krzyk
-LEKTOR_MOOD_BIAS = {"calm": 0.0, "lively": 0.35, "soft": -0.4}
+# nastrój z napisu (słowa i interpunkcja): tylko głośność i pauza — bez domieszki innego głosu
+# i bez zmiany tempa, więc barwa lektora się nie zmienia
+LEKTOR_MOOD_GAIN = {"calm": 1.0, "lively": 1.1, "soft": 0.9}
+
+
+def lektor_punctuation(text, mood="calm"):
+    """Interpunkcja napisu → (mnożnik głośności, pauza po fragmencie w s).
+
+    „!” głośniej, „!!”/„?!” jeszcze głośniej, „…” ciszej i z dłuższą pauzą, „?” krótki oddech po pytaniu.
+    Tekst dla lektora zostaje bez zmian — intonację pytania robi sam Supertonic."""
+    t = normalize_text(text)
+    gain = LEKTOR_MOOD_GAIN.get(mood, 1.0)
+    if re.search(r"[!?]{2,}", t):
+        gain = max(gain, 1.22)
+    elif "!" in t:
+        gain = max(gain, 1.14)
+    end = t.rstrip("\"'”»)] ")
+    pause = 0.0
+    if end.endswith(("…", "...")):
+        gain = min(gain, 0.9)
+        pause = 0.35
+    elif end.endswith("?"):
+        pause = 0.2
+    elif end.endswith("!"):
+        pause = 0.15
+    return gain, pause
 
 
 def lektor_voice_params(arousal):
@@ -1554,20 +1578,23 @@ class MaleLektor:
 
         arousal: jak mówi postać (-1 szept … +1 krzyk), mood: wskazówka z tekstu."""
         self.ensure()
-        a = max(-1.0, min(1.0, float(arousal or 0.0) + LEKTOR_MOOD_BIAS.get(mood, 0.0)))
+        a = max(-1.0, min(1.0, float(arousal or 0.0)))
         a = round(a * 5) / 5  # stopnie co 0,2 — cache się powtarza
         params = lektor_voice_params(a)
         pace = lektor_pace(text) * float(self.tts_scale or 1.0) / params["speed"]
-        # suwak Głośność = głośność lektora; przejęcie ją moduluje
+        # interpunkcja napisu: „!” głośniej, „…” ciszej, pauza po „?” i „…”
+        punct_gain, punct_pause = lektor_punctuation(text, mood)
+        pause = max(params["pause"], punct_pause)
+        # suwak Głośność = głośność lektora; przejęcie i interpunkcja ją modulują
         # volume 0…1 (suwak 0–100 %); 100 % = 1,3× — limiter i tak nie przepuści przesteru
-        gain = 1.3 * max(0.0, min(1.0, float(volume))) * params["gain"]
-        key = f"st4|{self.voice}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{bool(self.ffmpeg)}"
+        gain = 1.3 * max(0.0, min(1.0, float(volume))) * params["gain"] * punct_gain
+        key = f"st5|{self.voice}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
         path = CACHE_DIR / f"{text_key(key)}.wav"
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         if path.exists() and path.stat().st_size >= 64:
             return path
         raw = Path(str(path) + ".raw.wav")
-        self._synth(text, raw, pace, self._style(params["blend"]), params["pause"])
+        self._synth(text, raw, pace, self._style(params["blend"]), pause)
         self._master(raw, path, gain)
         return path
 
