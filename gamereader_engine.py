@@ -519,103 +519,46 @@ def normalize_mode(mode):
     return "auto"
 
 
+# Wspólne ustawienia odczytu (dostrojone na GTA VI) — RDR2 i inne gry działają tak samo.
+# Pasek napisów w Chrome (Netflix/YouTube) ustawia osobno CHROME_BAND.
+_GAME_BASE = {
+    "interval": 0.15,
+    "tts": 0.92,
+    "boost": 2.4,
+    "band": 0.18,
+    "gap": 0.03,
+    "inset": 0.10,
+}
+
 GAME_PROFILES = {
     "gta6": {
+        **_GAME_BASE,
         "label": "GTA VI",
         "hint": "Na razie wycinki z Netflixa w Chrome (do testów); po premierze PS Remote Play.",
-        "interval": 0.15,
-        "tts": 0.92,
-        "boost": 2.4,
-        # pasek pod napisy Netflixa (wyżej i większe niż w grach)
-        "band": 0.2,
-        "gap": 0.07,
-        "inset": 0.1,
         # w trybie źródła „Auto” najpierw szukaj Netflixa w Chrome
         "prefer": "chrome",
     },
     "rdr2": {
+        **_GAME_BASE,
         "label": "Red Dead Redemption 2",
-        "hint": "Szybkie kwestie na dole. Skan 0,16 s, lektor żwawy.",
-        "interval": 0.16,
-        "tts": 0.92,
-        "boost": 2.6,
-        "band": 0.18,
-        "gap": 0.03,
-        "inset": 0.10,
-    },
-    "tlou": {
-        "label": "The Last of Us",
-        "hint": "Czytelne napisy na dole, trochę dłuższe kwestie.",
-        "interval": 0.18,
-        "tts": 0.96,
-        "boost": 2.2,
-        "band": 0.12,
-        "gap": 0.03,
-        "inset": 0.10,
-    },
-    "gow": {
-        "label": "God of War",
-        "hint": "Duże napisy, średni skan, spokojniejszy lektor.",
-        "interval": 0.20,
-        "tts": 1.00,
-        "boost": 2.0,
-        "band": 0.14,
-        "gap": 0.03,
-        "inset": 0.08,
-    },
-    "gta": {
-        "label": "GTA / Uncharted",
-        "hint": "Szybkie dialogi, krótki pasek, szybki skan.",
-        "interval": 0.15,
-        "tts": 0.90,
-        "boost": 2.4,
-        "band": 0.11,
-        "gap": 0.03,
-        "inset": 0.12,
-    },
-    "souls": {
-        "label": "Souls / Elden Ring",
-        "hint": "Mały tekst, mocniejszy kontrast, szybki skan.",
-        "interval": 0.15,
-        "tts": 0.95,
-        "boost": 2.8,
-        "band": 0.10,
-        "gap": 0.025,
-        "inset": 0.16,
-    },
-    "hogwarts": {
-        "label": "Hogwarts Legacy",
-        "hint": "Żółte imię pomijam. Dokańczam zdanie — bez ucinania i zapętleń.",
-        "interval": 0.24,
-        "tts": 1.12,
-        "boost": 2.3,
-        "band": 0.17,
-        "gap": 0.028,
-        "inset": 0.12,
-        "skip_yellow_speaker": True,
-        "confirm_frames": 2,
-        "speak_cooldown": 7.0,
-        "no_barge_in": True,
-        "ocr_accurate_first": True,
-        "ocr_langs": ["pl-PL"],
+        "hint": "Napisy na dole, szybkie kwestie — te same ustawienia co GTA VI.",
     },
     "generic": {
+        **_GAME_BASE,
         "label": "Inna gra",
-        "hint": "Uniwersalny skan. Jak nie łapie — zaznacz pasek ręcznie.",
-        "interval": 0.22,
-        "tts": 1.00,
-        "boost": 2.2,
-        "band": 0.15,
-        "gap": 0.035,
-        "inset": 0.10,
+        "hint": "Ustawienia jak w GTA VI. Jak nie łapie napisów — zaznacz pasek ręcznie.",
     },
 }
+# gry usunięte z listy: zapisany wybór przechodzi na najbliższy profil
+_OLD_GAMES = {"gta": "gta6"}
 
 
 def normalize_game(game):
     if game in GAME_PROFILES:
         return game
-    return "gta6"
+    if game in _OLD_GAMES:
+        return _OLD_GAMES[game]
+    return "generic" if game else "gta6"
 
 
 def which_bin(name):
