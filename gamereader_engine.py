@@ -627,6 +627,17 @@ def which_bin(name):
     return None
 
 
+def bundled_ffmpeg():
+    """ffmpeg z pakietu imageio-ffmpeg (instalowany przy pierwszym uruchomieniu aplikacji)."""
+    try:
+        import imageio_ffmpeg
+
+        path = imageio_ffmpeg.get_ffmpeg_exe()
+        return path if path and Path(path).is_file() else None
+    except Exception:
+        return None
+
+
 def _speakable(piece):
     piece = normalize_text(piece)
     if not piece or piece.lower() in JUNK_HEARD:
@@ -1514,7 +1525,7 @@ class MaleLektor:
         self.styles = {}
         self.voice = DEFAULT_SUPERTONIC_VOICE
         self.tts_scale = 1.0
-        self.ffmpeg = which_bin("ffmpeg")
+        self.ffmpeg = which_bin("ffmpeg") or bundled_ffmpeg()
 
     @property
     def backend(self):

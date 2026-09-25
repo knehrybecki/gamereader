@@ -18,6 +18,7 @@
       "preload.js",
       "tap-preload.js",
       "updater.js",
+      "setup.js",
       "renderer/**"
     ],
     "extraResources": [
@@ -28,6 +29,10 @@
       {
         "from": "../gamereader_worker.py",
         "to": "engine/gamereader_worker.py"
+      },
+      {
+        "from": "../requirements.txt",
+        "to": "engine/requirements.txt"
       }
     ],
     "mac": {

@@ -18,3 +18,5 @@ mlx>=0.25
 parakeet-mlx>=0.5
 argostranslate>=1.9
 
+# obróbka głosu lektora: gotowe ffmpeg w paczce pip (gdy nie ma go z Homebrew)
+imageio-ffmpeg>=0.5
