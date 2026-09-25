@@ -36,7 +36,13 @@ PREVIEW_W = 780
 PREVIEW_H = 110
 CONFIG_PATH = Path.home() / "Library/Application Support/GameReader/config.json"
 CACHE_DIR = Path.home() / "Library/Caches/GameReader"
-# Lektor: Supertonic 3 (kod MIT, model OpenRAIL-M) — czysta polska wymowa, ~1 s na kwestię na GPU.
+# Lektor: Supertonic 3 (kod MIT, model OpenRAIL-M) — czysta polska wymowa.
+# Przy starcie mierzymy GPU (CoreML) i CPU na tych zdaniach i bierzemy szybsze.
+LEKTOR_BENCH = (
+    "Dobra, jesteś jakiś spięty. Co jest?",
+    "Nic, nie lubię się spóźniać.",
+    "Cal wspominał coś, że to były pracownik wywiadu Dominikany czy coś.",
+)
 SUPERTONIC_VOICES = ("M5", "M2", "M3", "M4", "M1")
 DEFAULT_SUPERTONIC_VOICE = "M5"
 
@@ -1837,6 +1843,7 @@ class MaleLektor:
         self.styles = {}
         self.voice = DEFAULT_SUPERTONIC_VOICE
         self.tts_scale = 1.0
+        self.device_label = "GPU"
         self.cps1 = LEKTOR_CPS_PRIOR
         self.out = PlayerProcess()
         self.ffmpeg = which_bin("ffmpeg") or bundled_ffmpeg()
@@ -1853,16 +1860,39 @@ class MaleLektor:
         from supertonic import TTS
 
         onnxruntime.set_default_logger_severity(3)
-        # CoreML = GPU/ANE na Macu; ONNX Runtime sam spada na CPU, jeśli CoreML nie wstanie
-        st_loader.DEFAULT_ONNX_PROVIDERS = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
-        model = TTS(auto_download=True)
         if self.voice not in SUPERTONIC_VOICES:
             self.voice = DEFAULT_SUPERTONIC_VOICE
-        calm = model.get_voice_style(voice_name=self.voice)
+
+        def load(providers):
+            st_loader.DEFAULT_ONNX_PROVIDERS = providers
+            tts = TTS(auto_download=True)
+            style = tts.get_voice_style(voice_name=self.voice)
+            tts.synthesize("Lektor gotowy.", voice_style=style, lang="pl")  # rozgrzewka
+            return tts, style
+
+        def bench(tts, style):
+            # zdania o różnej długości — CoreML potrafi przeliczać się od nowa przy każdej nowej długości
+            started = time.monotonic()
+            for sample in LEKTOR_BENCH:
+                tts.synthesize(sample, voice_style=style, total_steps=SUPERTONIC_STEPS, lang="pl")
+            return time.monotonic() - started
+
+        # Szybszy wygrywa: CoreML (GPU/ANE) albo sam procesor. Mierzone na tym Macu przy starcie.
+        candidates = []
+        for label, providers in (("GPU", ["CoreMLExecutionProvider", "CPUExecutionProvider"]), ("CPU", ["CPUExecutionProvider"])):
+            try:
+                tts, style = load(providers)
+                candidates.append((bench(tts, style), label, tts, style))
+            except Exception as exc:
+                log_timing(f"lektor: {label} nie wstaje ({exc})")
+        if not candidates:
+            raise RuntimeError("Supertonic nie wstaje ani na GPU, ani na CPU")
+        candidates.sort(key=lambda item: item[0])
+        log_timing("lektor: test szybkości " + ", ".join(f"{c[1]} {c[0]:.2f}s" for c in candidates) + f" → {candidates[0][1]}")
+        _took, self.device_label, model, calm = candidates[0]
+        del candidates
         # M1 = żywszy głos; domieszka daje więcej melodii przy tej samej barwie lektora
         other = model.get_voice_style(voice_name="M1" if self.voice != "M1" else "M4")
-        # rozgrzewka: pierwsza synteza kompiluje grafy CoreML
-        model.synthesize("Lektor gotowy.", voice_style=calm, lang="pl")
         # proces odtwarzacza od razu — pierwsza kwestia nie czeka na jego start
         with self.lock:
             try:
@@ -2948,7 +2978,7 @@ class Engine:
         self.emit({"event": "status", "text": "Ładuję lektora…"})
         try:
             self.lektor.ensure()
-            self.emit({"event": "status", "text": f"Lektor gotowy (Supertonic {self.lektor.voice}, GPU)."})
+            self.emit({"event": "status", "text": f"Lektor gotowy (Supertonic {self.lektor.voice}, {self.lektor.device_label})."})
         except Exception as exc:
             self.emit({"event": "status", "text": f"Lektor nie wstaje: {exc}"})
 
