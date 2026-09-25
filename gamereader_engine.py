@@ -727,11 +727,15 @@ def lektor_pause(text):
 
 
 def lektor_tts_text(text):
-    """Tekst dla syntezy: wielokropek jako „...”, zdanie zawsze zamknięte znakiem — daje opadającą
-    intonację na kropce, pytającą na „?” i mocniejszą na „!”."""
-    text = normalize_text(text or "").replace("…", "...")
-    text = re.sub(r"\s+([,.!?;:])", r"\1", text)
-    text = re.sub(r"([,;:])(?=\S)", r"\1 ", text)
+    """Tekst dla syntezy: zdanie zawsze zamknięte znakiem — opadająca intonacja na kropce,
+    pytająca na „?”, mocniejsza na „!”. Wielokropek w środku = przecinek, na końcu = kropka
+    (Supertonic potrafi go przeczytać dziwnie); pauzę po nim i tak dokłada lektor."""
+    text = normalize_text(text or "")
+    text = re.sub(r"\s*(?:…|\.{2,})[\s…. ]*$", ".", text)
+    text = re.sub(r"\s*(?:…|\.{2,})(?!\.)\s*", ", ", text)
+    # spacja przed znakiem to błąd OCR; liczb („3,5”, „10:30”) nie ruszamy
+    text = re.sub(r"\s+([,.!?;:])(?=\s|$)", r"\1", text)
+    text = re.sub(r"^[,;:.\s]+", "", text)
     core = text.rstrip("\"'„”«»)] ")
     if core and core[-1] not in ".!?,;:":
         text = core + "."
@@ -749,6 +753,11 @@ def _sentence_mood(sentence):
     return "calm"
 
 
+# maks. długość fragmentu (znaki): pierwszy krótki = szybki start, reszta syntezuje się w trakcie
+LEKTOR_FIRST_SEGMENT = 60
+LEKTOR_SEGMENT = 110
+
+
 def lektor_segments(text):
     """Dzieli kwestię na zdania i skleja sąsiednie o tym samym nastroju: [(tekst, nastrój), …]."""
     pieces = [normalize_text(p) for p in re.findall(r"[^.!?…]+(?:[.!?…]+|$)", normalize_text(text or ""))]
@@ -758,8 +767,11 @@ def lektor_segments(text):
             continue
         mood = _sentence_mood(piece)
         # krótkie zdanie („Jedź, jedź!”, „Hej!”) samo brzmi sztucznie — sklej z sąsiednim;
-        # wygrywa mocniejszy nastrój (ożywiony > cichy > spokojny)
-        if groups and (groups[-1][1] == mood or len(piece) < 25 or len(groups[-1][0]) < 25):
+        # wygrywa mocniejszy nastrój (ożywiony > cichy > spokojny). Fragmenty trzymamy krótkie,
+        # zwłaszcza pierwszy: lektor rusza dopiero, gdy pierwszy fragment jest zsyntezowany.
+        limit = LEKTOR_FIRST_SEGMENT if len(groups) == 1 else LEKTOR_SEGMENT
+        short = len(piece) < 25 or (groups and len(groups[-1][0]) < 25)
+        if groups and len(groups[-1][0]) + len(piece) < limit and (short or groups[-1][1] == mood):
             prev_text, prev_mood = groups[-1]
             rank = {"lively": 3, "soft": 2, "question": 1, "calm": 0}
             mood = max(mood, prev_mood, key=rank.get)
@@ -770,8 +782,8 @@ def lektor_segments(text):
         return [(normalize_text(text), "calm")] if _speakable(text) else []
     # długi początek tnij na przecinku — lektor rusza szybciej, reszta syntezuje się w trakcie
     head, mood = groups[0]
-    if len(head) > 70:
-        cut = head.find(", ", 25)
+    if len(head) > LEKTOR_FIRST_SEGMENT:
+        cut = head.find(", ", 20)
         if 0 < cut < len(head) - 20:
             groups[0:1] = [(head[: cut + 1], mood), (head[cut + 2 :], mood)]
     return groups
@@ -3017,6 +3029,14 @@ class Engine:
             self.has_pending.clear()
         return item
 
+    def _timing(self, line):
+        """Czasy lektora do /tmp/livedub-engine.log — do szukania opóźnień."""
+        try:
+            with open("/tmp/livedub-engine.log", "a", encoding="utf-8") as handle:
+                handle.write(f"{time.strftime('%H:%M:%S')} {line}\n")
+        except OSError:
+            pass
+
     def _tts_loop(self):
         while True:
             if not self.has_pending.wait(timeout=0.15):
@@ -3028,7 +3048,9 @@ class Engine:
             if same_utterance(src, self.speaking_text) or self._recently_spoken(src):
                 continue
             try:
+                t0 = time.monotonic()
                 text = self.translator.translate(src) if translate else src
+                t_tr = time.monotonic() - t0
                 text = strip_fillers(text)
                 segments = self.lektor.plan(text) if text else []
                 if not segments:
@@ -3052,8 +3074,14 @@ class Engine:
                     segments=segments,
                 )
                 # pierwsze zdanie od razu — reszta syntezuje się, gdy lektor już mówi
+                t1 = time.monotonic()
                 path = self.lektor.prepare(
                     segments[0][0], volume=self.lektor_volume / 100.0, mood=segments[0][1], line=line
+                )
+                self._timing(
+                    f"tlum={t_tr:.2f}s synteza1={time.monotonic() - t1:.2f}s fragmenty={len(segments)} "
+                    f"dl1={len(segments[0][0])} tempo={line['speed']:.2f} {'EN' if translate else 'PL'} | "
+                    f"{src[:60]!r} -> {segments[0][0][:60]!r}"
                 )
                 with self.pending_lock:
                     newer = self.pending
