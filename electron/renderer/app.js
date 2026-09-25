@@ -1,11 +1,6 @@
 const GAMES = [
   { id: "gta6", label: "GTA VI" },
   { id: "rdr2", label: "Red Dead Redemption 2" },
-  { id: "tlou", label: "The Last of Us" },
-  { id: "gow", label: "God of War" },
-  { id: "gta", label: "GTA / Uncharted" },
-  { id: "souls", label: "Souls / Elden Ring" },
-  { id: "hogwarts", label: "Hogwarts Legacy" },
   { id: "generic", label: "Inna gra" },
 ];
 

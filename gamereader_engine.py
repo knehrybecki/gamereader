@@ -484,6 +484,11 @@ PREROLL_SEC = 0.25
 SUBTITLE_PRIORITY_SEC = 30.0
 # zanim silnik nauczy się tempa napisów w grze: typowy napis ~16 znaków na sekundę
 SUBTITLE_CPS_DEFAULT = 16.0
+# skracanie tekstu: od tylu sekund spóźnienia lektora za napisem (poziom 1 / poziom 2)
+LAG_CONDENSE = 2.0
+LAG_CONDENSE_STRONG = 3.5
+# ile kwestii może czekać w kolejce (więcej = najstarsza przepada)
+SPEECH_QUEUE_MAX = 4
 # polskie napisy + angielski dźwięk: przez tyle sekund od ostatniego polskiego napisu dźwięku
 # nie rozpoznajemy ani nie tłumaczymy — służy tylko do emocji i ściszania gry
 PL_SUBS_HOLD_SEC = 600.0
@@ -519,103 +524,46 @@ def normalize_mode(mode):
     return "auto"
 
 
+# Wspólne ustawienia odczytu (dostrojone na GTA VI) — RDR2 i inne gry działają tak samo.
+# Pasek napisów w Chrome (Netflix/YouTube) ustawia osobno CHROME_BAND.
+_GAME_BASE = {
+    "interval": 0.15,
+    "tts": 0.92,
+    "boost": 2.4,
+    "band": 0.18,
+    "gap": 0.03,
+    "inset": 0.10,
+}
+
 GAME_PROFILES = {
     "gta6": {
+        **_GAME_BASE,
         "label": "GTA VI",
         "hint": "Na razie wycinki z Netflixa w Chrome (do testów); po premierze PS Remote Play.",
-        "interval": 0.15,
-        "tts": 0.92,
-        "boost": 2.4,
-        # pasek pod napisy Netflixa (wyżej i większe niż w grach)
-        "band": 0.2,
-        "gap": 0.07,
-        "inset": 0.1,
         # w trybie źródła „Auto” najpierw szukaj Netflixa w Chrome
         "prefer": "chrome",
     },
     "rdr2": {
+        **_GAME_BASE,
         "label": "Red Dead Redemption 2",
-        "hint": "Szybkie kwestie na dole. Skan 0,16 s, lektor żwawy.",
-        "interval": 0.16,
-        "tts": 0.92,
-        "boost": 2.6,
-        "band": 0.18,
-        "gap": 0.03,
-        "inset": 0.10,
-    },
-    "tlou": {
-        "label": "The Last of Us",
-        "hint": "Czytelne napisy na dole, trochę dłuższe kwestie.",
-        "interval": 0.18,
-        "tts": 0.96,
-        "boost": 2.2,
-        "band": 0.12,
-        "gap": 0.03,
-        "inset": 0.10,
-    },
-    "gow": {
-        "label": "God of War",
-        "hint": "Duże napisy, średni skan, spokojniejszy lektor.",
-        "interval": 0.20,
-        "tts": 1.00,
-        "boost": 2.0,
-        "band": 0.14,
-        "gap": 0.03,
-        "inset": 0.08,
-    },
-    "gta": {
-        "label": "GTA / Uncharted",
-        "hint": "Szybkie dialogi, krótki pasek, szybki skan.",
-        "interval": 0.15,
-        "tts": 0.90,
-        "boost": 2.4,
-        "band": 0.11,
-        "gap": 0.03,
-        "inset": 0.12,
-    },
-    "souls": {
-        "label": "Souls / Elden Ring",
-        "hint": "Mały tekst, mocniejszy kontrast, szybki skan.",
-        "interval": 0.15,
-        "tts": 0.95,
-        "boost": 2.8,
-        "band": 0.10,
-        "gap": 0.025,
-        "inset": 0.16,
-    },
-    "hogwarts": {
-        "label": "Hogwarts Legacy",
-        "hint": "Żółte imię pomijam. Dokańczam zdanie — bez ucinania i zapętleń.",
-        "interval": 0.24,
-        "tts": 1.12,
-        "boost": 2.3,
-        "band": 0.17,
-        "gap": 0.028,
-        "inset": 0.12,
-        "skip_yellow_speaker": True,
-        "confirm_frames": 2,
-        "speak_cooldown": 7.0,
-        "no_barge_in": True,
-        "ocr_accurate_first": True,
-        "ocr_langs": ["pl-PL"],
+        "hint": "Napisy na dole, szybkie kwestie — te same ustawienia co GTA VI.",
     },
     "generic": {
+        **_GAME_BASE,
         "label": "Inna gra",
-        "hint": "Uniwersalny skan. Jak nie łapie — zaznacz pasek ręcznie.",
-        "interval": 0.22,
-        "tts": 1.00,
-        "boost": 2.2,
-        "band": 0.15,
-        "gap": 0.035,
-        "inset": 0.10,
+        "hint": "Ustawienia jak w GTA VI. Jak nie łapie napisów — zaznacz pasek ręcznie.",
     },
 }
+# gry usunięte z listy: zapisany wybór przechodzi na najbliższy profil
+_OLD_GAMES = {"gta": "gta6"}
 
 
 def normalize_game(game):
     if game in GAME_PROFILES:
         return game
-    return "gta6"
+    if game in _OLD_GAMES:
+        return _OLD_GAMES[game]
+    return "generic" if game else "gta6"
 
 
 def which_bin(name):
@@ -1650,8 +1598,27 @@ _FILLER_END = re.compile(rf",\s*(?:{_FILLER_ALT})\s*(?=[.!?…]|$)", re.IGNORECA
 _REPEAT = re.compile(r"\b(\w+)(?:[,\s]+\1\b)+", re.IGNORECASE)
 
 
+_ONLY_FILLER = re.compile(rf"^(?:(?:{_FILLER_ALT})\b[\s,]*)+[.!?…]*$", re.IGNORECASE)
+
+
 def condense_polish(text, level=1):
-    """Skraca kwestię bez zmiany sensu. Zwraca oryginał, gdyby zostało za mało."""
+    """Skraca kwestię zdanie po zdaniu, bez zmiany sensu. Zwraca oryginał, gdyby zostało za mało."""
+    original = normalize_text(text)
+    kept = []
+    for sentence in re.findall(r"[^.!?…]+(?:[.!?…]+|$)", original):
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        if _ONLY_FILLER.match(sentence):
+            continue  # całe zdanie to wtrącenie („Słuchaj.”, „No.”) — wypada
+        kept.append(_condense_sentence(sentence, level))
+    out = normalize_text(" ".join(kept))
+    if sum(ch.isalpha() for ch in out) < max(4, len(original) // 4):
+        return original
+    return out
+
+
+def _condense_sentence(text, level=1):
     original = normalize_text(text)
     out = _REPEAT.sub(r"\1", original)
     out = _FILLER_START.sub("", out)
@@ -2632,8 +2599,9 @@ class Engine:
         self.confirm_frames = OCR_CONFIRM_FRAMES
         self.speak_cooldown = 5.5
         self.no_barge_in = True
-        self.pending = None
         self.pending_lock = threading.Lock()
+        # kolejka kwestii do przeczytania (po kolei); self.pending = następna z nich
+        self._queue = []
         self.has_pending = threading.Event()
         self._tts_interrupt = threading.Event()
         # rośnie przy każdym Stop/flush — przerywa czytanie wielozdaniowej kwestii
@@ -2680,7 +2648,10 @@ class Engine:
         self._pl_subs_at = None
         # tempo napisów: ile znaków na sekundę gra pokazuje (z czasu między kolejnymi napisami)
         self._sub_cps = None
+        self._sub_cps_samples = []
         self._sub_prev = None
+        # o ile sekund lektor spóźnia się za napisami — skracanie tylko przy prawdziwym spóźnieniu
+        self._lag = 0.0
         # kwestie przygotowane zawczasu: src → (tekst, fragmenty, przejęcie, wav)
         self._ready = {}
         self._ready_lock = threading.Lock()
@@ -3209,14 +3180,34 @@ class Engine:
         self._prune_spoken()
         self._spoken_folds[fold] = time.monotonic() + float(self.speak_cooldown or 5.5)
 
+    @property
+    def pending(self):
+        """Następna kwestia w kolejce (albo None)."""
+        queue_ = self._queue
+        return queue_[0] if queue_ else None
+
+    def _enqueue(self, item):
+        """Dodaj kwestię na koniec kolejki. Nic nie przepada, dopóki kolejka się nie przepełni."""
+        src = item[0]
+        with self.pending_lock:
+            if any(same_utterance(src, queued[0]) for queued in self._queue):
+                return
+            last = self._queue[-1] if self._queue else None
+            if last and (extends_utterance(last[0], src) or (last[2] != last[0] and extends_utterance(last[2], item[2]))):
+                self._queue[-1] = item  # ten sam napis, tylko dłuższy (dopisana końcówka)
+            else:
+                self._queue.append(item)
+            if len(self._queue) > SPEECH_QUEUE_MAX:
+                self._queue.pop(0)  # lektor zupełnie nie nadąża — najstarsza kwestia przepada
+                self._lag = max(self._lag, LAG_CONDENSE_STRONG)
+            self.has_pending.set()
+
     def _offer_tail(self, tail, full):
-        """Dopisana końcówka napisu — przeczytaj ją po bieżącej kwestii (nowsza zastępuje starszą)."""
+        """Dopisana końcówka napisu — przeczytaj ją po bieżącej kwestii."""
         tail = strip_fillers(tail)
         if not tail:
             return
-        with self.pending_lock:
-            self.pending = (tail, False, full)
-            self.has_pending.set()
+        self._enqueue((tail, False, full))
 
     def _offer_line(self, src, translate):
         src = strip_fillers(src)
@@ -3231,35 +3222,19 @@ class Engine:
             if extends_utterance(self.speaking_text, src):
                 self.last_subtitle = src
                 return
-            with self.pending_lock:
-                if self.pending and same_utterance(src, self.pending[0]):
-                    return
-                # nowa kwestia — nie przerywaj bieżącej (Hogwarts OCR miga jak szalony)
-                if self.no_barge_in:
-                    self.pending = (src, translate, src)
-                    self.has_pending.set()
-                    return
-            with self.pending_lock:
-                self.pending = (src, translate, src)
-                self.has_pending.set()
-            self._tts_interrupt.set()
-            self.lektor.stop()
+            # nowa kwestia — nie przerywaj bieżącej, tylko ustaw w kolejce (przeczyta po kolei)
+            self._enqueue((src, translate, src))
+            if not self.no_barge_in:
+                self._tts_interrupt.set()
+                self.lektor.stop()
             return
-        with self.pending_lock:
-            if self.pending and same_utterance(src, self.pending[0]):
-                return
-            if self.pending and extends_utterance(self.pending[0], src):
-                self.pending = (src, translate, src)
-                self.has_pending.set()
-                return
-            self.pending = (src, translate, src)
-            self.has_pending.set()
+        self._enqueue((src, translate, src))
 
     def _take_pending(self):
         with self.pending_lock:
-            item = self.pending
-            self.pending = None
-            self.has_pending.clear()
+            item = self._queue.pop(0) if self._queue else None
+            if not self._queue:
+                self.has_pending.clear()
         return item
 
     def _tts_loop(self):
@@ -3298,6 +3273,10 @@ class Engine:
                     continue
                 self._tts_interrupt.clear()
                 seen = self._seen_at.pop(src, None)
+                if seen:
+                    # spóźnienie: szybko rośnie, powoli maleje (fabuła zwalnia = skracanie się wyłącza)
+                    lag = time.monotonic() - seen
+                    self._lag = lag if lag > self._lag else 0.5 * self._lag + 0.5 * lag
                 self._timing(
                     f"{'GOTOWE' if ready else 'synteza'} {time.monotonic() - t0:.2f}s"
                     + (f", od napisu {time.monotonic() - seen:.2f}s" if seen else "")
@@ -3342,8 +3321,11 @@ class Engine:
     def _queue_waiting(self, current):
         """Czy w kolejce czeka już następna kwestia — wtedy lektor przyspiesza, żeby jej nie zgubić."""
         with self.pending_lock:
-            item = self.pending
-        return bool(item) and not same_utterance(item[0], current)
+            return any(not same_utterance(item[0], current) for item in self._queue)
+
+    def _queue_len(self, current):
+        with self.pending_lock:
+            return sum(1 for item in self._queue if not same_utterance(item[0], current))
 
     def _plan_line(self, src, translate):
         """Tłumaczenie, podział na zdania i emocja kwestii: (tekst, fragmenty, przejęcie)."""
@@ -3356,12 +3338,14 @@ class Engine:
             arousal = self.prosody.recent()
         # tempo dopasowane do napisów: zmieść się w czasie, w jakim gra zwykle pokazuje taki napis
         seconds = len(src) / (self._sub_cps or SUBTITLE_CPS_DEFAULT)
-        # nawet maks. tempo nie wystarczy albo czeka już następny napis — skróć jak lektor
-        over = self.lektor.overload(text, seconds)
-        if text and (over > 1.0 or self._queue_waiting(src)):
-            short = condense_polish(text, level=2 if over > 1.2 else 1)
+        # skracanie tylko, gdy lektor naprawdę nie nadąża (spóźnia się albo gubi napisy);
+        # przy spokojnej fabule czyta całość
+        waiting = self._queue_len(src)
+        level = 2 if self._lag >= LAG_CONDENSE_STRONG or waiting >= 2 else 1 if self._lag >= LAG_CONDENSE or waiting >= 1 else 0
+        if text and level:
+            short = condense_polish(text, level=level)
             if short != text:
-                self._timing(f"skrót x{over:.2f}: {text[:60]!r} -> {short[:60]!r}")
+                self._timing(f"skrót (spóźnienie {self._lag:.1f}s): {text[:60]!r} -> {short[:60]!r}")
                 text = short
                 segments = self.lektor.plan(text)
         boost = self.lektor.line_boost(text, seconds)
@@ -3484,7 +3468,7 @@ class Engine:
         except queue.Empty:
             pass
         with self.pending_lock:
-            self.pending = None
+            self._queue.clear()
             self.has_pending.clear()
         self._speech_gen += 1
         self._tts_interrupt.set()
@@ -3553,9 +3537,10 @@ class Engine:
             if 0.6 < gap < 8.0 and prev_len >= 8:
                 cps = prev_len / gap
                 if 5.0 <= cps <= 40.0:
-                    # szybką rozmowę łapiemy od razu, zwalnianie łagodniej
-                    alpha = 0.5 if self._sub_cps is None or cps > self._sub_cps else 0.2
-                    self._sub_cps = cps if self._sub_cps is None else self._sub_cps + alpha * (cps - self._sub_cps)
+                    # mediana z ostatnich pomiarów — pojedynczy błędny odczyt OCR nie zawyża tempa
+                    self._sub_cps_samples = (self._sub_cps_samples + [cps])[-9:]
+                    if len(self._sub_cps_samples) >= 3:
+                        self._sub_cps = float(np.median(self._sub_cps_samples))
         self._sub_prev = (now, len(src))
         # napisy po angielsku (gra albo Netflix bez PL) — tłumacz automatycznie
         translate = should_translate(src)
