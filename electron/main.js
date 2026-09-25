@@ -14,6 +14,7 @@ const os = require("os");
 const path = require("path");
 const { desktopCapturer, session, screen } = electron;
 const { checkForUpdates } = require("./updater");
+const { ensureEngine } = require("./setup");
 const pkg = require("./package.json");
 
 const WIDGET = { width: 340, height: 480 };
@@ -431,26 +432,35 @@ function startHub() {
   hubServer.on("error", (err) => log(`hub-err ${err}`));
 }
 
-function startWorker() {
-  const py = pythonBin();
+async function startWorker() {
   const script = app.isPackaged
     ? path.join(process.resourcesPath, "engine", "gamereader_worker.py")
     : path.join(__dirname, "..", "gamereader_worker.py");
   const engineDir = path.dirname(script);
-  const site = path.join(VENV, "lib/python3.14/site-packages");
-  workerProc = spawn(py, [script], {
+  const requirements = app.isPackaged
+    ? path.join(process.resourcesPath, "engine", "requirements.txt")
+    : path.join(__dirname, "..", "requirements.txt");
+  let engine;
+  try {
+    // dotychczasowe środowisko, a gdy go nie ma albo nie działa — instalacja przy pierwszym starcie
+    engine = await ensureEngine({
+      engineDir,
+      requirements,
+      legacyCandidates: [pythonBin(), PYTHON],
+      status: (text) => sendToWindow({ event: "status", text }),
+      log,
+    });
+  } catch (err) {
+    log(`setup-error ${err && err.stack ? err.stack : err}`);
+    sendToWindow({
+      event: "status",
+      text: `Nie udało się przygotować silnika: ${err && err.message ? err.message : err}. Sprawdź internet i uruchom LiveDub ponownie.`,
+    });
+    return;
+  }
+  workerProc = spawn(engine.py, [script], {
     cwd: engineDir,
-    env: {
-      ...process.env,
-      ELECTRON_RUN_AS_NODE: "",
-      PYTHONUNBUFFERED: "1",
-      VIRTUAL_ENV: VENV,
-      PYTHONPATH: `${engineDir}${path.delimiter}${site}`,
-      GAMEREADER_HELPER: helperPath(),
-      GAMEREADER_SOCK: SOCK,
-      PYTHONHOME: "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14",
-      __PYVENV_LAUNCHER__: "",
-    },
+    env: { ...engine.env, GAMEREADER_HELPER: helperPath(), GAMEREADER_SOCK: SOCK },
     stdio: ["pipe", "pipe", "pipe"],
   });
   let buf = "";
@@ -660,7 +670,9 @@ app.whenReady().then(() => {
     startHub();
     createMain();
     startDockLoop();
-    setTimeout(startWorker, 400);
+    setTimeout(() => {
+      startWorker().catch((err) => log(`worker-error ${err && err.stack ? err.stack : err}`));
+    }, 400);
     // raz przy starcie: nowa wersja na GitHubie → pobierz, podmień i uruchom ponownie
     setTimeout(() => runUpdateCheck(), 4000);
     log("windows-up");

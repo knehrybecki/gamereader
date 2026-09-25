@@ -627,6 +627,17 @@ def which_bin(name):
     return None
 
 
+def bundled_ffmpeg():
+    """ffmpeg z pakietu imageio-ffmpeg (instalowany przy pierwszym uruchomieniu aplikacji)."""
+    try:
+        import imageio_ffmpeg
+
+        path = imageio_ffmpeg.get_ffmpeg_exe()
+        return path if path and Path(path).is_file() else None
+    except Exception:
+        return None
+
+
 def _speakable(piece):
     piece = normalize_text(piece)
     if not piece or piece.lower() in JUNK_HEARD:
@@ -678,9 +689,12 @@ _SOFT_WORDS = (
 SUPERTONIC_STEPS = 5
 # tempo lektora (parametr speed Supertonic przy zwykłej kwestii; było 1,05)
 LEKTOR_SPEED = 1.15
-# gdy w kolejce czeka już następna kwestia: szybciej i bez pauz, żeby nic nie przepadło
-LEKTOR_HURRY = 1.12
 LEKTOR_MAX_SPEED = 1.45
+# gdy w kolejce czeka już następny napis: gotowe fragmenty grają szybciej od razu
+# (afplay -r zachowuje wysokość głosu), a pauzy prawie znikają
+LEKTOR_CATCHUP_RATE = 1.15
+# tempo dopasowane do napisów: lektor ma się zmieścić w czasie, w którym napis wisi na ekranie
+LEKTOR_CPS_PRIOR = 15.0  # znaki/s lektora przy speed=1 — potem uczy się z własnych syntez
 # nastrój z napisu (słowa i interpunkcja): tylko głośność i pauza — bez domieszki innego głosu
 # i bez zmiany tempa, więc barwa lektora się nie zmienia
 LEKTOR_MOOD_GAIN = {"calm": 1.0, "lively": 1.1, "soft": 0.9}
@@ -1487,6 +1501,140 @@ _PRONOUNCE_RULES = [
 ]
 
 
+# Angielskie imiona i nazwy: polski lektor czyta je po polsku („Mi-cha-el”), więc podmieniamy
+# pisownię na wymowę angielską zapisaną po polsku („Majkel”) — z polską odmianą
+# (Jasona → Dżejsona, Lucię → Lusiję, Mike'a → Majka, Tony'ego → Toniego).
+ENGLISH_NAMES = {
+    # GTA VI / GTA V
+    "Jason": "Dżejson", "Lucia": "Lusija", "Michael": "Majkel", "Trevor": "Trewor", "Lamar": "Lamar",
+    "Lester": "Lester", "Amanda": "Amanda", "Tracey": "Trejsi", "Jimmy": "Dżimi", "Wade": "Łejd",
+    "Floyd": "Flojd", "Ron": "Ron", "Devin": "Dewin", "Dave": "Dejw", "Steve": "Stiw", "Haines": "Hejns",
+    "Norton": "Norton", "Townley": "Taunli", "Philips": "Filips", "Chop": "Czop", "Brad": "Bred",
+    "Niko": "Niko", "Claude": "Klod", "Tommy": "Tomi", "Vercetti": "Wersetti", "Johnson": "Dżonson",
+    "Ryder": "Rajder", "Sweet": "Słit", "Cal": "Kel", "Boobie": "Bubi", "Raul": "Raul",
+    # imiona
+    "Mike": "Majk", "John": "Dżon", "Johnny": "Dżoni", "James": "Dżejms", "Jack": "Dżek", "Jake": "Dżejk",
+    "Jim": "Dżim", "Joe": "Dżo", "Joey": "Dżoi", "Josh": "Dżosz", "Joshua": "Dżoszua", "Justin": "Dżastin",
+    "Jessica": "Dżesika", "Jennifer": "Dżenifer", "Jenny": "Dżeni", "Jordan": "Dżordan", "Jay": "Dżej",
+    "Jayden": "Dżejden", "Jesse": "Dżesi", "Jess": "Dżes", "Joel": "Dżoel", "Jackson": "Dżekson",
+    "George": "Dżordż", "Charles": "Czarls", "Charlie": "Czarli", "Chase": "Czejs", "Chad": "Czed",
+    "Chuck": "Czak", "Chris": "Kris", "Christopher": "Kristofer", "Kate": "Kejt", "Katie": "Kejti",
+    "Steven": "Stiwen", "Ryan": "Rajan", "Brian": "Brajan", "Bryan": "Brajan", "Kyle": "Kajl",
+    "Luke": "Luk", "Matthew": "Matju", "Matt": "Met", "Nathan": "Nejtan", "Nate": "Nejt", "Ethan": "Itan",
+    "Aiden": "Ejden", "Hailey": "Hejli", "Heather": "Heder", "Timothy": "Timoti",
+    "Stephanie": "Stefani", "Sean": "Szon", "Shawn": "Szon", "Shane": "Szejn", "Wayne": "Łejn",
+    "Dwayne": "Dłejn", "William": "Łiljam", "Will": "Łil", "Willy": "Łili", "Walter": "Łolter",
+    "White": "Łajt", "Rachel": "Rejczel", "Michelle": "Miszel", "Nicole": "Nikol", "Sarah": "Sera",
+    "Emily": "Emili", "Olivia": "Oliwija", "Sophie": "Sofi", "Chloe": "Kloi", "Zoe": "Zoi", "Leah": "Lija",
+    "Riley": "Rajli", "Taylor": "Tejlor", "Brandon": "Brendon", "Tyler": "Tajler", "Dylan": "Dilan",
+    "Kevin": "Kewin", "Kenny": "Keni", "Keith": "Kit", "Mason": "Mejson", "Harry": "Hari", "Henry": "Henri",
+    "Eddie": "Edi", "Freddy": "Fredi", "Bobby": "Bobi", "Billy": "Bili", "Danny": "Deni", "Ricky": "Riki",
+    "Randy": "Rendi", "Andy": "Endi", "Ray": "Rej", "Roy": "Roj", "Troy": "Troj", "Earl": "Erl",
+    "Cole": "Kol", "Casey": "Kejsi", "Cassie": "Kesi", "Stacy": "Stejsi", "Tracy": "Trejsi", "Blake": "Blejk",
+    "Bruce": "Brus", "Grace": "Grejs", "Tony": "Toni", "Mia": "Mija", "Carl": "Karl", "Hugh": "Hju",
+    "Grayson": "Grejson", "Nick": "Nik", "Frank": "Frenk", "Franklin": "Frenklin", 
+    "Jenkins": "Dżenkins", "Smith": "Smit", "Jones": "Dżołns", "Brown": "Braun",
+    # miejsca
+    "Vice City": "Wajs Siti", "Liberty City": "Liberti Siti", "Miami": "Majami", "Grove Street": "Grołw Strit",
+    "Vinewood": "Wajnłud", "Downtown": "Dałntaun", "Vespucci": "Wespuczi",
+}
+# hiszpański (Vice City / Leonida): imiona i wtrącenia z dialogów — wymowa hiszpańska po polsku
+SPANISH_WORDS = {
+    "José": "Hose", "Jose": "Hose", "Juan": "Huan", "Jorge": "Horhe", "Jesús": "Hesus", "Javier": "Hawjer",
+    "Julio": "Hulio", "Carlos": "Karlos", "Miguel": "Migel", "Guillermo": "Gijermo", "Alejandro": "Alehandro",
+    "Ramón": "Ramon", "Raúl": "Raul", "Joaquín": "Hoakin", "Joaquin": "Hoakin", "Cristina": "Kristina",
+    "Carmen": "Karmen", "Guadalupe": "Gwadalupe", "Ximena": "Himena", "Lucía": "Lusija", "Sofía": "Sofija",
+    "Valentina": "Walentina", "Camila": "Kamila", "Gustavo": "Gustawo", "Ernesto": "Ernesto", "Cortez": "Kortes",
+    "Rodríguez": "Rodriges", "Rodriguez": "Rodriges", "Hernández": "Ernandes", "Hernandez": "Ernandes",
+    "González": "Gonsales", "Gonzalez": "Gonsales", "Martínez": "Martines", "Martinez": "Martines",
+    "López": "Lopes", "Lopez": "Lopes", "Pérez": "Peres", "Perez": "Peres", "Sánchez": "Sanczes",
+    "Sanchez": "Sanczes", "Ramírez": "Ramires", "Ramirez": "Ramires", "Vargas": "Wargas", "Vega": "Wega",
+    # wtrącenia
+    "hola": "ola", "mija": "micha", "mijo": "micho", "hermano": "ermano", "hermana": "ermana", "chica": "czika",
+    "chico": "cziko", "chicas": "czikas", "gracias": "grasjas", "vámonos": "wamonos", "vamonos": "wamonos",
+    "vamos": "wamos", "cabrón": "kabron", "cabron": "kabron", "pendejo": "pendeho", "pendeja": "pendeha",
+    "mierda": "mjerda", "señor": "senior", "señora": "seniora", "señorita": "seniorita", "qué": "ke",
+    "sí": "si", "por favor": "por fawor", "jefe": "hefe", "carnal": "karnal", "loco": "loko", "loca": "loka",
+    "cállate": "kajate", "ándale": "andale", "órale": "orale", "güey": "łej", "gringo": "gringo",
+    "hijo": "iho", "hija": "iha", "mamá": "mama", "papá": "papa", "abuela": "abuela", "familia": "familja",
+    "dinero": "dinero", "policía": "polisija", "cerveza": "serwesa", "bueno": "bueno", "claro": "klaro",
+    "ay": "aj", "Dios": "Djos", "mío": "mijo", "mi amor": "mi amor", "cariño": "karinio", "querida": "kerida",
+    "querido": "kerido", "perdón": "perdon", "adiós": "adjos", "buenas noches": "buenas noczes",
+}
+for _es, _pl in list(SPANISH_WORDS.items()):
+    ENGLISH_NAMES[_es] = _pl
+    if _es[:1].islower():  # wtrącenie na początku zdania: „Hola”, „Vamos”
+        ENGLISH_NAMES[_es[:1].upper() + _es[1:]] = _pl[:1].upper() + _pl[1:]
+
+# pozostałe słowa z hiszpańskimi znakami (á é í ú ñ ü — nie ma ich w polskim): ogólne reguły wymowy
+_SPANISH_MARK = re.compile(r"[áéíúñüÁÉÍÚÑÜ]")
+_SPANISH_RULES = [
+    (r"ll", "j"), (r"ñ", "ni"), (r"qu(?=[eiéí])", "k"), (r"gu(?=[eiéí])", "g"), (r"gü", "gł"),
+    (r"c(?=[eiéí])", "s"), (r"z", "s"), (r"j", "h"), (r"g(?=[eiéí])", "h"), (r"v", "w"), (r"ch", "cz"),
+    (r"c", "k"), (r"^h", ""), (r"y$", "j"), (r"[áÁ]", "a"), (r"[éÉ]", "e"), (r"[íÍ]", "i"), (r"[óÓ]", "o"),
+    (r"[úÚü]", "u"),
+]
+
+
+def _spanish_word(match):
+    word = match.group(0)
+    if not _SPANISH_MARK.search(word):
+        return word
+    out = word.lower()
+    for pattern, repl in _SPANISH_RULES:
+        out = re.sub(pattern, repl, out)
+    return out[:1].upper() + out[1:] if word[:1].isupper() else out
+
+
+# polskie końcówki odmiany doklejane do imienia (także po apostrofie: Mike'a, Tony'ego)
+_PL_ENDINGS = "ami|ach|owi|owie|ów|om|em|ie|ego|emu|iego|iemu|a|u|y|i|ii|ę|ą|o|e"
+
+
+def _name_pattern():
+    names = sorted(ENGLISH_NAMES, key=len, reverse=True)
+    alts = []
+    for name in names:
+        stem = re.escape(name[:-1]) if name[-1:] in "ao" and " " not in name and len(name) >= 5 else None
+        if stem and name.endswith("a"):  # Lucia → Lucii, Lucię, Lucią, Lucio
+            alts.append(f"(?P<s{len(alts)}>{stem})(?:a|ii|i|ę|ą|o|y|e)")
+        elif stem:  # Guillermo → Guillerma, Guillermem, Guillermowi
+            alts.append(f"(?P<s{len(alts)}>{stem})(?:a|owi|em|ie|u)")
+        alts.append(f"(?P<n{len(alts)}>{re.escape(name)})(?:'?(?:{_PL_ENDINGS}))?")
+    return re.compile(r"(?<![\w'])(?:" + "|".join(alts) + r")(?![\w])")
+
+
+_NAME_RE = _name_pattern()
+
+
+def _name_sub(match):
+    word = match.group(0)
+    for key, value in match.groupdict().items():
+        if value is None:
+            continue
+        if key.startswith("s"):  # rzeczownik na -a: podmień temat, zostaw polską końcówkę
+            full = next(n for n in ENGLISH_NAMES if n[:-1] == value and n[-1:] in "ao" and len(n) >= 5)
+            spoken = ENGLISH_NAMES[full][:-1]
+            ending = word[len(value):]
+        else:
+            spoken = ENGLISH_NAMES[value]
+            ending = word[len(value):].lstrip("'")
+        if not ending:
+            return ENGLISH_NAMES.get(value, spoken + "a") if key.startswith("n") else spoken + ending
+        # Toni + ego → Toniego (nie „Toniiego”), Majk + a → Majka, Dżesik + y → Dżesiki
+        if spoken.endswith("i") and ending.startswith("i"):
+            ending = ending[1:]
+        if spoken[-1:] in "kg" and ending.startswith("y"):
+            ending = "i" + ending[1:]
+        return spoken + ending
+    return word
+
+
+def english_names_pl(text):
+    """Angielskie i hiszpańskie imiona/wtrącenia → ich wymowa zapisana po polsku, z zachowaniem odmiany."""
+    text = _NAME_RE.sub(_name_sub, text or "")
+    return re.sub(r"[A-Za-zÀ-ÿ]+", _spanish_word, text)
+
+
 def polish_pronounce(text):
     for pattern, repl in _PRONOUNCE_RULES:
         text = pattern.sub(repl, text)
@@ -1514,7 +1662,8 @@ class MaleLektor:
         self.styles = {}
         self.voice = DEFAULT_SUPERTONIC_VOICE
         self.tts_scale = 1.0
-        self.ffmpeg = which_bin("ffmpeg")
+        self.cps1 = LEKTOR_CPS_PRIOR
+        self.ffmpeg = which_bin("ffmpeg") or bundled_ffmpeg()
 
     @property
     def backend(self):
@@ -1568,6 +1717,15 @@ class MaleLektor:
     def plan(self, text):
         return lektor_segments(text)
 
+    def line_boost(self, text, seconds):
+        """Ile szybciej przeczytać kwestię, żeby zmieścić się w `seconds` (czas napisu na ekranie)."""
+        if not seconds or seconds <= 0:
+            return 1.0
+        base = LEKTOR_SPEED / max(0.5, lektor_pace(text) * float(self.tts_scale or 1.0))
+        needed = len(text) / (self.cps1 * max(0.6, seconds * 0.92))
+        boost = max(1.0, min(LEKTOR_MAX_SPEED / base, needed / base))
+        return round(boost * 20) / 20  # stopnie co 0,05 — cache się powtarza
+
     def _style(self, blend):
         if blend <= 0.0:
             return self.styles["calm"]
@@ -1577,7 +1735,7 @@ class MaleLektor:
         style.dp = (1 - blend) * calm.dp + blend * other.dp
         return style
 
-    def prepare(self, text, volume=1.0, mood="calm", arousal=0.0, hurry=False):
+    def prepare(self, text, volume=1.0, mood="calm", arousal=0.0, hurry=False, boost=1.0):
         """Zwraca ścieżkę gotowego WAV (z cache, jeśli ta sama kwestia już była).
 
         arousal: jak mówi postać (-1 szept … +1 krzyk), mood: wskazówka z tekstu."""
@@ -1591,13 +1749,14 @@ class MaleLektor:
         pause = max(params["pause"], punct_pause)
         if text.rstrip().endswith(","):
             pause = 0.0  # fragment ucięty na przecinku — reszta zdania leci od razu
+        # boost: tempo całej kwestii dopasowane do tego, jak długo napis wisi na ekranie
+        pace /= max(1.0, float(boost or 1.0))
         if hurry:
-            pace /= LEKTOR_HURRY
             pause = min(pause, 0.03)
         # suwak Głośność = głośność lektora; przejęcie i interpunkcja ją modulują
         # volume 0…1 (suwak 0–100 %); 100 % = 1,3× — limiter i tak nie przepuści przesteru
         gain = 1.3 * max(0.0, min(1.0, float(volume))) * params["gain"] * punct_gain
-        key = f"st6|{self.voice}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
+        key = f"st7|{self.voice}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
         path = CACHE_DIR / f"{text_key(key)}.wav"
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         if path.exists() and path.stat().st_size >= 64:
@@ -1612,7 +1771,7 @@ class MaleLektor:
         speed = max(0.9, min(LEKTOR_MAX_SPEED, LEKTOR_SPEED / max(0.5, pace)))
         with self.synth_lock:
             wav, _dur = self.model.synthesize(
-                polish_pronounce(text), voice_style=style, total_steps=SUPERTONIC_STEPS, speed=speed, lang="pl"
+                polish_pronounce(english_names_pl(text)), voice_style=style, total_steps=SUPERTONIC_STEPS, speed=speed, lang="pl"
             )
         audio = np.asarray(wav, dtype=np.float32).reshape(-1)
         sr = int(self.model.sample_rate)
@@ -1622,6 +1781,12 @@ class MaleLektor:
         if loud.size:
             # zapas na końcu 0,1 s: ciche głoski zostają, a przerwa między fragmentami jest krótsza
             audio = audio[max(0, loud[0] - int(sr * 0.03)) : loud[-1] + int(sr * 0.1)]
+            # ucz się, ile znaków na sekundę czyta lektor (przy speed=1) — do dopasowania tempa
+            spoken = (loud[-1] - loud[0]) / float(sr)
+            if spoken > 0.6 and len(text) >= 12:
+                cps1 = len(text) / spoken / max(0.5, speed)
+                if 6.0 < cps1 < 30.0:
+                    self.cps1 += 0.2 * (cps1 - self.cps1)
         # wyrównaj poziom (RMS części z głosem), bez przekraczania szczytu
         voiced = audio[np.abs(audio) > 0.01]
         if voiced.size:
@@ -1662,11 +1827,15 @@ class MaleLektor:
                 except OSError:
                     pass
 
-    def play(self, path):
-        # afplay w osobnym procesie: OCR i synteza w silniku nie przerywają dźwięku (bez trzasków)
+    def play(self, path, rate=1.0):
+        # afplay w osobnym procesie: OCR i synteza w silniku nie przerywają dźwięku (bez trzasków);
+        # -r = szybsze odtwarzanie bez zmiany wysokości głosu (nadrabianie zaległości)
+        cmd = ["afplay", str(path)]
+        if rate and abs(rate - 1.0) > 0.01:
+            cmd = ["afplay", "-r", f"{rate:.2f}", "-q", "1", str(path)]
         with self.lock:
             self.player = subprocess.Popen(
-                ["afplay", str(path)],
+                cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -2449,6 +2618,9 @@ class Engine:
         self._last_subtitle_seen = 0.0
         self._heard_arousal = {}
         self._pl_subs_at = None
+        # tempo napisów: ile znaków na sekundę gra pokazuje (z czasu między kolejnymi napisami)
+        self._sub_cps = None
+        self._sub_prev = None
         # kwestie przygotowane zawczasu: src → (tekst, fragmenty, przejęcie, wav)
         self._ready = {}
         self._ready_lock = threading.Lock()
@@ -3049,15 +3221,15 @@ class Engine:
                 with self._ready_lock:
                     ready = self._ready.pop(src, None)
                 if ready:
-                    text, segments, arousal, path = ready
+                    text, segments, arousal, boost, path = ready
                 else:
-                    text, segments, arousal = self._plan_line(src, translate)
+                    text, segments, arousal, boost = self._plan_line(src, translate)
                     if not segments:
                         continue
                     # pierwsze zdanie od razu — reszta syntezuje się, gdy lektor już mówi
                     path = self.lektor.prepare(
                         segments[0][0], volume=self.lektor_volume / 100.0, mood=segments[0][1], arousal=arousal,
-                        hurry=self._queue_waiting(src),
+                        hurry=self._queue_waiting(src), boost=boost,
                     )
                 with self.pending_lock:
                     newer = self.pending
@@ -3069,6 +3241,7 @@ class Engine:
                 self._timing(
                     f"{'GOTOWE' if ready else 'synteza'} {time.monotonic() - t0:.2f}s"
                     + (f", od napisu {time.monotonic() - seen:.2f}s" if seen else "")
+                    + f", tempo x{boost:.2f}"
                     + f" | {text[:70]!r}"
                 )
                 self.speaking_text = src
@@ -3080,13 +3253,14 @@ class Engine:
                 self._duck_on()
                 gen = self._speech_gen
                 for idx in range(len(segments)):
-                    self.lektor.play(path)
+                    # następny napis już czeka — ten fragment gra szybciej od razu, bez nowej syntezy
+                    self.lektor.play(path, rate=LEKTOR_CATCHUP_RATE if self._queue_waiting(src) else 1.0)
                     nxt = None
                     if idx + 1 < len(segments):
                         seg, mood = segments[idx + 1]
                         nxt = self.lektor.prepare(
                             seg, volume=self.lektor_volume / 100.0, mood=mood, arousal=arousal,
-                            hurry=self._queue_waiting(src),
+                            hurry=self._queue_waiting(src), boost=boost,
                         )
                     else:
                         # ostatni fragment gra — w tym czasie przygotuj kolejną kwestię z kolejki
@@ -3121,7 +3295,9 @@ class Engine:
         arousal = self._heard_arousal.pop(text_key(src), None) if translate else None
         if arousal is None:
             arousal = self.prosody.recent()
-        return text, segments, float(arousal or 0.0)
+        # tempo dopasowane do napisów: zmieść się w czasie, w jakim gra zwykle pokazuje taki napis
+        boost = self.lektor.line_boost(text, len(src) / self._sub_cps) if self._sub_cps else 1.0
+        return text, segments, float(arousal or 0.0), boost
 
     def _prefetch_pending(self, current):
         """Gdy lektor czyta ostatni fragment: przetłumacz i zsyntezuj początek następnej kwestii."""
@@ -3138,13 +3314,14 @@ class Engine:
             if src in self._ready:
                 return
         try:
-            text, segments, arousal = self._plan_line(src, translate)
+            text, segments, arousal, boost = self._plan_line(src, translate)
             if not segments:
                 return
             path = self.lektor.prepare(
-                segments[0][0], volume=self.lektor_volume / 100.0, mood=segments[0][1], arousal=arousal
+                segments[0][0], volume=self.lektor_volume / 100.0, mood=segments[0][1], arousal=arousal,
+                boost=boost,
             )
-            self._store_ready(src, (text, segments, arousal, path))
+            self._store_ready(src, (text, segments, arousal, boost, path))
         except Exception:
             pass
 
@@ -3174,12 +3351,13 @@ class Engine:
                 continue
             self._spec_busy = src
             try:
-                text, segments, arousal = self._plan_line(src, translate)
+                text, segments, arousal, boost = self._plan_line(src, translate)
                 if segments and self._spec_item is None:  # nowszy odczyt = ten już nieaktualny
                     path = self.lektor.prepare(
-                        segments[0][0], volume=self.lektor_volume / 100.0, mood=segments[0][1], arousal=arousal
+                        segments[0][0], volume=self.lektor_volume / 100.0, mood=segments[0][1], arousal=arousal,
+                        boost=boost,
                     )
-                    self._store_ready(src, (text, segments, arousal, path))
+                    self._store_ready(src, (text, segments, arousal, boost, path))
             except Exception:
                 pass
             finally:
@@ -3300,6 +3478,17 @@ class Engine:
         self.last_subtitle = src
         self.last_key = text_key(src)
         self.subtitle_until = now + 2.5
+        # jak długo wisiał poprzedni napis = ile czasu postać go mówiła (przy ciągłej rozmowie)
+        if self._sub_prev:
+            prev_t, prev_len = self._sub_prev
+            gap = now - prev_t
+            if 0.6 < gap < 8.0 and prev_len >= 8:
+                cps = prev_len / gap
+                if 5.0 <= cps <= 40.0:
+                    # szybką rozmowę łapiemy od razu, zwalnianie łagodniej
+                    alpha = 0.5 if self._sub_cps is None or cps > self._sub_cps else 0.2
+                    self._sub_cps = cps if self._sub_cps is None else self._sub_cps + alpha * (cps - self._sub_cps)
+        self._sub_prev = (now, len(src))
         # napisy po angielsku (gra albo Netflix bez PL) — tłumacz automatycznie
         translate = should_translate(src)
         if not translate:
