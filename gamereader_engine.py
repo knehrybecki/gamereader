@@ -37,12 +37,7 @@ PREVIEW_H = 110
 CONFIG_PATH = Path.home() / "Library/Application Support/GameReader/config.json"
 CACHE_DIR = Path.home() / "Library/Caches/GameReader"
 # Lektor: Supertonic 3 (kod MIT, model OpenRAIL-M) — czysta polska wymowa.
-# Przy starcie mierzymy GPU (CoreML) i CPU na tych zdaniach i bierzemy szybsze.
-LEKTOR_BENCH = (
-    "Dobra, jesteś jakiś spięty. Co jest?",
-    "Nic, nie lubię się spóźniać.",
-    "Cal wspominał coś, że to były pracownik wywiadu Dominikany czy coś.",
-)
+# Synteza na CPU — na Macu szybsza od CoreML (zmierzone).
 SUPERTONIC_VOICES = ("M5", "M2", "M3", "M4", "M1")
 DEFAULT_SUPERTONIC_VOICE = "M5"
 
@@ -1599,7 +1594,9 @@ _CONDENSE_FILLERS = (
     "okej", "ok", "hej", "joł", "ej ty",
 )
 _FILLER_ALT = "|".join(re.escape(f) for f in sorted(_CONDENSE_FILLERS, key=len, reverse=True))
-_FILLER_START = re.compile(rf"^(?:(?:{_FILLER_ALT})\b[,!.]?\s+)+", re.IGNORECASE)
+_CLAUSE_WORD = r"(?:że|żeby|co|kto|kogo|komu|gdzie|jak|czy|ile|dlaczego|kiedy|który|która|które)\b"
+# wtrącenie na początku — ale nie „Wiesz, że…”, „Słuchaj, co…” (wtedy to czasownik i zdanie się sypie)
+_FILLER_START = re.compile(rf"^(?:(?:{_FILLER_ALT})\b[,!.]?\s+(?!{_CLAUSE_WORD}))+", re.IGNORECASE)
 _FILLER_MID = re.compile(rf",\s*(?:{_FILLER_ALT})\s*(?=,)", re.IGNORECASE)
 _FILLER_END = re.compile(rf",\s*(?:{_FILLER_ALT})\s*(?=[.!?…]|$)", re.IGNORECASE)
 _REPEAT = re.compile(r"\b(\w+)(?:[,\s]+\1\b)+", re.IGNORECASE)
@@ -1726,14 +1723,6 @@ for line in sys.stdin:
         except Exception:
             done.put(pid)
             continue
-        try:  # zmiana wyjścia (np. słuchawki) — otwórz strumień na nowym urządzeniu
-            sd._terminate(); sd._initialize()
-            name = sd.query_devices(kind="output")["name"]
-            if name != device:
-                stream.close()
-                stream, device = open_stream()
-        except Exception:
-            pass
         with lock:
             if cur[0] is not None:
                 done.put(cur[2])
@@ -1749,11 +1738,20 @@ for line in sys.stdin:
 class _PlayHandle:
     """Udaje Popen (poll/terminate/wait/kill) dla fragmentu grającego w procesie odtwarzacza."""
 
-    def __init__(self, player, pid):
+    def __init__(self, player, pid, seconds):
         self.player, self.pid, self.done = player, pid, threading.Event()
+        # bezpiecznik: fragment nie może „grać” dłużej niż trwa (+1,5 s) — inaczej lektor by stanął
+        self.deadline = time.monotonic() + seconds + 1.5
 
     def poll(self):
-        return 0 if self.done.is_set() or not self.player.alive() else None
+        if self.done.is_set() or not self.player.alive():
+            return 0
+        if time.monotonic() > self.deadline:
+            log_timing("odtwarzacz nie zgłasza końca — przechodzę na afplay")
+            self.player.failed = True
+            self.done.set()
+            return 0
+        return None
 
     def terminate(self):
         self.player.send("STOP")
@@ -1817,7 +1815,12 @@ class PlayerProcess:
                 return None
             self.counter += 1
             pid = str(self.counter)
-            handle = _PlayHandle(self, pid)
+            try:
+                with wave.open(str(path), "rb") as info:
+                    seconds = info.getnframes() / float(info.getframerate())
+            except Exception:
+                seconds = 10.0
+            handle = _PlayHandle(self, pid, seconds)
             self.handles[pid] = handle
             self.send(f"PLAY {pid} {path}")
             return handle
@@ -1844,6 +1847,9 @@ class MaleLektor:
         self.voice = DEFAULT_SUPERTONIC_VOICE
         self.tts_scale = 1.0
         self.device_label = "GPU"
+        self.load_lock = threading.Lock()
+        # do kiedy lektor jeszcze mówi (szacunek) — kwestie przygotowywane zawczasu liczą z tym czasem
+        self.busy_until = 0.0
         self.cps1 = LEKTOR_CPS_PRIOR
         self.out = PlayerProcess()
         self.ffmpeg = which_bin("ffmpeg") or bundled_ffmpeg()
@@ -1855,6 +1861,11 @@ class MaleLektor:
     def ensure(self):
         if self.model is not None:
             return
+        with self.load_lock:
+            if self.model is None:
+                self._load()
+
+    def _load(self):
         import onnxruntime
         import supertonic.loader as st_loader
         from supertonic import TTS
@@ -1870,27 +1881,15 @@ class MaleLektor:
             tts.synthesize("Lektor gotowy.", voice_style=style, lang="pl")  # rozgrzewka
             return tts, style
 
-        def bench(tts, style):
-            # zdania o różnej długości — CoreML potrafi przeliczać się od nowa przy każdej nowej długości
-            started = time.monotonic()
-            for sample in LEKTOR_BENCH:
-                tts.synthesize(sample, voice_style=style, total_steps=SUPERTONIC_STEPS, lang="pl")
-            return time.monotonic() - started
-
-        # Szybszy wygrywa: CoreML (GPU/ANE) albo sam procesor. Mierzone na tym Macu przy starcie.
-        candidates = []
-        for label, providers in (("GPU", ["CoreMLExecutionProvider", "CPUExecutionProvider"]), ("CPU", ["CPUExecutionProvider"])):
-            try:
-                tts, style = load(providers)
-                candidates.append((bench(tts, style), label, tts, style))
-            except Exception as exc:
-                log_timing(f"lektor: {label} nie wstaje ({exc})")
-        if not candidates:
-            raise RuntimeError("Supertonic nie wstaje ani na GPU, ani na CPU")
-        candidates.sort(key=lambda item: item[0])
-        log_timing("lektor: test szybkości " + ", ".join(f"{c[1]} {c[0]:.2f}s" for c in candidates) + f" → {candidates[0][1]}")
-        _took, self.device_label, model, calm = candidates[0]
-        del candidates
+        # CPU: w pomiarach na Macu szybsze od CoreML (GPU) — 1,4–1,8 s wobec 1,6–3,0 s na 3 zdania,
+        # a CoreML dodatkowo przelicza się przy nowych długościach tekstu. GPU tylko jako zapas.
+        try:
+            model, calm = load(["CPUExecutionProvider"])
+            self.device_label = "CPU"
+        except Exception as exc:
+            log_timing(f"lektor: CPU nie wstaje ({exc}) — próbuję GPU")
+            model, calm = load(["CoreMLExecutionProvider", "CPUExecutionProvider"])
+            self.device_label = "GPU"
         # M1 = żywszy głos; domieszka daje więcej melodii przy tej samej barwie lektora
         other = model.get_voice_style(voice_name="M1" if self.voice != "M1" else "M4")
         # proces odtwarzacza od razu — pierwsza kwestia nie czeka na jego start
@@ -3544,6 +3543,9 @@ class Engine:
                 self.emit({"event": "line", "text": text, "arousal": round(arousal, 2)})
                 self._duck_on()
                 gen = self._speech_gen
+                # ile jeszcze będzie mówił (szacunek) — do liczenia tempa kwestii przygotowywanych zawczasu
+                speak_rate = max(8.0, self.lektor.cps1 * LEKTOR_SPEED / max(0.5, self.lektor.tts_scale) * max(1.0, boost))
+                self.lektor.busy_until = time.monotonic() + len(text) / speak_rate + 0.2
                 for idx in range(len(segments)):
                     if idx and self._queue_len(src) >= 2:
                         # dwa nowe napisy czekają — reszta starej kwestii jest już nieaktualna,
@@ -3573,6 +3575,7 @@ class Engine:
             except Exception as exc:
                 self.emit({"event": "status", "text": f"Błąd głosu: {exc}"})
             finally:
+                self.lektor.busy_until = 0.0
                 self.speaking_text = ""
                 self._speaking_parts = []
                 self.speaking_full = ""
@@ -3597,7 +3600,8 @@ class Engine:
     def _screen_budget(self, parts):
         """Ile sekund zostało, zanim zniknie najnowszy z napisów (tyle ma lektor na wypowiedź)."""
         cps = self._sub_cps or SUBTITLE_CPS_DEFAULT
-        now = time.monotonic()
+        # kwestia przygotowywana zawczasu zacznie się dopiero, gdy lektor skończy bieżącą
+        now = max(time.monotonic(), self.lektor.busy_until)
         natural = sum(len(p) for p in parts) / cps
         deadline = max(self._seen_at.get(p, now) + len(p) / cps for p in parts)
         # spóźniony lektor czyta szybciej, ale nie wymagamy cudów (min. 65% naturalnego czasu)
