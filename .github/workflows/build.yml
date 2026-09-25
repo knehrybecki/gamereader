@@ -1,0 +1,67 @@
+name: Build LiveDub
+
+# Każdy push buduje aplikację (artefakt do pobrania z zakładki Actions).
+# Push na main z nową wersją w electron/package.json publikuje wydanie vX.Y.Z,
+# z którego aplikacja sama się aktualizuje przy starcie.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mac:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: electron/package-lock.json
+
+      - name: Python 3.14 (Homebrew) dla Engine.app
+        run: brew install python@3.14 || brew upgrade python@3.14
+
+      - name: Zależności Electron
+        working-directory: electron
+        run: npm ci
+
+      - name: Sprawdź składnię silnika
+        run: python3 -m py_compile gamereader_engine.py gamereader_worker.py gamereader_gui.py
+
+      - name: Buduj LiveDub.app
+        env:
+          LIVEDUB_NO_INSTALL: "1"
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: sh macos/build_app.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LiveDub-mac-arm64
+          path: electron/dist/LiveDub-mac-arm64.zip
+          if-no-files-found: error
+
+      - name: Wydanie (nowa wersja na main)
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(node -p "require('./electron/package.json').version")"
+          TAG="v$VERSION"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Wydanie $TAG już istnieje — podbij wersję w electron/package.json, żeby opublikować nowe."
+            exit 0
+          fi
+          gh release create "$TAG" electron/dist/LiveDub-mac-arm64.zip \
+            --target "$GITHUB_SHA" --title "LiveDub $VERSION" --generate-notes

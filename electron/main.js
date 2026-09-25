@@ -13,6 +13,7 @@ const net = require("net");
 const os = require("os");
 const path = require("path");
 const { desktopCapturer, session, screen } = electron;
+const { checkForUpdates } = require("./updater");
 
 const WIDGET = { width: 340, height: 480 };
 const WIDGET_COLLAPSED = { width: 260, height: 44 };
@@ -659,6 +660,12 @@ app.whenReady().then(() => {
     createMain();
     startDockLoop();
     setTimeout(startWorker, 400);
+    // raz przy starcie: nowa wersja na GitHubie → pobierz, podmień i uruchom ponownie
+    setTimeout(() => {
+      checkForUpdates({ log, status: (text) => sendToWindow({ event: "status", text }) }).catch((err) =>
+        log(`update-error ${err && err.message ? err.message : err}`),
+      );
+    }, 4000);
     log("windows-up");
   } catch (err) {
     log(`boot-error ${err && err.stack ? err.stack : err}`);
