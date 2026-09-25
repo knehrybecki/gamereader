@@ -55,28 +55,33 @@ function currentBundle() {
   return bundle.endsWith(".app") ? bundle : null;
 }
 
+// Wynik: { state: "none" | "installing" | "no-token" | "unavailable" | "dev", text }
 async function checkForUpdates({ log, status }) {
-  if (!app.isPackaged || process.platform !== "darwin" || process.env.LIVEDUB_NO_UPDATE) return;
+  if (!app.isPackaged || process.platform !== "darwin" || process.env.LIVEDUB_NO_UPDATE) {
+    return { state: "dev", text: "Aktualizacje działają tylko w zainstalowanej aplikacji." };
+  }
   const bundle = currentBundle();
-  if (!bundle) return;
+  if (!bundle) return { state: "dev", text: "Nie znalazłem LiveDub.app." };
   const token = githubToken();
   const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
     headers: headers(token, "application/vnd.github+json"),
   });
   if (!res.ok) {
     log(`update-check http ${res.status}${token ? "" : " (brak tokena GitHub)"}`);
-    return;
+    if (!token) return { state: "no-token", text: "Brak tokena GitHub — nie mogę sprawdzić aktualizacji." };
+    if (res.status === 404) return { state: "unavailable", text: "Nie ma jeszcze żadnego wydania (albo token nie ma dostępu)." };
+    return { state: "unavailable", text: `GitHub odpowiedział błędem ${res.status}.` };
   }
   const release = await res.json();
   const local = app.getVersion();
   if (!newer(release.tag_name, local)) {
     log(`update-none ${local} (najnowsza ${release.tag_name})`);
-    return;
+    return { state: "none", text: `Masz najnowszą wersję (${local}).` };
   }
   const asset = (release.assets || []).find((item) => item.name === ASSET);
   if (!asset) {
     log(`update-no-asset ${release.tag_name}`);
-    return;
+    return { state: "unavailable", text: `Wydanie ${release.tag_name} nie ma jeszcze paczki.` };
   }
   const version = String(release.tag_name).replace(/^v/i, "");
   status(`Pobieram aktualizację ${version}…`);
@@ -135,6 +140,7 @@ async function checkForUpdates({ log, status }) {
   log(`update-install ${version}`);
   spawn("/bin/sh", [script], { detached: true, stdio: "ignore" }).unref();
   setTimeout(() => app.quit(), 1500);
+  return { state: "installing", text: `Instaluję wersję ${version}…` };
 }
 
 module.exports = { checkForUpdates, newer };
