@@ -14,6 +14,7 @@ const os = require("os");
 const path = require("path");
 const { desktopCapturer, session, screen } = electron;
 const { checkForUpdates } = require("./updater");
+const pkg = require("./package.json");
 
 const WIDGET = { width: 340, height: 480 };
 const WIDGET_COLLAPSED = { width: 260, height: 44 };
@@ -661,11 +662,7 @@ app.whenReady().then(() => {
     startDockLoop();
     setTimeout(startWorker, 400);
     // raz przy starcie: nowa wersja na GitHubie → pobierz, podmień i uruchom ponownie
-    setTimeout(() => {
-      checkForUpdates({ log, status: (text) => sendToWindow({ event: "status", text }) }).catch((err) =>
-        log(`update-error ${err && err.message ? err.message : err}`),
-      );
-    }, 4000);
+    setTimeout(() => runUpdateCheck(), 4000);
     log("windows-up");
   } catch (err) {
     log(`boot-error ${err && err.stack ? err.stack : err}`);
@@ -714,6 +711,32 @@ ipcMain.on("tap-pcm", (_e, buffer) => {
       /* ignore */
     }
   }
+});
+let updateCheck = null;
+function runUpdateCheck() {
+  // jedno sprawdzanie naraz (start aplikacji i przycisk w „O aplikacji”)
+  if (!updateCheck) {
+    updateCheck = checkForUpdates({ log, status: (text) => sendToWindow({ event: "status", text }) })
+      .catch((err) => {
+        log(`update-error ${err && err.message ? err.message : err}`);
+        return { state: "error", text: `Aktualizacja nie wyszła: ${err && err.message ? err.message : err}` };
+      })
+      .finally(() => {
+        updateCheck = null;
+      });
+  }
+  return updateCheck;
+}
+
+ipcMain.handle("app-info", () => ({
+  name: pkg.productName || "LiveDub",
+  version: app.getVersion(),
+  author: pkg.author,
+  electron: process.versions.electron,
+}));
+ipcMain.handle("check-updates", () => runUpdateCheck());
+ipcMain.on("open-url", (_e, url) => {
+  if (typeof url === "string" && url.startsWith("https://")) shell.openExternal(url);
 });
 ipcMain.on("engine", (_e, msg) => engineSend(msg));
 ipcMain.on("quit-app", () => app.quit());

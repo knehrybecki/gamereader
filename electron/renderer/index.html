@@ -15,7 +15,7 @@
         <p id="psWin" class="sub">Czekam na grę…</p>
       </div>
       <div id="live" class="pill off">WYŁ</div>
-      <button id="startMini" class="btn tiny primary">Czytaj</button>
+      <button id="startMini" class="btn tiny primary">Uruchom</button>
       <button id="collapse" class="btn icon" title="Zwiń">−</button>
       <button id="quit" class="btn icon quit" title="Wyłącz LiveDub" aria-label="Wyłącz LiveDub">⏻</button>
     </header>
@@ -27,7 +27,7 @@
         <button id="srcChrome" class="seg-btn" title="Netflix, YouTube i inne w Chrome — do testów">Chrome</button>
       </div>
 
-      <button id="start" class="btn primary big">Czytaj</button>
+      <button id="start" class="btn primary big">Uruchom</button>
 
       <section class="card">
         <div id="line" class="line">Włącz grę w PS Remote Play albo Netflixa w Chrome — LiveDub wystartuje sam.</div>
@@ -79,6 +79,25 @@
           <span id="intervalVal" class="num">0,16 s</span>
           <button id="scanAuto" class="btn tiny">Auto</button>
         </div>
+      </details>
+
+      <details id="about" class="more about">
+        <summary>O aplikacji</summary>
+
+        <div class="about-head">
+          <strong id="appName">LiveDub</strong>
+          <span id="appVersion" class="num">—</span>
+        </div>
+        <p class="hint">Polski lektor na żywo do gier i filmów.</p>
+        <p class="hint">Autor: <span id="appAuthor">—</span> · © <span id="appYear"></span> · Wszelkie prawa zastrzeżone.</p>
+
+        <div class="row">
+          <button id="checkUpdates" class="btn grow">Sprawdź aktualizacje</button>
+        </div>
+        <p id="updateStatus" class="hint">Aplikacja sprawdza aktualizacje sama przy każdym uruchomieniu.</p>
+
+        <p class="about-title">Licencje składników</p>
+        <ul id="licenses" class="licenses"></ul>
       </details>
 
       <div class="hidden">

@@ -62,7 +62,7 @@ function setLive(on) {
   el.className = on ? "pill on" : "pill off";
   el.textContent = on ? "CZYTA" : "WYŁ";
   document.body.classList.toggle("running", !!on);
-  const label = on ? "Stop" : "Czytaj";
+  const label = on ? "Stop" : "Uruchom";
   document.getElementById("start").textContent = label;
   const mini = document.getElementById("startMini");
   if (mini) mini.textContent = label;
@@ -252,3 +252,64 @@ window.gr.onEvent((msg) => {
   }
   if (msg.event === "collapsed") setCollapsedUi(!!msg.on);
 });
+
+// O aplikacji: wersja, autor, aktualizacje i licencje użytych składników
+const LICENSES = [
+  { name: "Electron", lic: "MIT", url: "https://github.com/electron/electron" },
+  { name: "Supertonic 3 — kod", lic: "MIT", url: "https://github.com/supertone-inc/supertonic" },
+  { name: "Supertonic 3 — model głosu", lic: "OpenRAIL-M", url: "https://huggingface.co/Supertone/supertonic" },
+  { name: "ONNX Runtime", lic: "MIT", url: "https://github.com/microsoft/onnxruntime" },
+  { name: "NVIDIA Parakeet TDT v3 — model mowy", lic: "CC BY 4.0", url: "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3" },
+  { name: "parakeet-mlx", lic: "Apache 2.0", url: "https://github.com/senstella/parakeet-mlx" },
+  { name: "MLX", lic: "MIT", url: "https://github.com/ml-explore/mlx" },
+  { name: "Argos Translate", lic: "MIT", url: "https://github.com/argosopentech/argos-translate" },
+  { name: "NumPy", lic: "BSD-3-Clause", url: "https://github.com/numpy/numpy" },
+  { name: "Pillow", lic: "MIT-CMU", url: "https://github.com/python-pillow/Pillow" },
+  { name: "python-mss", lic: "MIT", url: "https://github.com/BoboTiG/python-mss" },
+  { name: "python-sounddevice", lic: "MIT", url: "https://github.com/spatialaudio/python-sounddevice" },
+  { name: "ocrmac", lic: "MIT", url: "https://github.com/straussmaximilian/ocrmac" },
+  { name: "PyObjC", lic: "MIT", url: "https://github.com/ronaldoussoren/pyobjc" },
+  { name: "FFmpeg (opcjonalnie, z systemu)", lic: "LGPL 2.1+", url: "https://ffmpeg.org/legal.html" },
+];
+
+function fillAbout() {
+  const list = document.getElementById("licenses");
+  list.innerHTML = "";
+  for (const item of LICENSES) {
+    const li = document.createElement("li");
+    const link = document.createElement("a");
+    link.textContent = item.name;
+    link.onclick = () => window.gr.openUrl(item.url);
+    const lic = document.createElement("span");
+    lic.className = "lic";
+    lic.textContent = ` — ${item.lic}`;
+    li.append(link, lic);
+    list.append(li);
+  }
+  document.getElementById("appYear").textContent = String(new Date().getFullYear());
+  window.gr
+    .appInfo()
+    .then((info) => {
+      document.getElementById("appName").textContent = info.name;
+      document.getElementById("appVersion").textContent = `wersja ${info.version}`;
+      document.getElementById("appAuthor").textContent = info.author || "—";
+    })
+    .catch(() => {});
+}
+
+document.getElementById("checkUpdates").onclick = async () => {
+  const btn = document.getElementById("checkUpdates");
+  const out = document.getElementById("updateStatus");
+  btn.disabled = true;
+  out.textContent = "Sprawdzam…";
+  try {
+    const res = await window.gr.checkUpdates();
+    out.textContent = (res && res.text) || "Gotowe.";
+  } catch (err) {
+    out.textContent = `Nie udało się sprawdzić: ${err && err.message ? err.message : err}`;
+  } finally {
+    btn.disabled = false;
+    window.gr.releaseFocus();
+  }
+};
+fillAbout();
