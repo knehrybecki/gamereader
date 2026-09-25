@@ -684,7 +684,8 @@ def lektor_voice_params(level):
 
 # Tempo nadąża za postacią: jak mówi szybko, lektor też przyspiesza (jedno tempo na kwestię).
 LEKTOR_BASE_SPEED = 1.05  # parametr speed Supertonic przy zwykłej kwestii
-LEKTOR_MAX_SPEED = 1.5  # szybciej robi się niewyraźnie
+# powyżej ~1,25 Supertonic (5 kroków) zaczyna przekręcać słowa — lepiej skrócić pauzy
+LEKTOR_MAX_SPEED = 1.25
 LEKTOR_CPS_PRIOR = 14.0  # znaki/s lektora przy speed=1,0 — potem uczy się z własnych syntez
 # lektor może kończyć trochę po postaci (polski tekst jest dłuższy od angielskiego)
 LEKTOR_TARGET_SLACK = 1.12
@@ -1602,10 +1603,12 @@ class MaleLektor:
             if needed > speed:
                 speed = needed
                 pause_scale = 0.6
+        # zaległość nadrabiamy głównie krótszymi pauzami, tempo rośnie tylko trochę
         catchup = max(0.0, min(0.3, float(catchup or 0.0)))
         if catchup > 0:
-            speed *= 1.0 + catchup
-            pause_scale = min(pause_scale, 1.0 - catchup)
+            speed *= 1.0 + catchup * 0.3
+            pause_scale = min(pause_scale, 1.0 - 2 * catchup)
+        pause_scale = max(0.4, pause_scale)
         speed = max(0.9, min(LEKTOR_MAX_SPEED, speed))
         # stopnie co 0,05 — cache się powtarza, a różnica i tak niesłyszalna
         return {
