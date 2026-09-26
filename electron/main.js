@@ -14,7 +14,7 @@ const os = require("os");
 const path = require("path");
 const { desktopCapturer, session, screen, Menu, dialog, Tray, nativeImage } = electron;
 const crypto = require("crypto");
-const { checkForUpdates } = require("./updater");
+const { checkForUpdates, cleanupOldCopies } = require("./updater");
 const { ensureEngine } = require("./setup");
 const pkg = require("./package.json");
 
@@ -986,6 +986,14 @@ app.whenReady().then(() => {
     }, 400);
     // raz przy starcie: nowa wersja na GitHubie → pobierz, podmień i uruchom ponownie
     setTimeout(() => runUpdateCheck(), 4000);
+    // macOS: stare kopie LiveDub w Aplikacjach (po wcześniejszych aktualizacjach) — do Kosza
+    setTimeout(() => {
+      cleanupOldCopies({ log })
+        .then((n) => {
+          if (n > 0) sendToWindow({ event: "status", text: `Przeniosłem do Kosza stare kopie LiveDub (${n}).` });
+        })
+        .catch((err) => log(`cleanup-error ${err && err.message ? err.message : err}`));
+    }, 2500);
     log("windows-up");
   } catch (err) {
     log(`boot-error ${err && err.stack ? err.stack : err}`);

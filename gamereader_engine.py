@@ -952,14 +952,14 @@ def _quartz_remote_play_info():
     return best
 
 
-SOURCES = ("auto", "ps", "chrome")
+SOURCES = ("auto", "ps", "chrome", "youtube")
 CHROME_OWNERS = ("google chrome", "chrome", "google chrome canary", "chromium")
 VIDEO_TITLES = ("netflix", "youtube", "twitch", "max", "prime video", "disney")
 # Netflix/YouTube: napisy wyżej i większe niż w grach
 CHROME_BAND = {"band": 0.2, "gap": 0.07, "inset": 0.1}
 
 
-def _quartz_chrome_info(video_only=False):
+def _quartz_chrome_info(video_only=False, titles=VIDEO_TITLES):
     """Okno Chrome (x, y, w, h, window_id, tytuł): najpierw karta z wideo, potem największe."""
     try:
         from Quartz import (
@@ -978,7 +978,7 @@ def _quartz_chrome_info(video_only=False):
         if owner not in CHROME_OWNERS or int(win.get("kCGWindowLayer") or 0) != 0:
             continue
         title = str(win.get("kCGWindowName") or "")
-        video = any(key in title.lower() for key in VIDEO_TITLES)
+        video = any(key in title.lower() for key in titles)
         if video_only and not video:
             continue
         bounds = win.get("kCGWindowBounds") or {}
@@ -996,6 +996,9 @@ def _quartz_chrome_info(video_only=False):
 
 def _win_source_window(source, prefer):
     """Windows: to samo co find_source_window, z listy okien systemu."""
+    if source == "youtube":
+        info = winplat.find_browser(video_only=True, video_titles=("youtube",))
+        return (*info[:5], "chrome", info[5]) if info is not None else None
     if source == "auto" and prefer == "chrome":
         info = winplat.find_browser(video_only=True, video_titles=VIDEO_TITLES)
         if info is not None:
@@ -1016,6 +1019,10 @@ def find_source_window(source="auto", prefer="ps"):
     prefer="chrome": w trybie auto najpierw Netflix/YouTube w Chrome (np. GTA VI na wycinkach)."""
     if IS_WIN:
         return _win_source_window(source, prefer)
+    if source == "youtube":
+        # tylko karta YouTube (nie Netflix ani zwykłe przeglądanie)
+        info = _quartz_chrome_info(video_only=True, titles=("youtube",))
+        return (*info[:5], "chrome", info[5]) if info is not None else None
     if source == "auto" and prefer == "chrome":
         info = _quartz_chrome_info(video_only=True)
         if info is not None:
@@ -3178,6 +3185,8 @@ class Engine:
             return "grę"
         if self.source_info[5] == "chrome":
             title = self.source_info[6] or ""
+            if "youtube" in title.lower():
+                return "YouTube"
             name = next((v.title() for v in VIDEO_TITLES if v in title.lower()), "")
             return f"Chrome ({name})" if name else "Chrome"
         return "PS Remote Play"
