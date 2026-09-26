@@ -95,7 +95,8 @@ function applyState(msg) {
       if (found) {
         el.textContent = `${msg.sourceLabel || "Gra"} · ${msg.psWindow[2]}×${msg.psWindow[3]}`;
       } else {
-        el.textContent = state.source === "chrome" ? "Czekam na Chrome…" : "Czekam na grę…";
+        el.textContent =
+          state.source === "youtube" ? "Czekam na YouTube w Chrome…" : state.source === "chrome" ? "Czekam na Chrome…" : "Czekam na grę…";
       }
     }
   }
@@ -111,6 +112,7 @@ function applyState(msg) {
     document.getElementById("srcAuto").classList.toggle("primary", msg.source === "auto");
     document.getElementById("srcPs").classList.toggle("primary", msg.source === "ps");
     document.getElementById("srcChrome").classList.toggle("primary", msg.source === "chrome");
+    document.getElementById("srcYt").classList.toggle("primary", msg.source === "youtube");
   }
   if (typeof msg.autoStart === "boolean") document.getElementById("autoStart").checked = msg.autoStart;
   if (typeof msg.running === "boolean") {
@@ -178,7 +180,7 @@ for (const key of ["lektorVolume", "duckAmount"]) {
     window.gr.releaseFocus();
   };
 }
-for (const [id, source] of [["srcAuto", "auto"], ["srcPs", "ps"], ["srcChrome", "chrome"]]) {
+for (const [id, source] of [["srcAuto", "auto"], ["srcPs", "ps"], ["srcChrome", "chrome"], ["srcYt", "youtube"]]) {
   document.getElementById(id).onclick = () => {
     send({ cmd: "config", source });
     window.gr.releaseFocus();
