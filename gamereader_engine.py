@@ -3546,12 +3546,9 @@ class Engine:
                 # ile jeszcze będzie mówił (szacunek) — do liczenia tempa kwestii przygotowywanych zawczasu
                 speak_rate = max(8.0, self.lektor.cps1 * LEKTOR_SPEED / max(0.5, self.lektor.tts_scale) * max(1.0, boost))
                 self.lektor.busy_until = time.monotonic() + len(text) / speak_rate + 0.2
+                # kwestia zawsze do końca (bez ucinania) — zaległości nadrabia szybsze tempo kolejnych
+                # fragmentów i skrót następnej, połączonej wypowiedzi
                 for idx in range(len(segments)):
-                    if idx and self._queue_len(src) >= 2:
-                        # dwa nowe napisy czekają — reszta starej kwestii jest już nieaktualna,
-                        # lektor przeskakuje do tego, co jest teraz na ekranie (jak w filmie)
-                        self._timing(f"przeskok: pomijam {len(segments) - idx} fragm. starej kwestii")
-                        break
                     self.lektor.play(path)
                     nxt = None
                     if idx + 1 < len(segments):
