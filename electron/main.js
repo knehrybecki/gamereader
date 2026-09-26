@@ -331,33 +331,6 @@ function startSwiftTap(socket) {
   });
 }
 
-function pickRegion() {
-  return new Promise((resolve) => {
-    const bin = helperPath();
-    if (!fs.existsSync(bin)) {
-      resolve("ERR noexe");
-      return;
-    }
-    const env = { ...process.env };
-    delete env.ELECTRON_RUN_AS_NODE;
-    const proc = spawn(bin, ["--pick"], { env });
-    helperProc = proc;
-    let out = "";
-    proc.stdout.on("data", (chunk) => {
-      out += chunk.toString("utf8");
-    });
-    proc.on("close", (code) => {
-      if (helperProc === proc) helperProc = null;
-      const parts = out
-        .trim()
-        .split(",")
-        .map((item) => item.trim())
-        .filter(Boolean);
-      resolve(code === 0 && parts.length === 4 ? `OK ${parts.join(",")}` : "ERR cancel");
-    });
-  });
-}
-
 function writeLine(socket, text) {
   try {
     socket.write(`${text}\n`);
@@ -400,7 +373,9 @@ function handleHub(socket, line) {
     return;
   }
   if (cmd === "PICK") {
-    (IS_WIN ? pickRegionWin() : pickRegion())
+    // okno Electrona na obu systemach: na Macu (panel) widać je też nad Chrome na pełnym ekranie —
+    // pomocnik w Swifcie przełączał pulpit i nakładka lądowała obok filmu
+    pickRegionOverlay()
       .then((text) => writeLine(socket, text))
       .finally(() => socket.end());
     return;
@@ -453,8 +428,8 @@ function hubConnection(socket) {
   });
 }
 
-// Windows: zaznaczanie paska napisów — przezroczyste okno na cały ekran, przeciągnij prostokąt
-function pickRegionWin() {
+// Zaznaczanie paska napisów — przezroczyste okno na cały ekran, przeciągnij prostokąt
+function pickRegionOverlay() {
   return new Promise((resolve) => {
     const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
     const b = display.bounds;
@@ -473,6 +448,7 @@ function pickRegionWin() {
       fullscreenable: false,
       hasShadow: false,
       show: false,
+      ...(IS_MAC ? { type: "panel" } : {}),
       webPreferences: {
         preload: path.join(__dirname, "pick-preload.js"),
         contextIsolation: true,
@@ -480,6 +456,7 @@ function pickRegionWin() {
       },
     });
     win.setAlwaysOnTop(true, "screen-saver");
+    if (IS_MAC) win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
     let done = false;
     const finish = (rect) => {
       if (done) return;
@@ -490,12 +467,14 @@ function pickRegionWin() {
         resolve("ERR cancel");
         return;
       }
-      const phys = screen.dipToScreenRect(null, {
+      const dip = {
         x: Math.round(b.x + rect.x),
         y: Math.round(b.y + rect.y),
         width: Math.round(rect.width),
         height: Math.round(rect.height),
-      });
+      };
+      // Windows: silnik liczy w pikselach fizycznych; macOS: punkty = współrzędne Quartz silnika
+      const phys = IS_WIN ? screen.dipToScreenRect(null, dip) : dip;
       resolve(`OK ${phys.x},${phys.y},${phys.width},${phys.height}`);
     };
     const onDone = (event, rect) => {

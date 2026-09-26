@@ -64,6 +64,18 @@ text = ocr.read(bgr)
 print("OCR:", repr(text), "| bez polskiego OCR:", ocr.backend.missing_polish)
 assert "money" in text.lower(), f"OCR nie przeczytał napisu: {text!r}"
 
+# napis jak w filmie: biały z czarną obwódką na kolorowym, ruchliwym tle
+rng = np.random.default_rng(3)
+noisy = Image.fromarray(rng.integers(0, 255, (11, 90, 3)).astype(np.uint8)).resize((900, 110), Image.BILINEAR)
+draw = ImageDraw.Draw(noisy)
+for dx in (-2, 0, 2):
+    for dy in (-2, 0, 2):
+        draw.text((30 + dx, 30 + dy), "Where is our money? Let me know.", font=font, fill=(0, 0, 0))
+draw.text((30, 30), "Where is our money? Let me know.", font=font, fill=(250, 250, 250))
+video = ocr.read(np.ascontiguousarray(np.asarray(noisy)[:, :, ::-1]))
+print("OCR na tle filmu:", repr(video))
+assert "money" in video.lower(), f"OCR nie przeczytał napisu na tle filmu: {video!r}"
+
 step("tłumacz EN→PL")
 t0 = time.time()
 pl = eng.ArgosTranslator().translate("Where is our money? Let me know.")
