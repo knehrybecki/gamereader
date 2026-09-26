@@ -1713,7 +1713,7 @@ _PRONOUNCE_RULES = [
 # (Jasona → Dżejsona, Lucię → Lusiję, Mike'a → Majka, Tony'ego → Toniego).
 ENGLISH_NAMES = {
     # GTA VI / GTA V
-    "Jason": "Dżejson", "Lucia": "Lusja", "Michael": "Majkel", "Trevor": "Trewor", "Lamar": "Lamar",
+    "Jason": "Dżejson", "Lucia": "Lusija", "Michael": "Majkel", "Trevor": "Trewor", "Lamar": "Lamar",
     "Lester": "Lester", "Amanda": "Amanda", "Tracey": "Trejsi", "Jimmy": "Dżimi", "Wade": "Łejd",
     "Floyd": "Flojd", "Ron": "Ron", "Devin": "Dewin", "Dave": "Dejw", "Steve": "Stiw", "Haines": "Hejns",
     "Norton": "Norton", "Townley": "Taunli", "Philips": "Filips", "Chop": "Czop", "Brad": "Bred",
@@ -1777,7 +1777,7 @@ SPANISH_WORDS = {
     "José": "Hose", "Jose": "Hose", "Juan": "Huan", "Jorge": "Horhe", "Jesús": "Hesus", "Javier": "Hawjer",
     "Julio": "Hulio", "Carlos": "Karlos", "Miguel": "Migel", "Guillermo": "Gijermo", "Alejandro": "Alehandro",
     "Ramón": "Ramon", "Raúl": "Raul", "Joaquín": "Hoakin", "Joaquin": "Hoakin", "Cristina": "Kristina",
-    "Carmen": "Karmen", "Guadalupe": "Gwadalupe", "Ximena": "Himena", "Lucía": "Lusja", "Sofía": "Sofija",
+    "Carmen": "Karmen", "Guadalupe": "Gwadalupe", "Ximena": "Himena", "Lucía": "Lusija", "Sofía": "Sofija",
     "Valentina": "Walentina", "Camila": "Kamila", "Gustavo": "Gustawo", "Ernesto": "Ernesto", "Cortez": "Kortes",
     "Rodríguez": "Rodriges", "Rodriguez": "Rodriges", "Hernández": "Ernandes", "Hernandez": "Ernandes",
     "González": "Gonsales", "Gonzalez": "Gonsales", "Martínez": "Martines", "Martinez": "Martines",
@@ -1910,7 +1910,7 @@ def _name_sub(match):
         # Toni + ego → Toniego (nie „Toniiego”), Majk + a → Majka, Dżesik + y → Dżesiki
         if spoken.endswith("i") and ending.startswith("i"):
             ending = ending[1:]
-        # Lusj + ii → Lusji (Lucii), nie „Lusjii”
+        # Lusij + ii → Lusiji (Lucii), nie „Lusijii”
         if spoken.endswith("j") and ending.startswith("ii"):
             ending = ending[1:]
         if spoken[-1:] in "kg" and ending.startswith("y"):
@@ -2386,7 +2386,7 @@ class MaleLektor:
         # suwak Głośność = głośność lektora; przejęcie i interpunkcja ją modulują
         # volume 0…1 (suwak 0–100 %); 100 % = 1,3× — limiter i tak nie przepuści przesteru
         gain = 1.3 * max(0.0, min(1.0, float(volume))) * params["gain"] * punct_gain
-        key = f"st11|{self.voice}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
+        key = f"st12|{self.voice}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
         path = CACHE_DIR / f"{text_key(key)}.wav"
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         if path.exists() and path.stat().st_size >= 64:
