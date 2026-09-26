@@ -44,6 +44,10 @@
       {
         "from": "../requirements-win.txt",
         "to": "engine/requirements-win.txt"
+      },
+      {
+        "from": "../pl_diacritics.tsv",
+        "to": "engine/pl_diacritics.tsv"
       }
     ],
     "mac": {

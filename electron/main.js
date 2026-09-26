@@ -784,6 +784,7 @@ const LICENSES = [
   ["ocrmac", "MIT"],
   ["pywinrt (OCR Windows)", "MIT"],
   ["pycaw (ściszanie na Windows)", "MIT"],
+  ["Słownik polskich słów (FrequencyWords / OpenSubtitles)", "CC BY-SA 4.0"],
   ["PyObjC", "MIT"],
   ["imageio-ffmpeg / FFmpeg", "BSD-2 / LGPL 2.1+"],
 ];
