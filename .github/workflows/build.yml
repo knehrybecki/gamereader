@@ -74,6 +74,14 @@ jobs:
           cache: npm
           cache-dependency-path: electron/package-lock.json
 
+      - name: Cache Electrona (pobierany przy każdej budowie)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+          key: electron-mac-${{ hashFiles('electron/package-lock.json') }}
+
       - name: Python 3.14 (Homebrew) dla Engine.app
         run: brew install python@3.14 || brew upgrade python@3.14
 
@@ -142,6 +150,14 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: electron/package-lock.json
+
+      - name: Cache Electrona (pobierany przy każdej budowie)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\electron\Cache
+            ~\AppData\Local\electron-builder\Cache
+          key: electron-win-${{ hashFiles('electron/package-lock.json') }}
 
       - name: Wersja w aplikacji
         working-directory: electron
