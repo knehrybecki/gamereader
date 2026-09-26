@@ -684,7 +684,7 @@ const LICENSES = [
 ];
 
 const HELP_TEXT = [
-  "1. Włącz PS Remote Play (albo Netflixa w Chrome) — okno musi być widoczne, nie zminimalizowane.",
+  "1. Włącz PS Remote Play (albo Netflixa/YouTube w Chrome) — okno musi być widoczne, nie zminimalizowane.",
   "2. LiveDub sam wykryje grę i zacznie czytać napisy (albo kliknij „Uruchom”).",
   "3. Przy polskich napisach wybierz tryb „Napisy” (Więcej → Napisy).",
   "4. Jeśli nic nie czyta: Ustawienia → Prywatność → Nagrywanie ekranu — włącz LiveDub.",

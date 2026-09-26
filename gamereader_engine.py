@@ -79,6 +79,37 @@ def utterance_tail(prev, nxt):
     return ""
 
 
+def _word_key(word):
+    return polish_fold(word)
+
+
+def rolling_new_words(prev, nxt):
+    """Słowa z `nxt`, których nie było w `prev`.
+
+    Automatyczne napisy YouTube pojawiają się słowo po słowie, a górna linia odjeżdża:
+    „A B” → „B C” — nowe jest tylko „C”. Zupełnie inny napis = wszystkie jego słowa."""
+    words = normalize_text(nxt or "").split()
+    if not prev:
+        return words
+    old = [k for k in (_word_key(w) for w in normalize_text(prev).split()) if k]
+    keyed = [(w, _word_key(w)) for w in words]
+    keyed = [(w, k) for w, k in keyed if k]
+    new = [k for _w, k in keyed]
+    if not new or not old:
+        return words
+    # ten sam napis albo jego kawałek (górna linia już zniknęła, nowej jeszcze nie ma)
+    for i in range(len(old) - len(new) + 1):
+        if old[i : i + len(new)] == new:
+            return []
+    # koniec poprzedniego = początek nowego
+    for k in range(min(len(old), len(new)), 0, -1):
+        if old[-k:] == new[:k] and (k >= 2 or k == len(old) or len(new[0]) >= 4):
+            return [w for w, _k in keyed[k:]]
+    if same_utterance(prev, nxt):
+        return []  # OCR przeczytał ten sam napis trochę inaczej
+    return words
+
+
 def same_utterance(a, b):
     left = normalize_text(a or "").lower()
     right = normalize_text(b or "").lower()
@@ -509,6 +540,10 @@ MAX_SPEECH_SEC = 8.0
 PREROLL_SEC = 0.25
 # po ostatnim napisie przez tyle sekund dźwięk nie jest tłumaczony (napisy = główne dialogi)
 SUBTITLE_PRIORITY_SEC = 30.0
+# YouTube: napisy (zwłaszcza automatyczne) rosną słowo po słowie — zbieramy słowa i czytamy
+# całą frazę, gdy kończy się zdanie, napis stoi przez chwilę albo fraza jest już długa
+YOUTUBE_FLUSH_SEC = 0.8
+YOUTUBE_MAX_CHARS = 90
 # zanim silnik nauczy się tempa napisów w grze: typowy napis ~16 znaków na sekundę
 SUBTITLE_CPS_DEFAULT = 16.0
 # skracanie tekstu: od tylu sekund spóźnienia lektora za napisem (poziom 1 / poziom 2)
@@ -2868,6 +2903,8 @@ class Engine:
         self.last_full = ""
         self._ocr_candidate = ""
         self._ocr_candidate_n = 0
+        self._roll_text = ""
+        self._roll_buf = []
         self._spoken_folds = {}
         self.confirm_frames = OCR_CONFIRM_FRAMES
         self.speak_cooldown = 5.5
@@ -2917,6 +2954,11 @@ class Engine:
         self.prosody = ProsodyMeter()
         # kiedy ostatnio gra pokazała napis — wtedy dialogi bierzemy tylko z napisów
         self._last_subtitle_seen = 0.0
+        # YouTube: ostatni odczyt napisu i słowa, których lektor jeszcze nie dostał
+        self._roll_text = ""
+        self._roll_buf = []
+        self._roll_at = 0.0
+        self._roll_start = 0.0
         self._heard_arousal = {}
         self._pl_subs_at = None
         # tempo napisów: ile znaków na sekundę gra pokazuje (z czasu między kolejnymi napisami)
@@ -3005,6 +3047,10 @@ class Engine:
 
     def _source_kind(self):
         return self.source_info[5] if self.source_info else None
+
+    def _is_youtube(self):
+        info = self.source_info
+        return bool(info) and info[5] == "chrome" and "youtube" in str(info[6] or "").lower()
 
     def _source_label(self):
         if not self.source_info:
@@ -3168,7 +3214,7 @@ class Engine:
                 _l, _t, width, height = self.ps_window
                 self.emit({"event": "status", "text": f"{profile['label']}: mam {self._source_label()} {width}×{height}."})
             else:
-                self.emit({"event": "status", "text": f"{profile['label']}: czekam na grę (PS Remote Play albo Netflix w Chrome)."})
+                self.emit({"event": "status", "text": f"{profile['label']}: czekam na grę (PS Remote Play albo Netflix/YouTube w Chrome)."})
 
     def _region_overlap(self, region, win):
         if not region or not win:
@@ -3237,7 +3283,7 @@ class Engine:
 
     def test(self):
         if not self._sync_remote_band(force=True) and self.region is None:
-            self.emit({"event": "status", "text": "Nie widzę gry. Odpal PS Remote Play albo Netflix w Chrome."})
+            self.emit({"event": "status", "text": "Nie widzę gry. Odpal PS Remote Play albo Netflix/YouTube w Chrome."})
             return
         self.persist()
         self.emit({"event": "status", "text": "Robię test napisów…"})
@@ -3257,6 +3303,8 @@ class Engine:
         self.last_full = ""
         self._ocr_candidate = ""
         self._ocr_candidate_n = 0
+        self._roll_text = ""
+        self._roll_buf = []
         self._spoken_folds = {}
         self._tts_interrupt.clear()
         self._flush_line_q()
@@ -3286,7 +3334,7 @@ class Engine:
             if not self._sync_remote_band(force=True) and not self.lock_region:
                 self.running = False
                 self.emit({"event": "running", "on": False})
-                self.emit({"event": "status", "text": "Nie widzę gry. Odpal PS Remote Play albo Netflix w Chrome."})
+                self.emit({"event": "status", "text": "Nie widzę gry. Odpal PS Remote Play albo Netflix/YouTube w Chrome."})
                 return
             self.emit({"event": "status", "text": f"Tylko napisy — {self._source_label()}."})
             target = self._ocr_only_loop
@@ -3475,7 +3523,8 @@ class Engine:
         tail = strip_fillers(tail)
         if not tail:
             return
-        self._enqueue((tail, False, full))
+        # dopisek angielskiego napisu też trzeba przetłumaczyć
+        self._enqueue((tail, should_translate(full), full))
 
     def _offer_line(self, src, translate):
         src = strip_fillers(src)
@@ -3817,6 +3866,9 @@ class Engine:
             src = strip_player_ui(src)
             if not usable_ocr(src) or is_player_ui_text(src):
                 return
+            if self._is_youtube():
+                self._on_rolling_subtitle(src)
+                return
         self._last_subtitle_seen = time.monotonic()
         now = time.monotonic()
         base = self.speaking_full or self.last_full
@@ -3881,6 +3933,53 @@ class Engine:
             self._pl_subs_at = now
         self._offer_line(src, translate)
 
+    def _on_rolling_subtitle(self, src):
+        """YouTube: dopisz do frazy tylko nowe słowa (napis rośnie albo przewija się w górę)."""
+        now = time.monotonic()
+        self._last_subtitle_seen = now
+        new = rolling_new_words(self._roll_text, src)
+        self._roll_text = src
+        if new:
+            if not self._roll_buf:
+                self._roll_start = now
+            self._roll_buf.extend(new)
+            self._roll_at = now
+            self.last_subtitle = src
+            self.subtitle_until = now + 2.5
+        self._flush_rolling()
+
+    def _flush_rolling(self):
+        """Oddaj lektorowi zebraną frazę YouTube, gdy jest gotowa."""
+        buf = self._roll_buf
+        if not buf:
+            return
+        now = time.monotonic()
+        # koniec zdania w środku — czytaj do niego, resztę zbieraj dalej
+        end = max((i for i, w in enumerate(buf) if re.search(r"[.!?…][\"'”»)]*$", w)), default=-1)
+        if end >= 0:
+            words, rest = buf[: end + 1], buf[end + 1 :]
+        else:
+            text = " ".join(buf)
+            if now - self._roll_at < YOUTUBE_FLUSH_SEC and len(text) < YOUTUBE_MAX_CHARS:
+                return
+            words, rest = buf, []
+        self._roll_buf = rest
+        started = self._roll_start
+        self._roll_start = now
+        text = normalize_text(" ".join(words))
+        if not _speakable(text):
+            return
+        key = strip_fillers(text)
+        if key:
+            if len(self._seen_at) > 32:
+                self._seen_at.clear()
+            self._seen_at.setdefault(key, started)
+        self.last_key = text_key(text)
+        translate = should_translate(text)
+        if not translate:
+            self._pl_subs_at = now
+        self._offer_line(text, translate)
+
     def _ocr_only_loop(self):
         if self.duck:
             # bez tłumaczenia z dźwięku — tylko ściszanie gry i emocje z głosu postaci
@@ -3908,6 +4007,8 @@ class Engine:
                     if now - self._controls_logged > 5.0:
                         self._controls_logged = now
                         self.emit({"event": "debug", "text": "pasek sterowania odtwarzacza widoczny — pomijam klatki"})
+                    if self._roll_buf:
+                        self._flush_rolling()
                     time.sleep(max(MIN_INTERVAL, self.interval))
                     continue
                 frame = self._capture_region()
@@ -3939,6 +4040,9 @@ class Engine:
                     # ta sama klatka = ten sam tekst: potwierdź czekający napis bez ponownego OCR
                     # (Netflix: wideo czarne przez DRM, więc przy stojącym napisie obraz się nie zmienia)
                     self._on_subtitle(self._ocr_candidate)
+                if self._roll_buf:
+                    # YouTube: napis stoi albo zniknął — po chwili przeczytaj zebraną frazę
+                    self._flush_rolling()
             except Exception as exc:
                 text = str(exc).strip() or "błąd"
                 if "timed out" in text.lower() or "timeout" in text.lower():
