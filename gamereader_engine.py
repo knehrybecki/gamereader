@@ -723,7 +723,12 @@ _SOFT_WORDS = (
 SUPERTONIC_STEPS = 5
 # tempo lektora (parametr speed Supertonic przy zwykłej kwestii; było 1,05)
 LEKTOR_SPEED = 1.10
+# najszybsze tempo samego modelu — powyżej Supertonic bełkocze (1,5 → 15 % słów źle rozpoznanych)
 LEKTOR_MAX_SPEED = 1.35
+# spóźniony lektor: resztę tempa dokłada ffmpeg (atempo — szybciej bez zmiany wysokości głosu);
+# w pomiarach 18 zn/s przy tej samej zrozumiałości co dziś 13 zn/s z samego modelu
+LEKTOR_MAX_RATE = 1.65
+LEKTOR_MAX_STRETCH = 1.4
 # gdy w kolejce czeka już następny napis: kolejne fragmenty syntezują się szybciej, bez pauz
 LEKTOR_CATCHUP_RATE = 1.08
 # tempo dopasowane do napisów: lektor ma się zmieścić w czasie, w którym napis wisi na ekranie
@@ -1588,6 +1593,8 @@ _PRONOUNCE_RULES = [
     (re.compile(r"\b((?:za|od|prze|przy|roz|do|u|ob|wy|z|prz)mar)(za)", re.IGNORECASE), r"\1'\2"),
     (re.compile(r"\b(tar)(zan)", re.IGNORECASE), r"\1'\2"),
     (re.compile(r"(mier)(zi|zł)", re.IGNORECASE), r"\1'\2"),
+    # „Hej, stary.”, „Spoko, stary.” — Supertonic czyta po angielsku „stery”; podwójne „a” trzyma „stary”
+    (re.compile(r"\b(sta)(ry)\b", re.IGNORECASE), lambda m: m.group(1) + m.group(1)[-1] + m.group(2)),
 ]
 
 
@@ -1895,6 +1902,16 @@ def lektor_short_speed_cap(text):
     if letters <= 28:
         return 1.02
     return LEKTOR_MAX_SPEED
+
+
+def lektor_speed_split(pace, text):
+    """Tempo fragmentu → (tempo modelu, przyspieszenie atempo w ffmpeg). pace < 1 = szybciej.
+
+    Model czyta tylko tak szybko, jak umie wyraźnie (krótkie fragmenty wolniej, bo gubi głoski),
+    a resztę tempa dociąga ffmpeg — bez ucinania słów i bez bełkotu."""
+    want = max(0.9, min(LEKTOR_MAX_RATE, LEKTOR_SPEED / max(0.5, pace)))
+    speed = min(want, LEKTOR_MAX_SPEED, lektor_short_speed_cap(text))
+    return speed, min(LEKTOR_MAX_STRETCH, want / speed)
 
 
 def lektor_pace(text):
@@ -2221,8 +2238,8 @@ class MaleLektor:
         else:
             by_length = 1.16
         needed = len(text) / (self.cps1 * max(0.6, seconds * 0.92)) / base if seconds and seconds > 0 else 1.0
-        boost = max(1.0, by_length, min(LEKTOR_MAX_SPEED / base, needed))
-        boost = min(boost, LEKTOR_MAX_SPEED / base)
+        boost = max(1.0, by_length, min(LEKTOR_MAX_RATE / base, needed))
+        boost = min(boost, LEKTOR_MAX_RATE / base)
         return round(boost * 20) / 20  # stopnie co 0,05 — cache się powtarza
 
     def _style(self, blend):
@@ -2259,16 +2276,16 @@ class MaleLektor:
         # suwak Głośność = głośność lektora; przejęcie i interpunkcja ją modulują
         # volume 0…1 (suwak 0–100 %); 100 % = 1,3× — limiter i tak nie przepuści przesteru
         gain = 1.3 * max(0.0, min(1.0, float(volume))) * params["gain"] * punct_gain
-        key = f"st10|{self.voice}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
+        key = f"st11|{self.voice}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
         path = CACHE_DIR / f"{text_key(key)}.wav"
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         if path.exists() and path.stat().st_size >= 64:
             return path
         raw = Path(str(path) + ".raw.wav")
         t0 = time.monotonic()
-        self._synth(text, raw, pace, self._style(params["blend"]), pause)
+        stretch = self._synth(text, raw, pace, self._style(params["blend"]), pause)
         t1 = time.monotonic()
-        self._master(raw, path, gain)
+        self._master(raw, path, gain, stretch)
         t2 = time.monotonic()
         try:
             with wave.open(str(path), "rb") as handle:
@@ -2278,16 +2295,16 @@ class MaleLektor:
         self.last_timing = (
             f"synteza {t1 - t0:.2f}s, ffmpeg {t2 - t1:.2f}s, nagranie {seconds:.2f}s "
             f"({len(text)} zn. → {len(text) / max(seconds, 0.1):.1f} zn/s)"
+            + (f", atempo x{stretch:.2f}" if stretch > 1.01 else "")
         )
         log_timing(f"  fragment: {self.last_timing} | {text[:50]!r}")
         return path
 
     def _synth(self, text, path, pace, style, pause):
-        # pace < 1 = szybciej
-        speed = max(0.9, min(LEKTOR_MAX_SPEED, LEKTOR_SPEED / max(0.5, pace)))
         # krótka kwestia („Do środka.”, „Mordo…”, „Dobra, chwila.”): Supertonic daje jej za mało czasu
-        # i przy przyspieszeniu gubi ostatnie głoski albo całe słowo — takie fragmenty czytamy wolniej
-        speed = min(speed, lektor_short_speed_cap(text))
+        # i przy przyspieszeniu gubi ostatnie głoski albo całe słowo — model czyta ją wolniej,
+        # a do tempa lektora dociąga ją ffmpeg (stretch)
+        speed, stretch = lektor_speed_split(pace, text)
         spoken = polish_pronounce(english_names_pl(text))
         # bez kropki na końcu model potrafi urwać ostatnie słowo
         if not re.search(r"[.!?…,;:]\W*$", spoken):
@@ -2323,15 +2340,19 @@ class MaleLektor:
             handle.setsampwidth(2)
             handle.setframerate(int(self.model.sample_rate))
             handle.writeframes(pcm.tobytes())
+        return stretch
 
-    def _master(self, src, dst, gain):
+    def _master(self, src, dst, gain, stretch=1.0):
         tmp = Path(str(dst) + ".part.wav")
+        chain = f"{LEKTOR_FILTER},volume={gain:.2f},{LEKTOR_LIMITER}"
+        if stretch > 1.01:
+            chain = f"atempo={stretch:.3f},{chain}"
         try:
             if self.ffmpeg:
                 result = subprocess.run(
                     [
                         self.ffmpeg, "-y", "-loglevel", "error", "-i", str(src),
-                        "-af", f"{LEKTOR_FILTER},volume={gain:.2f},{LEKTOR_LIMITER}",
+                        "-af", chain,
                         "-ar", "44100", "-ac", "1", "-c:a", "pcm_s16le", str(tmp),
                     ],
                     stdout=subprocess.DEVNULL,
@@ -3325,7 +3346,7 @@ class Engine:
                 continue
             win = info[:4] if info else None
             kind = info[5] if info else None
-            # Windows: widżet przykleja się do okna według psWindow ze stanu — wysyłaj też ruch okna
+            # Windows: ruch i zmiana rozmiaru okna odświeżają jego podpis w widżecie
             moved = IS_WIN and win != self.ps_window
             if moved or (win is None) != (self.ps_window is None) or kind != self._source_kind():
                 self.ps_window = win

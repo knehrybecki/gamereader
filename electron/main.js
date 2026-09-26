@@ -20,18 +20,11 @@ const pkg = require("./package.json");
 
 const WIDGET = { width: 340, height: 480 };
 const WIDGET_COLLAPSED = { width: 260, height: 44 };
-const CORNERS = ["tl", "tr", "bl", "br"];
 
 let mainWindow = null;
 let helperProc = null;
 let workerProc = null;
 let hubServer = null;
-let dockTimer = null;
-let dockCorner = "tr";
-let lastPsWin = null;
-let applyingDock = false;
-let userDragging = false;
-let dragTimer = null;
 let tapWin = null;
 let tapClient = null;
 let tapWait = null;
@@ -98,15 +91,6 @@ function sendToWindow(payload) {
   if ((payload.event === "ready" || payload.event === "state") && Array.isArray(payload.region) && payload.region.length === 4) {
     lastRegion = toDip(payload.region.map((n) => Number(n)));
     syncRegionGuide();
-  }
-  if (IS_WIN && (payload.event === "ready" || payload.event === "state") && "psWindow" in payload) {
-    // Windows: okno gry zna silnik (lista okien systemu) — widżet przykleja się do niego
-    const win = Array.isArray(payload.psWindow) && payload.psWindow.length === 4 ? toDip(payload.psWindow.map(Number)) : null;
-    if (win) dockWidget({ x: win[0], y: win[1], width: win[2], height: win[3] });
-    else lastPsWin = null;
-  }
-  if ((payload.event === "ready" || payload.event === "state") && payload.dockCorner) {
-    if (CORNERS.includes(payload.dockCorner)) dockCorner = payload.dockCorner;
   }
   if ((payload.event === "ready" || payload.event === "state") && typeof payload.showRegion === "boolean") {
     if (regionGuideOn !== payload.showRegion) {
@@ -194,16 +178,11 @@ function setCollapsed(on, persist = true) {
   collapsed = !!on;
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const size = widgetSize();
-  applyingDock = true;
   const cur = mainWindow.getBounds();
   mainWindow.setMinimumSize(size.width, size.height);
   mainWindow.setMaximumSize(size.width, collapsed ? size.height : 640);
   mainWindow.setBounds({ x: cur.x, y: cur.y, width: size.width, height: size.height });
   mainWindow.webContents.send("engine-event", { event: "collapsed", on: collapsed });
-  setTimeout(() => {
-    applyingDock = false;
-    if (lastPsWin) dockWidget(lastPsWin);
-  }, 60);
   if (persist) engineSend({ cmd: "config", collapsed });
   releaseGameFocus();
 }
@@ -627,89 +606,6 @@ function findRemotePlayWindow() {
   });
 }
 
-function parseWin(text) {
-  const parts = String(text)
-    .split(",")
-    .map((item) => Number(item.trim()));
-  if (parts.length !== 4 || parts.some((item) => !Number.isFinite(item))) return null;
-  return { x: parts[0], y: parts[1], width: parts[2], height: parts[3] };
-}
-
-function cornerPoint(win, corner) {
-  const display = screen.getDisplayMatching(win);
-  const work = display.workArea;
-  const inset = 8;
-  const size = widgetSize();
-  const top = win.y + 28;
-  const spots = {
-    tl: { x: win.x + inset, y: top },
-    tr: { x: win.x + win.width - size.width - inset, y: top },
-    bl: { x: win.x + inset, y: win.y + win.height - size.height - inset },
-    br: { x: win.x + win.width - size.width - inset, y: win.y + win.height - size.height - inset },
-  };
-  let { x, y } = spots[corner] || spots.tr;
-  x = Math.max(work.x + 4, Math.min(x, work.x + work.width - size.width - 4));
-  y = Math.max(work.y + 4, Math.min(y, work.y + work.height - size.height - 4));
-  return { x, y };
-}
-
-function nearestCorner(win, bounds) {
-  let best = "tr";
-  let bestDist = Infinity;
-  for (const corner of CORNERS) {
-    const pos = cornerPoint(win, corner);
-    const dist = (bounds.x - pos.x) ** 2 + (bounds.y - pos.y) ** 2;
-    if (dist < bestDist) {
-      bestDist = dist;
-      best = corner;
-    }
-  }
-  return best;
-}
-
-function dockWidget(win) {
-  if (!mainWindow || mainWindow.isDestroyed() || userDragging) return;
-  lastPsWin = win;
-  const size = widgetSize();
-  const pos = cornerPoint(win, dockCorner);
-  const cur = mainWindow.getBounds();
-  if (Math.abs(cur.x - pos.x) <= 4 && Math.abs(cur.y - pos.y) <= 4 && cur.width === size.width && cur.height === size.height) {
-    return;
-  }
-  applyingDock = true;
-  mainWindow.setBounds({ x: pos.x, y: pos.y, width: size.width, height: size.height });
-  setTimeout(() => {
-    applyingDock = false;
-  }, 80);
-}
-
-function onUserMoved() {
-  if (applyingDock || !mainWindow || mainWindow.isDestroyed()) return;
-  userDragging = true;
-  clearTimeout(dragTimer);
-  dragTimer = setTimeout(() => {
-    userDragging = false;
-    if (!lastPsWin || !mainWindow || mainWindow.isDestroyed()) return;
-    dockCorner = nearestCorner(lastPsWin, mainWindow.getBounds());
-    dockWidget(lastPsWin);
-    engineSend({ cmd: "config", dockCorner });
-  }, 160);
-}
-
-function startDockLoop() {
-  if (dockTimer) clearInterval(dockTimer);
-  const tick = () => {
-    findRemotePlayWindow()
-      .then((text) => {
-        const win = parseWin(text);
-        if (win) dockWidget(win);
-      })
-      .catch(() => {});
-  };
-  tick();
-  dockTimer = setInterval(tick, 1600);
-}
-
 function createMain() {
   const display = screen.getPrimaryDisplay();
   const work = display.workArea;
@@ -747,14 +643,8 @@ function createMain() {
   if (IS_WIN) mainWindow.setContentProtection(true);
   mainWindow.setMovable(true);
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
-  mainWindow.on("will-move", () => {
-    userDragging = true;
-  });
-  mainWindow.on("moved", onUserMoved);
   mainWindow.on("closed", () => {
     mainWindow = null;
-    if (dockTimer) clearInterval(dockTimer);
-    dockTimer = null;
   });
 }
 
@@ -1023,7 +913,6 @@ app.whenReady().then(() => {
   try {
     startHub();
     createMain();
-    if (!IS_WIN) startDockLoop();
     setTimeout(() => {
       startWorker().catch((err) => log(`worker-error ${err && err.stack ? err.stack : err}`));
     }, 400);
