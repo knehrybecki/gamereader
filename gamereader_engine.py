@@ -639,10 +639,10 @@ _SOFT_WORDS = (
 # 5 kroków dyfuzji: ~30% szybciej niż domyślne 8, wymowa bez zmian
 SUPERTONIC_STEPS = 5
 # tempo lektora (parametr speed Supertonic przy zwykłej kwestii; było 1,05)
-LEKTOR_SPEED = 1.15
-LEKTOR_MAX_SPEED = 1.45
+LEKTOR_SPEED = 1.10
+LEKTOR_MAX_SPEED = 1.35
 # gdy w kolejce czeka już następny napis: kolejne fragmenty syntezują się szybciej, bez pauz
-LEKTOR_CATCHUP_RATE = 1.12
+LEKTOR_CATCHUP_RATE = 1.08
 # tempo dopasowane do napisów: lektor ma się zmieścić w czasie, w którym napis wisi na ekranie
 LEKTOR_CPS_PRIOR = 15.0  # znaki/s lektora przy speed=1 — potem uczy się z własnych syntez
 # nastrój z napisu (słowa i interpunkcja): tylko głośność i pauza — bez domieszki innego głosu
@@ -665,9 +665,9 @@ def lektor_punctuation(text, mood="calm"):
     pause = 0.0
     if end.endswith(("…", "...")):
         gain = min(gain, 0.9)
-        pause = 0.2
+        pause = 0.15
     elif end.endswith("?"):
-        pause = 0.1
+        pause = 0.06
     return gain, pause
 
 
@@ -3546,12 +3546,9 @@ class Engine:
                 # ile jeszcze będzie mówił (szacunek) — do liczenia tempa kwestii przygotowywanych zawczasu
                 speak_rate = max(8.0, self.lektor.cps1 * LEKTOR_SPEED / max(0.5, self.lektor.tts_scale) * max(1.0, boost))
                 self.lektor.busy_until = time.monotonic() + len(text) / speak_rate + 0.2
+                # kwestia zawsze do końca (bez ucinania) — zaległości nadrabia szybsze tempo kolejnych
+                # fragmentów i skrót następnej, połączonej wypowiedzi
                 for idx in range(len(segments)):
-                    if idx and self._queue_len(src) >= 2:
-                        # dwa nowe napisy czekają — reszta starej kwestii jest już nieaktualna,
-                        # lektor przeskakuje do tego, co jest teraz na ekranie (jak w filmie)
-                        self._timing(f"przeskok: pomijam {len(segments) - idx} fragm. starej kwestii")
-                        break
                     self.lektor.play(path)
                     nxt = None
                     if idx + 1 < len(segments):
@@ -3791,6 +3788,8 @@ class Engine:
             return
         # czekaj, aż napis przestanie się zmieniać (pisanie literka po literce, druga linia)
         need = max(1, int(getattr(self, "confirm_frames", OCR_CONFIRM_FRAMES)))
+        if self._source_kind() == "chrome":
+            need = 1  # Netflix/YouTube pokazują napis od razu w całości — jeden odczyt wystarczy
         if self._ocr_candidate and same_utterance(src, self._ocr_candidate) and not extends_utterance(self._ocr_candidate, src):
             self._ocr_candidate_n += 1
         else:
