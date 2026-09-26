@@ -560,6 +560,8 @@ MAX_SPEECH_SEC = 8.0
 PREROLL_SEC = 0.25
 # po ostatnim napisie przez tyle sekund dźwięk nie jest tłumaczony (napisy = główne dialogi)
 SUBTITLE_PRIORITY_SEC = 30.0
+# kwestia czekająca w kolejce dłużej niż tyle sekund (a jest już nowsza) — przepada, lektor leci dalej
+CATCH_UP_STALE_SEC = 3.0
 # zanim silnik nauczy się tempa napisów w grze: typowy napis ~16 znaków na sekundę
 SUBTITLE_CPS_DEFAULT = 16.0
 # skracanie tekstu: od tylu sekund spóźnienia lektora za napisem (poziom 1 / poziom 2)
@@ -627,8 +629,8 @@ GAME_PROFILES = {
         "hint": "Szybkie napisy — lektor czyta od pierwszego odczytu i przeskakuje zaległe kwestie.",
         # napis pojawia się od razu w całości — drugi odczyt OCR tylko opóźnia start
         "confirm_frames": 1,
-        # kwestie zmieniają się szybciej, niż da się je przeczytać: nadganiaj jak lektor w filmie
-        "catch_up": True,
+        # kwestie zmieniają się najszybciej: w kolejce tylko najnowsza (reszta przepada)
+        "catch_up_keep": 1,
     },
     "generic": {
         **_GAME_BASE,
@@ -1699,6 +1701,59 @@ def _spanish_word(match):
     for pattern, repl in _SPANISH_RULES:
         out = re.sub(pattern, repl, out)
     return out[:1].upper() + out[1:] if word[:1].isupper() else out
+
+
+def spanish_spoken(word):
+    """Hiszpańskie imię/nazwisko → wymowa zapisana po polsku (García → Garsija, Juan → Huan)."""
+    out = word.lower()
+    out = re.sub(r"í(?=[aeiouáéóú])", "i\x02", out)  # akcent na „í”: osobna sylaba (Rocío → Rosijo)
+    out = out.replace("ch", "\x01").replace("ll", "\x03").replace("ñ", "\x04")
+    out = out.replace("h", "")  # hiszpańskie „h” jest nieme (poza „ch”)
+    rules = [
+        (r"qu(?=[eiéí])", "k"), (r"gu(?=[eiéí])", "\x05"), (r"gü", "gł"), (r"gu(?=[aoáó])", "gw"),
+        (r"c(?=[eiéí])", "s"), (r"z", "s"), (r"j", "h"), (r"g(?=[eiéí])", "h"), (r"^x", "h"), (r"x", "ks"),
+        (r"v", "w"), (r"c", "k"), (r"y$", "j"), (r"(^|[aeiouáéíóú])y(?=[aeiouáéíóú])", r"\1j"),
+        (r"[áÁ]", "a"), (r"[éÉ]", "e"), (r"[íÍ]", "i"), (r"[óÓ]", "o"), (r"[úÚ]", "u"),
+    ]
+    for pattern, repl in rules:
+        out = re.sub(pattern, repl, out)
+    out = out.replace("\x01", "cz").replace("\x03", "j").replace("\x04", "ni").replace("\x05", "g")
+    # po polsku „si” to „ś” — hiszpańskie brzmi jak „sj” przed samogłoską, „sy” przed spółgłoską
+    out = re.sub(r"si(?=[aeiou])", "sj", out)
+    out = re.sub(r"si(?![aeiouj\x02])", "sy", out)
+    out = re.sub(r"ni(?=[aeiou])", "nj", out)
+    out = out.replace("\x02", "j")
+    return out[:1].upper() + out[1:]
+
+
+# Hiszpańskie imiona i nazwiska (Vice City / Leonida, RDR2) — wymowa z reguł, z akcentami i bez.
+# Pominięte te, które lektor i tak czyta dobrze albo są częste po angielsku (Julia, Daniel, David…).
+SPANISH_NAMES = """
+Alejandro Alberto Alfonso Alfredo Álvaro Andrés Ángel Antonio Armando Arturo Carlos César Cristian Diego
+Eduardo Emilio Enrique Esteban Eugenio Felipe Fernando Francisco Gerardo Gonzalo Guillermo Gustavo Héctor
+Ignacio Iván Jaime Javier Jesús Joaquín Jorge José Juan Julio Leonardo Lorenzo Luis Manuel Martín Mateo
+Miguel Nicolás Óscar Pablo Pedro Rafael Ramón Raúl Ricardo Roberto Rodrigo Rubén Salvador Santiago Sergio
+Tomás Vicente Víctor Adriana Alejandra Alicia Ángela Beatriz Carolina Catalina Cecilia Claudia Cristina
+Daniela Dolores Elena Esperanza Fernanda Gabriela Graciela Guadalupe Inés Isabel Jimena Josefina Juana
+Leticia Lorena Lucía Luisa Magdalena Marisol Mercedes Mónica Natalia Paloma Patricia Pilar Raquel Rocío
+Rosario Silvia Sofía Teresa Valentina Valeria Verónica Ximena Yolanda Consuelo Soledad Maribel Marisa
+Pepe Paco Chucho Nacho Lupe Chuy Beto Memo Toño Chela Conchita Maricela Araceli Yesenia Yadira
+García Rodríguez Fernández González López Martínez Sánchez Pérez Gómez Jiménez Ruiz Hernández Díaz
+Moreno Muñoz Álvarez Romero Alonso Gutiérrez Navarro Torres Domínguez Vázquez Ramos Ramírez Serrano
+Blanco Molina Morales Suárez Ortega Delgado Castro Ortiz Rubio Marín Núñez Iglesias Medina Garrido
+Cortés Castillo Santos Lozano Guerrero Cano Prieto Méndez Cruz Calvo Gallego Vidal León Márquez Herrera
+Peña Flores Cabrera Campos Vega Fuentes Carrasco Caballero Reyes Nieto Aguilar Pascual Santana Herrero
+Montero Hidalgo Giménez Ibáñez Ferrer Durán Benítez Mora Vargas Arias Carmona Crespo Román Soto Sáez
+Velasco Moya Soler Parra Bravo Gallardo Rojas Mendoza Salazar Escobar Guzmán Villa Rivera Espinoza
+Contreras Sandoval Figueroa Acosta Cárdenas Estrada Valdez Ochoa Zapata Montoya Quintero Orozco
+Maldonado Cervantes Bautista Caminos Escuella Duarte Treviño Castañeda Villanueva Salinas Pacheco Ibarra
+Robles Carrillo Barrera Cortez Velázquez Juárez Chávez Aguirre Mejía Cabello Sosa Rosales Solís Lara
+""".split()
+_ACCENT_FOLD = str.maketrans("áéíóúÁÉÍÓÚ", "aeiouAEIOU")
+for _name in SPANISH_NAMES:
+    for _form in {_name, _name.translate(_ACCENT_FOLD)}:
+        if _form not in ENGLISH_NAMES:
+            ENGLISH_NAMES[_form] = spanish_spoken(_name)
 
 
 # polskie końcówki odmiany doklejane do imienia (także po apostrofie: Mike'a, Tony'ego)
@@ -3479,7 +3534,9 @@ class Engine:
         self.confirm_frames = max(1, int(profile.get("confirm_frames", OCR_CONFIRM_FRAMES)))
         self.speak_cooldown = float(profile.get("speak_cooldown", 5.5))
         self.no_barge_in = bool(profile.get("no_barge_in", True))
-        self.catch_up = bool(profile.get("catch_up", False))
+        # lektor nie wyrabia → zaległe kwestie przepadają (wszystkie gry i Chrome)
+        self.catch_up = bool(profile.get("catch_up", True))
+        self.catch_up_keep = max(1, int(profile.get("catch_up_keep", 2)))
         if reset_lock:
             self.lock_region = False
             saved = self.game_regions.get(self._region_key()) or {}
@@ -3868,12 +3925,20 @@ class Engine:
             if not self._queue:
                 self.has_pending.clear()
                 return None
-            if getattr(self, "catch_up", False) and len(self._queue) > 2:
-                # zaległości: najstarsze kwestie przepadają, lektor przeskakuje do tego, co jest na ekranie
-                dropped = self._queue[:-2]
-                del self._queue[:-2]
-                self._prefetch_parts = None
-                self._timing(f"nadganiam: pomijam {len(dropped)} zaległe kwestie")
+            if getattr(self, "catch_up", False) and len(self._queue) > 1:
+                # zaległości: kwestia, której napis zniknął dawno temu, i nadmiar ponad limit przepadają —
+                # lektor przeskakuje do tego, co jest teraz na ekranie (jak lektor w filmie)
+                now = time.monotonic()
+                *older, newest = self._queue
+                keep = [
+                    it for it in older
+                    if now - self._seen_at.get(strip_fillers(it[0]) or it[0], now) < CATCH_UP_STALE_SEC
+                ] + [newest]
+                keep = keep[-getattr(self, "catch_up_keep", 2):]
+                if len(keep) < len(self._queue):
+                    self._timing(f"nadganiam: pomijam {len(self._queue) - len(keep)} zaległe kwestie")
+                    self._queue[:] = keep
+                    self._prefetch_parts = None
             first = self._queue.pop(0)
             parts = [first]
             # przygotowane zawczasu: weź dokładnie ten zestaw, dla którego dźwięk już czeka
@@ -4031,7 +4096,7 @@ class Engine:
                 break
             text = condense_polish(text, level=level)
         sentences = re.findall(r"[^.!?…]+(?:[.!?…]+|$)", text or "")
-        # całe zdania wypadają tylko przy dużym zatorze (3+ zaległe napisy; RDR2: 2+) — inaczej ginie kontekst
+        # całe zdania ze starszych kwestii wypadają przy 2+ zaległych napisach — inaczej ginie kontekst
         min_parts = 2 if getattr(self, "catch_up", False) else 3
         while len(parts or []) >= min_parts and len(sentences) > 1 and self.lektor.overload(" ".join(sentences), seconds) > 1.15:
             sentences.pop(0)
