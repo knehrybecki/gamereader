@@ -1663,6 +1663,18 @@ def polish_pronounce(text):
     return text
 
 
+def lektor_short_speed_cap(text):
+    """Górna granica tempa dla krótkich fragmentów — żeby model zdążył wymówić całe słowa."""
+    letters = sum(ch.isalpha() for ch in text or "")
+    if letters <= 8:
+        return 0.9
+    if letters <= 16:
+        return 0.95
+    if letters <= 28:
+        return 1.02
+    return LEKTOR_MAX_SPEED
+
+
 def lektor_pace(text):
     """Długie kwestie lekko szybciej, żeby lektor nadążał za napisami."""
     n = len(text or "")
@@ -1989,7 +2001,7 @@ class MaleLektor:
         # suwak Głośność = głośność lektora; przejęcie i interpunkcja ją modulują
         # volume 0…1 (suwak 0–100 %); 100 % = 1,3× — limiter i tak nie przepuści przesteru
         gain = 1.3 * max(0.0, min(1.0, float(volume))) * params["gain"] * punct_gain
-        key = f"st8|{self.voice}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
+        key = f"st9|{self.voice}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
         path = CACHE_DIR / f"{text_key(key)}.wav"
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         if path.exists() and path.stat().st_size >= 64:
@@ -2015,9 +2027,16 @@ class MaleLektor:
     def _synth(self, text, path, pace, style, pause):
         # pace < 1 = szybciej
         speed = max(0.9, min(LEKTOR_MAX_SPEED, LEKTOR_SPEED / max(0.5, pace)))
+        # krótka kwestia („Do środka.”, „Mordo…”, „Dobra, chwila.”): Supertonic daje jej za mało czasu
+        # i przy przyspieszeniu gubi ostatnie głoski albo całe słowo — takie fragmenty czytamy wolniej
+        speed = min(speed, lektor_short_speed_cap(text))
+        spoken = polish_pronounce(english_names_pl(text))
+        # bez kropki na końcu model potrafi urwać ostatnie słowo
+        if not re.search(r"[.!?…,;:]\W*$", spoken):
+            spoken = spoken.rstrip() + "."
         with self.synth_lock:
             wav, _dur = self.model.synthesize(
-                polish_pronounce(english_names_pl(text)), voice_style=style, total_steps=SUPERTONIC_STEPS, speed=speed, lang="pl"
+                spoken, voice_style=style, total_steps=SUPERTONIC_STEPS, speed=speed, lang="pl"
             )
         audio = np.asarray(wav, dtype=np.float32).reshape(-1)
         sr = int(self.model.sample_rate)
