@@ -553,6 +553,21 @@ def usable_ocr(text):
     return sum(ch.isalpha() for ch in raw) >= 2
 
 
+# Opisy dla niesłyszących w napisach (Netflix, YouTube): „[hiszpański]”, „[śmiech]”, „[Music]” —
+# lektor ich nie czyta. Także ucięte przez OCR na początku: „[hiszpański Co…”, „hiszpański] Szlag!”.
+_SUB_TAG = re.compile(r"\[[^\[\]]{1,40}\]")
+# opis małymi literami („[śmiech]”) to nigdy przycisk („[E]”, „[Spacja]”) — można go wyciąć przed filtrem menu
+_SUB_TAG_LOWER = re.compile(r"\[[a-ząćęłńóśźż][a-ząćęłńóśźż ,.\-]{2,39}\]")
+_SUB_TAG_HEAD = re.compile(
+    r"^\s*(?:\[[a-ząćęłńóśźż ]{3,30}\s+(?=[A-ZĄĆĘŁŃÓŚŹŻ])|[a-ząćęłńóśźż ]{3,30}\]\s*)"
+)
+
+
+def strip_subtitle_tags(text, lowercase_only=False):
+    raw = _SUB_TAG_HEAD.sub("", (_SUB_TAG_LOWER if lowercase_only else _SUB_TAG).sub(" ", text or ""))
+    return normalize_text(re.sub(r"\s+([,.!?…])", r"\1", raw))
+
+
 def trim_ocr_edges(text):
     """Śmieci OCR na brzegach napisu: kropka listy, myślnik dialogowy, „statku. -”, „alejkę. r”."""
     raw = normalize_text(text)
@@ -4539,6 +4554,7 @@ class Engine:
         return self.mode != "audio" and at is not None and time.monotonic() - at < PL_SUBS_HOLD_SEC
 
     def _on_subtitle(self, src):
+        src = strip_subtitle_tags(src, lowercase_only=True)
         if not usable_ocr(src):
             return
         if self._source_kind() != "chrome" and looks_like_game_ui(src):
@@ -4546,6 +4562,10 @@ class Engine:
             if src != getattr(self, "_ui_logged", ""):
                 self._ui_logged = src
                 self.emit({"event": "debug", "text": f"pomijam interfejs gry: {src}"})
+            return
+        # „[hiszpański]”, „[śmiech]” — opis dla niesłyszących, nie kwestia (podpowiedzi „[E]” odpadły wyżej)
+        src = strip_subtitle_tags(src)
+        if not usable_ocr(src):
             return
         if self._source_kind() == "chrome":
             if player_paused(src):
