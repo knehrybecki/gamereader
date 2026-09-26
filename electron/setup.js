@@ -10,14 +10,24 @@ const os = require("os");
 const path = require("path");
 
 const HOME = os.homedir();
-const RUNTIME = path.join(HOME, "Library/Application Support/LiveDub/runtime");
-const RUNTIME_PY = path.join(RUNTIME, "python", "bin", "python3");
+const IS_WIN = process.platform === "win32";
+const RUNTIME = IS_WIN
+  ? path.join(process.env.LOCALAPPDATA || path.join(HOME, "AppData", "Local"), "LiveDub", "runtime")
+  : path.join(HOME, "Library/Application Support/LiveDub/runtime");
+const RUNTIME_PY = IS_WIN ? path.join(RUNTIME, "python", "python.exe") : path.join(RUNTIME, "python", "bin", "python3");
 const STAMP = path.join(RUNTIME, ".ready");
 const PY_REPO = "astral-sh/python-build-standalone";
-// ta sama wersja, na której silnik działa u autora
-const PY_ASSET = /^cpython-3\.14\.\d+\+\d+-aarch64-apple-darwin-install_only\.tar\.gz$/;
+// macOS: ta sama wersja, na której silnik działa u autora; Windows: 3.12 — wszystkie biblioteki mają gotowe paczki
+const PY_ASSET = IS_WIN
+  ? new RegExp(
+      `^cpython-3\\.12\\.\\d+\\+\\d+-${process.arch === "arm64" ? "aarch64" : "x86_64"}-pc-windows-msvc-install_only\\.tar\\.gz$`,
+    )
+  : /^cpython-3\.14\.\d+\+\d+-aarch64-apple-darwin-install_only\.tar\.gz$/;
+const PY_LABEL = IS_WIN ? "Pythona 3.12 dla Windowsa" : "Pythona 3.14 dla Apple Silicon";
 // dość, żeby silnik wstał; reszta bibliotek ładuje się leniwie
-const PROBE = "import numpy, PIL, onnxruntime, supertonic";
+const PROBE = IS_WIN
+  ? "import numpy, PIL, onnxruntime, supertonic, winrt.windows.media.ocr"
+  : "import numpy, PIL, onnxruntime, supertonic";
 
 const LEGACY_VENV = path.join(HOME, "gamer", "gr");
 const BREW_CELLAR = "/opt/homebrew/Cellar/python@3.14";
@@ -27,7 +37,7 @@ function run(cmd, args, { env, onLine, timeout } = {}) {
     let out = "";
     let proc;
     try {
-      proc = spawn(cmd, args, { env: env || process.env, stdio: ["ignore", "pipe", "pipe"] });
+      proc = spawn(cmd, args, { env: env || process.env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     } catch (err) {
       resolve({ code: -1, out: String(err) });
       return;
@@ -71,6 +81,7 @@ function brewPythonHome() {
 
 // dotychczasowy zestaw: Engine.app (kopia Pythona z Homebrew) + venv ~/gamer/gr
 function legacyEngine(engineDir, candidates) {
+  if (IS_WIN) return null;
   const py = candidates.find((item) => fs.existsSync(item));
   const site = path.join(LEGACY_VENV, "lib/python3.14/site-packages");
   if (!py || !fs.existsSync(site)) return null;
@@ -88,7 +99,7 @@ function legacyEngine(engineDir, candidates) {
 }
 
 function runtimeEngine(engineDir) {
-  const env = { ...process.env, ELECTRON_RUN_AS_NODE: "", PYTHONUNBUFFERED: "1", PYTHONPATH: engineDir };
+  const env = { ...process.env, ELECTRON_RUN_AS_NODE: "", PYTHONUNBUFFERED: "1", PYTHONPATH: engineDir, PYTHONIOENCODING: "utf-8" };
   delete env.PYTHONHOME;
   delete env.VIRTUAL_ENV;
   return { py: RUNTIME_PY, env, kind: "runtime" };
@@ -106,6 +117,8 @@ function hashFile(file) {
 
 async function findPythonAsset() {
   const headers = { Accept: "application/vnd.github+json", "User-Agent": "LiveDub-setup" };
+  // CI (test na Windowsie): z tokenem, żeby nie trafić na limit zapytań bez logowania
+  if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
   const rel = await fetch(`https://api.github.com/repos/${PY_REPO}/releases/latest`, { headers });
   if (!rel.ok) throw new Error(`GitHub (Python): HTTP ${rel.status}`);
   const release = await rel.json();
@@ -121,7 +134,7 @@ async function findPythonAsset() {
     if (hit) return hit;
     if (assets.length < 100) break;
   }
-  throw new Error("nie znalazłem Pythona 3.14 dla Apple Silicon");
+  throw new Error(`nie znalazłem ${PY_LABEL}`);
 }
 
 async function installPython(status, log) {
@@ -134,7 +147,9 @@ async function installPython(status, log) {
   const tarball = path.join(RUNTIME, "python.tar.gz");
   fs.writeFileSync(tarball, Buffer.from(await res.arrayBuffer()));
   fs.rmSync(path.join(RUNTIME, "python"), { recursive: true, force: true });
-  const untar = await run("/usr/bin/tar", ["-xzf", tarball, "-C", RUNTIME]);
+  // Windows 10/11 ma własny tar (bsdtar) w System32
+  const tar = IS_WIN ? path.join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe") : "/usr/bin/tar";
+  const untar = await run(tar, ["-xzf", tarball, "-C", RUNTIME]);
   fs.rmSync(tarball, { force: true });
   if (untar.code !== 0 || !fs.existsSync(RUNTIME_PY)) throw new Error(`rozpakowanie Pythona: ${untar.out.slice(-300)}`);
 }

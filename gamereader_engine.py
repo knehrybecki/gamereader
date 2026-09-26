@@ -17,6 +17,14 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+IS_WIN = sys.platform == "win32"
+if IS_WIN:
+    import gamereader_win as winplat
+
+    winplat.enable_dpi_awareness()
+# Windows: silnik działa bez konsoli — bez tej flagi każde ffmpeg/odtwarzacz otwierałby czarne okno
+NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if IS_WIN else {}
+
 
 POLL_MS = 80
 MIN_INTERVAL = 0.10
@@ -34,8 +42,12 @@ def extends_utterance(prev, nxt):
 BLACK_MEAN = 8.0
 PREVIEW_W = 780
 PREVIEW_H = 110
-CONFIG_PATH = Path.home() / "Library/Application Support/GameReader/config.json"
-CACHE_DIR = Path.home() / "Library/Caches/GameReader"
+if IS_WIN:
+    CONFIG_PATH = Path(os.environ.get("APPDATA") or Path.home() / "AppData/Roaming") / "LiveDub/config.json"
+    CACHE_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData/Local") / "LiveDub/Cache"
+else:
+    CONFIG_PATH = Path.home() / "Library/Application Support/GameReader/config.json"
+    CACHE_DIR = Path.home() / "Library/Caches/GameReader"
 # Lektor: Supertonic 3 (kod MIT, model OpenRAIL-M) — czysta polska wymowa.
 # Synteza na CPU — na Macu szybsza od CoreML (zmierzone).
 SUPERTONIC_VOICES = ("M5", "M2", "M3", "M4", "M1")
@@ -522,14 +534,14 @@ def usable_ocr(text):
 
 def load_config():
     try:
-        return json.loads(CONFIG_PATH.read_text())
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except Exception:
         return {}
 
 
 def save_config(data):
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(data, indent=2))
+    CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 SAMPLE_RATE = 16000
@@ -982,9 +994,28 @@ def _quartz_chrome_info(video_only=False):
     return best
 
 
+def _win_source_window(source, prefer):
+    """Windows: to samo co find_source_window, z listy okien systemu."""
+    if source == "auto" and prefer == "chrome":
+        info = winplat.find_browser(video_only=True, video_titles=VIDEO_TITLES)
+        if info is not None:
+            return (*info[:5], "chrome", info[5])
+    if source in ("auto", "ps"):
+        info = winplat.find_remote_play()
+        if info is not None:
+            return (*info[:5], "ps", "PS Remote Play")
+    if source in ("auto", "chrome"):
+        info = winplat.find_browser(video_only=(source == "auto"), video_titles=VIDEO_TITLES)
+        if info is not None:
+            return (*info[:5], "chrome", info[5])
+    return None
+
+
 def find_source_window(source="auto", prefer="ps"):
     """(x, y, w, h, window_id, rodzaj, tytuł) okna źródła albo None. rodzaj: "ps" | "chrome".
     prefer="chrome": w trybie auto najpierw Netflix/YouTube w Chrome (np. GTA VI na wycinkach)."""
+    if IS_WIN:
+        return _win_source_window(source, prefer)
     if source == "auto" and prefer == "chrome":
         info = _quartz_chrome_info(video_only=True)
         if info is not None:
@@ -1059,6 +1090,9 @@ def player_controls_visible(info):
 
 def capture_remote_play_band(left, top, width, height, info=None):
     """Szybki zrzut paska z okna źródła (Quartz w procesie, bez spawn helpera)."""
+    if IS_WIN:
+        # Windows: zrzut ekranu; okna LiveDub są wyłączone z przechwytywania (setContentProtection)
+        return winplat.grab(left, top, width, height)
     try:
         from Quartz import (
             CGWindowListCreateImage,
@@ -1213,6 +1247,15 @@ def audio_tap_cmd(target="ps"):
     return [str(path), "--tap", "--tap-target", target] if path else None
 
 
+def _hub_tcp():
+    """Windows: Electron słucha na 127.0.0.1 — GAMEREADER_HUB = „host:port:token”."""
+    raw = os.environ.get("GAMEREADER_HUB") or ""
+    parts = raw.split(":")
+    if len(parts) != 3 or not parts[1].isdigit():
+        return None
+    return parts[0], int(parts[1]), parts[2]
+
+
 def helper_sock_path():
     env = os.environ.get("GAMEREADER_SOCK")
     if env:
@@ -1221,15 +1264,24 @@ def helper_sock_path():
 
 
 def helper_available():
+    if IS_WIN:
+        return _hub_tcp() is not None
     path = helper_sock_path()
     return path.exists() or path.is_socket()
 
 
 def helper_call(cmd, timeout=20):
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
-    sock.connect(str(helper_sock_path()))
-    sock.sendall((cmd.rstrip() + "\n").encode())
+    hub = _hub_tcp() if IS_WIN else None
+    if hub is not None:
+        host, port, token = hub
+        sock = socket.create_connection((host, port), timeout=timeout)
+        sock.settimeout(timeout)
+        sock.sendall(f"{token} {cmd.rstrip()}\n".encode())
+    else:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect(str(helper_sock_path()))
+        sock.sendall((cmd.rstrip() + "\n").encode())
     buf = b""
     while b"\n" not in buf:
         chunk = sock.recv(4096)
@@ -1259,6 +1311,8 @@ def screen_access_ok():
     """Czy macOS pozwala czytać ekran (silnik i helper). False = brak zgody „Nagrywanie ekranu”.
 
     Bez tej zgody nie widać tytułów okien ani napisów — silnik po cichu czytałby tylko z dźwięku."""
+    if IS_WIN:
+        return True  # Windows nie pyta o zgodę na zrzut ekranu
     try:
         from Quartz import CGPreflightScreenCaptureAccess
 
@@ -1454,6 +1508,12 @@ class GameAudioTap:
 
 
 def open_mic_settings():
+    if IS_WIN:
+        try:
+            os.startfile("ms-settings:privacy-microphone")
+        except OSError:
+            pass
+        return
     urls = [
         "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
         "x-apple.systempreferences:com.apple.Settings.PrivacySecurity.Privacy.Microphone",
@@ -1465,6 +1525,8 @@ def open_mic_settings():
 
 
 def open_screen_settings():
+    if IS_WIN:
+        return
     urls = [
         "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
         "x-apple.systempreferences:com.apple.Settings.PrivacySecurity.Privacy.ScreenCapture",
@@ -1838,6 +1900,37 @@ class _PlayHandle:
         return 0
 
 
+class _WinsoundHandle:
+    """Windows: odtwarzanie przez winsound, udaje Popen (poll/terminate/wait/kill)."""
+
+    def __init__(self, path):
+        import winsound
+
+        self._winsound = winsound
+        try:
+            with wave.open(str(path), "rb") as info:
+                seconds = info.getnframes() / float(info.getframerate())
+        except Exception:
+            seconds = 3.0
+        self.end = time.monotonic() + seconds + 0.05
+        winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+
+    def poll(self):
+        return 0 if time.monotonic() >= self.end else None
+
+    def terminate(self):
+        self._winsound.PlaySound(None, 0)
+        self.end = 0.0
+
+    kill = terminate
+
+    def wait(self, timeout=None):
+        left = self.end - time.monotonic()
+        if left > 0:
+            time.sleep(min(left, timeout) if timeout is not None else left)
+        return 0
+
+
 class PlayerProcess:
     def __init__(self):
         self.proc = None
@@ -1851,8 +1944,10 @@ class PlayerProcess:
 
     def _start(self):
         self.proc = subprocess.Popen(
-            [sys.executable, "-u", "-c", _PLAYER_CODE],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            # -X utf8: ścieżka do pliku z nazwą użytkownika z polskimi znakami (Windows) przechodzi bez strat
+            [sys.executable, "-X", "utf8", "-u", "-c", _PLAYER_CODE],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
+            **NO_WINDOW,
         )
         if self.proc.stdout.readline().strip() != "READY":
             self.proc.kill()
@@ -1899,10 +1994,13 @@ class PlayerProcess:
             return handle
 
 
+TIMING_LOG = os.path.join(tempfile.gettempdir(), "livedub-engine.log") if IS_WIN else "/tmp/livedub-engine.log"
+
+
 def log_timing(line):
-    """Czasy lektora do /tmp/livedub-engine.log — do szukania opóźnień."""
+    """Czasy lektora do /tmp/livedub-engine.log (Windows: %TEMP%\\livedub-engine.log) — do szukania opóźnień."""
     try:
-        with open("/tmp/livedub-engine.log", "a", encoding="utf-8") as handle:
+        with open(TIMING_LOG, "a", encoding="utf-8") as handle:
             handle.write(f"{time.strftime('%H:%M:%S')} {line}\n")
     except OSError:
         pass
@@ -2140,6 +2238,7 @@ class MaleLektor:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     timeout=20,
+                    **NO_WINDOW,
                 )
                 if result.returncode == 0 and tmp.is_file() and tmp.stat().st_size >= 64:
                     tmp.replace(dst)
@@ -2161,6 +2260,11 @@ class MaleLektor:
             if handle is not None:
                 self.player = handle
                 return
+        if IS_WIN:
+            # zapas bez procesu odtwarzacza: winsound (bez zmiany tempa)
+            with self.lock:
+                self.player = _WinsoundHandle(path)
+            return
         cmd = ["afplay", str(path)]
         if rate and abs(rate - 1.0) > 0.01:
             cmd = ["afplay", "-r", f"{rate:.2f}", "-q", "1", str(path)]
@@ -2881,6 +2985,20 @@ class AppleVisionOcr:
             best = strip_speaker_label(best)
         return best if usable_ocr(best) else ""
 
+class WindowsOcr(AppleVisionOcr):
+    """Windows: ten sam wybór odczytu i poprawki PL co przy Vision, rozpoznawanie — Windows.Media.Ocr."""
+
+    def __init__(self):
+        super().__init__()
+        self.backend = winplat.WindowsOcrBackend()
+
+    def _run_items(self, image, framework="vision", recognition_level="accurate", languages=None):
+        if self.backend.error:
+            raise RuntimeError(self.backend.error)
+        rows = self.backend.recognize(image, languages or self.languages)
+        return self._rows_to_items(rows, image)
+
+
 class Engine:
     def __init__(self, emit):
         self.emit = emit
@@ -2944,7 +3062,8 @@ class Engine:
             self.dock_corner = "tr"
         self._last_win_sync = 0.0
         self.ps_window = None
-        self.ocr = AppleVisionOcr()
+        self.ocr = WindowsOcr() if IS_WIN else AppleVisionOcr()
+        self._ocr_lang_warned = False
         self.lektor = MaleLektor()
         voice = str(self.cfg.get("lektorVoice") or DEFAULT_SUPERTONIC_VOICE).strip().upper()
         if voice in SUPERTONIC_VOICES:
@@ -2999,7 +3118,9 @@ class Engine:
                 continue
             win = info[:4] if info else None
             kind = info[5] if info else None
-            if (win is None) != (self.ps_window is None) or kind != self._source_kind():
+            # Windows: widżet przykleja się do okna według psWindow ze stanu — wysyłaj też ruch okna
+            moved = IS_WIN and win != self.ps_window
+            if moved or (win is None) != (self.ps_window is None) or kind != self._source_kind():
                 self.ps_window = win
                 self.source_info = info
                 self.emit({"event": "state", **self.snapshot()})
@@ -3327,7 +3448,17 @@ class Engine:
                 self._screen_warned = True
                 open_screen_settings()
             return
-        if self.mode == "audio":
+        if IS_WIN:
+            # Windows: na razie tylko napisy (tłumaczenie dźwięku w kolejnej wersji)
+            if not self._sync_remote_band(force=True) and not self.lock_region:
+                self.running = False
+                self.emit({"event": "running", "on": False})
+                self.emit({"event": "status", "text": "Nie widzę gry. Odpal PS Remote Play albo Netflix/YouTube w Chrome."})
+                return
+            note = " (dźwięk EN→PL na Windowsie będzie w kolejnej wersji)" if self.mode == "audio" else ""
+            self.emit({"event": "status", "text": f"Napisy z {self._source_label()}{note}."})
+            target = self._ocr_scan_thread
+        elif self.mode == "audio":
             self.emit({"event": "status", "text": f"Podpinam dźwięk: {self._source_label()}…"})
             target = self._audio_loop
         elif self.mode == "ocr":
@@ -3980,6 +4111,31 @@ class Engine:
             self._pl_subs_at = now
         self._offer_line(text, translate)
 
+    def _ocr_scan_thread(self):
+        try:
+            self._ocr_scan_loop()
+        finally:
+            self.emit({"event": "running", "on": False})
+
+    def _warn_ocr_language(self):
+        """Windows bez polskiego OCR czyta bez ąęćłńóśźż — powiedz raz, jak to naprawić."""
+        backend = getattr(self.ocr, "backend", None)
+        if self._ocr_lang_warned or backend is None:
+            return
+        if backend.error:
+            self._ocr_lang_warned = True
+            self.emit({"event": "status", "text": backend.error})
+        elif backend.missing_polish:
+            self._ocr_lang_warned = True
+            self.emit(
+                {
+                    "event": "status",
+                    "text": "Windows nie ma polskiego OCR — napisy bez polskich znaków. Ustawienia → Czas i język → "
+                    "Język i region → Dodaj język: polski, potem uruchom LiveDub ponownie.",
+                }
+            )
+            winplat.open_language_settings()
+
     def _ocr_only_loop(self):
         if self.duck:
             # bez tłumaczenia z dźwięku — tylko ściszanie gry i emocje z głosu postaci
@@ -4017,6 +4173,8 @@ class Engine:
                 if digest != last_hash or not self.last_subtitle:
                     last_hash = digest
                     src = self.ocr.read(frame)
+                    if IS_WIN:
+                        self._warn_ocr_language()
                     if src and src != self._last_ocr_logged:
                         self._last_ocr_logged = src
                         self.emit({"event": "debug", "text": f"OCR: {src}"})

@@ -12,7 +12,8 @@ const fs = require("fs");
 const net = require("net");
 const os = require("os");
 const path = require("path");
-const { desktopCapturer, session, screen, Menu, dialog } = electron;
+const { desktopCapturer, session, screen, Menu, dialog, Tray, nativeImage } = electron;
+const crypto = require("crypto");
 const { checkForUpdates } = require("./updater");
 const { ensureEngine } = require("./setup");
 const pkg = require("./package.json");
@@ -40,6 +41,21 @@ let lastRegion = null;
 let collapsed = false;
 
 const HOME = os.homedir();
+const IS_WIN = process.platform === "win32";
+const IS_MAC = process.platform === "darwin";
+// Windows: silnik łączy się z Electronem przez 127.0.0.1 (z losowym tokenem) zamiast gniazda Unix
+const HUB_TOKEN = IS_WIN ? crypto.randomBytes(16).toString("hex") : "";
+let hubPort = 0;
+let tray = null;
+// Windows: druga kopia (np. drugi klik w skrót) tylko pokazuje widżet pierwszej
+if (IS_WIN && !app.requestSingleInstanceLock()) {
+  app.exit(0);
+}
+app.on("second-instance", () => {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.showInactive();
+});
+const MAIN_LOG = IS_WIN ? path.join(os.tmpdir(), "gamereader-main.log") : "/tmp/gamereader-main.log";
+const ENGINE_LOG = IS_WIN ? path.join(os.tmpdir(), "livedub-engine.log") : "/tmp/livedub-engine.log";
 const VENV = path.join(HOME, "gamer", "gr");
 const PYTHON = path.join(VENV, "bin", "python3.14");
 const PYTHON_FALLBACK = "/opt/homebrew/opt/python@3.14/bin/python3.14";
@@ -80,8 +96,14 @@ function sendToWindow(payload) {
     mainWindow.webContents.send("engine-event", payload);
   }
   if ((payload.event === "ready" || payload.event === "state") && Array.isArray(payload.region) && payload.region.length === 4) {
-    lastRegion = payload.region.map((n) => Number(n));
+    lastRegion = toDip(payload.region.map((n) => Number(n)));
     syncRegionGuide();
+  }
+  if (IS_WIN && (payload.event === "ready" || payload.event === "state") && "psWindow" in payload) {
+    // Windows: okno gry zna silnik (lista okien systemu) — widżet przykleja się do niego
+    const win = Array.isArray(payload.psWindow) && payload.psWindow.length === 4 ? toDip(payload.psWindow.map(Number)) : null;
+    if (win) dockWidget({ x: win[0], y: win[1], width: win[2], height: win[3] });
+    else lastPsWin = null;
   }
   if ((payload.event === "ready" || payload.event === "state") && payload.dockCorner) {
     if (CORNERS.includes(payload.dockCorner)) dockCorner = payload.dockCorner;
@@ -95,6 +117,13 @@ function sendToWindow(payload) {
   if ((payload.event === "ready" || payload.event === "state") && typeof payload.collapsed === "boolean") {
     if (collapsed !== payload.collapsed) setCollapsed(payload.collapsed, false);
   }
+}
+
+// Windows: silnik liczy w fizycznych pikselach, okna Electrona — w punktach (skalowanie 125 %, 150 %…)
+function toDip(rect) {
+  if (!IS_WIN || !rect || rect.length !== 4) return rect;
+  const r = screen.screenToDipRect(null, { x: rect[0], y: rect[1], width: rect[2], height: rect[3] });
+  return [r.x, r.y, r.width, r.height];
 }
 
 function widgetSize() {
@@ -117,14 +146,16 @@ function ensureRegionGuide() {
     focusable: false,
     hasShadow: false,
     show: false,
-    type: "panel",
+    ...(IS_MAC ? { type: "panel" } : {}),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
-  regionGuideWin.setAlwaysOnTop(true, "floating");
-  regionGuideWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
+  regionGuideWin.setAlwaysOnTop(true, IS_WIN ? "screen-saver" : "floating");
+  if (IS_MAC) regionGuideWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
+  // Windows: ramka nie może trafić do zrzutu, z którego OCR czyta napisy
+  if (IS_WIN) regionGuideWin.setContentProtection(true);
   regionGuideWin.setIgnoreMouseEvents(true);
   regionGuideWin.loadFile(path.join(__dirname, "renderer", "region.html"));
   regionGuideWin.on("closed", () => {
@@ -337,6 +368,12 @@ function writeLine(socket, text) {
 
 function handleHub(socket, line) {
   const parts = line.trim().split(/\s+/);
+  if (HUB_TOKEN) {
+    if (parts.shift() !== HUB_TOKEN) {
+      socket.destroy();
+      return;
+    }
+  }
   const cmd = parts[0] || "";
   if (cmd === "PERM") {
     writeLine(socket, "OK");
@@ -363,7 +400,7 @@ function handleHub(socket, line) {
     return;
   }
   if (cmd === "PICK") {
-    pickRegion()
+    (IS_WIN ? pickRegionWin() : pickRegion())
       .then((text) => writeLine(socket, text))
       .finally(() => socket.end());
     return;
@@ -402,25 +439,95 @@ function handleHub(socket, line) {
   socket.end();
 }
 
+function hubConnection(socket) {
+  let buf = Buffer.alloc(0);
+  let taken = false;
+  socket.on("error", () => {});
+  socket.on("data", (chunk) => {
+    if (taken) return;
+    buf = Buffer.concat([buf, chunk]);
+    const idx = buf.indexOf(10);
+    if (idx < 0) return;
+    taken = true;
+    handleHub(socket, buf.slice(0, idx).toString("utf8"));
+  });
+}
+
+// Windows: zaznaczanie paska napisów — przezroczyste okno na cały ekran, przeciągnij prostokąt
+function pickRegionWin() {
+  return new Promise((resolve) => {
+    const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+    const b = display.bounds;
+    const win = new BrowserWindow({
+      x: b.x,
+      y: b.y,
+      width: b.width,
+      height: b.height,
+      frame: false,
+      transparent: true,
+      backgroundColor: "#00000000",
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      resizable: false,
+      movable: false,
+      fullscreenable: false,
+      hasShadow: false,
+      show: false,
+      webPreferences: {
+        preload: path.join(__dirname, "pick-preload.js"),
+        contextIsolation: true,
+        nodeIntegration: false,
+      },
+    });
+    win.setAlwaysOnTop(true, "screen-saver");
+    let done = false;
+    const finish = (rect) => {
+      if (done) return;
+      done = true;
+      ipcMain.removeListener("pick-done", onDone);
+      if (!win.isDestroyed()) win.close();
+      if (!rect || !(rect.width >= 8 && rect.height >= 8)) {
+        resolve("ERR cancel");
+        return;
+      }
+      const phys = screen.dipToScreenRect(null, {
+        x: Math.round(b.x + rect.x),
+        y: Math.round(b.y + rect.y),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      });
+      resolve(`OK ${phys.x},${phys.y},${phys.width},${phys.height}`);
+    };
+    const onDone = (event, rect) => {
+      if (event.sender === win.webContents) finish(rect);
+    };
+    ipcMain.on("pick-done", onDone);
+    win.on("closed", () => finish(null));
+    win.once("ready-to-show", () => {
+      win.show();
+      win.focus();
+    });
+    win.loadFile(path.join(__dirname, "renderer", "pick.html"));
+  });
+}
+
 function startHub() {
+  if (IS_WIN) {
+    hubServer = net.createServer((socket) => hubConnection(socket));
+    hubServer.listen(0, "127.0.0.1", () => {
+      hubPort = hubServer.address().port;
+      log(`hub-listen ${hubPort}`);
+    });
+    hubServer.on("error", (err) => log(`hub-err ${err}`));
+    return;
+  }
   try {
     fs.mkdirSync(path.dirname(SOCK), { recursive: true });
     fs.unlinkSync(SOCK);
   } catch (_err) {
     /* ignore */
   }
-  hubServer = net.createServer((socket) => {
-    let buf = Buffer.alloc(0);
-    let taken = false;
-    socket.on("data", (chunk) => {
-      if (taken) return;
-      buf = Buffer.concat([buf, chunk]);
-      const idx = buf.indexOf(10);
-      if (idx < 0) return;
-      taken = true;
-      handleHub(socket, buf.slice(0, idx).toString("utf8"));
-    });
-  });
+  hubServer = net.createServer((socket) => hubConnection(socket));
   hubServer.listen(SOCK, () => {
     try {
       fs.chmodSync(SOCK, 0o600);
@@ -437,16 +544,21 @@ async function startWorker() {
     ? path.join(process.resourcesPath, "engine", "gamereader_worker.py")
     : path.join(__dirname, "..", "gamereader_worker.py");
   const engineDir = path.dirname(script);
+  const reqName = IS_WIN ? "requirements-win.txt" : "requirements.txt";
   const requirements = app.isPackaged
-    ? path.join(process.resourcesPath, "engine", "requirements.txt")
-    : path.join(__dirname, "..", "requirements.txt");
+    ? path.join(process.resourcesPath, "engine", reqName)
+    : path.join(__dirname, "..", reqName);
+  if (IS_WIN) {
+    // silnik dostaje port centrali w zmiennej środowiskowej — poczekaj, aż centrala słucha
+    for (let i = 0; i < 50 && !hubPort; i += 1) await new Promise((r) => setTimeout(r, 100));
+  }
   let engine;
   try {
     // dotychczasowe środowisko, a gdy go nie ma albo nie działa — instalacja przy pierwszym starcie
     engine = await ensureEngine({
       engineDir,
       requirements,
-      legacyCandidates: [pythonBin(), PYTHON],
+      legacyCandidates: IS_WIN ? [] : [pythonBin(), PYTHON],
       status: (text) => sendToWindow({ event: "status", text }),
       log,
     });
@@ -458,10 +570,14 @@ async function startWorker() {
     });
     return;
   }
+  const hubEnv = IS_WIN
+    ? { GAMEREADER_HUB: `127.0.0.1:${hubPort}:${HUB_TOKEN}`, PYTHONIOENCODING: "utf-8" }
+    : { GAMEREADER_HELPER: helperPath(), GAMEREADER_SOCK: SOCK };
   workerProc = spawn(engine.py, [script], {
     cwd: engineDir,
-    env: { ...engine.env, GAMEREADER_HELPER: helperPath(), GAMEREADER_SOCK: SOCK },
+    env: { ...engine.env, ...hubEnv },
     stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
   });
   let buf = "";
   workerProc.stdout.on("data", (chunk) => {
@@ -635,16 +751,21 @@ function createMain() {
     resizable: false,
     // panel = widżet unosi się nad grą/filmem na pełnym ekranie, a ikona LiveDub zostaje w Docku
     // (samo visibleOnFullScreen chowa ikonę z Docka — stąd skipTransformProcessType niżej)
-    type: "panel",
+    ...(IS_MAC ? { type: "panel" } : {}),
+    ...(IS_WIN ? { icon: path.join(__dirname, "icon.png") } : {}),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
-  mainWindow.setAlwaysOnTop(true, "floating");
-  mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
-  mainWindow.setWindowButtonVisibility(false);
+  mainWindow.setAlwaysOnTop(true, IS_WIN ? "screen-saver" : "floating");
+  if (IS_MAC) {
+    mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
+    mainWindow.setWindowButtonVisibility(false);
+  }
+  // Windows: OCR zrzuca ekran — widżet nie może zasłonić napisów w zrzucie
+  if (IS_WIN) mainWindow.setContentProtection(true);
   mainWindow.setMovable(true);
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
   mainWindow.on("will-move", () => {
@@ -660,7 +781,7 @@ function createMain() {
 
 function log(line) {
   try {
-    fs.appendFileSync("/tmp/gamereader-main.log", `${new Date().toISOString()} ${line}\n`);
+    fs.appendFileSync(MAIN_LOG, `${new Date().toISOString()} ${line}\n`);
   } catch (_err) {
     /* ignore */
   }
@@ -696,11 +817,76 @@ const HELP_TEXT = [
   "Gdy lektor się spóźnia albo coś nie gra: Pomoc → Otwórz log lektora i wyślij jego końcówkę.",
 ].join("\n");
 
+const HELP_TEXT_WIN = [
+  "1. Włącz PS Remote Play albo Netflixa/YouTube w Chrome — okno musi być widoczne, nie zminimalizowane.",
+  "2. LiveDub sam wykryje grę i zacznie czytać napisy (albo kliknij „Uruchom”).",
+  "3. Polskie znaki w napisach: Windows musi mieć język polski (Ustawienia → Czas i język → Język i region).",
+  "4. Na Windowsie LiveDub czyta na razie tylko napisy — tłumaczenie dźwięku będzie w kolejnej wersji.",
+  "",
+  "Gdy lektor się spóźnia albo coś nie gra: ikona LiveDub w zasobniku → Otwórz log lektora i wyślij jego końcówkę.",
+].join("\n");
+
 function licensesText() {
   return LICENSES.map(([name, lic]) => `${name} — ${lic}`).join("\n");
 }
 
+function showAbout() {
+  const year = new Date().getFullYear();
+  dialog.showMessageBox({
+    type: "info",
+    message: `LiveDub ${app.getVersion()}`,
+    detail: `Polski lektor na żywo do gier i filmów.\n© ${year} ${pkg.author || "Kamil"}. Wszelkie prawa zastrzeżone.\n\nLicencje składników:\n${licensesText()}`,
+    buttons: ["OK"],
+  });
+}
+
+// Windows: zamiast menu aplikacji (okno bez ramki go nie pokazuje) — ikona w zasobniku obok zegara
+function setupTray() {
+  const image = nativeImage.createFromPath(path.join(__dirname, "icon.png")).resize({ width: 16, height: 16 });
+  tray = new Tray(image);
+  tray.setToolTip("LiveDub");
+  const toggleWidget = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isVisible()) mainWindow.hide();
+    else mainWindow.showInactive();
+  };
+  const checkNow = async () => {
+    const res = await runUpdateCheck();
+    if (res && res.state === "installing") return;
+    dialog.showMessageBox({ type: "info", message: "Aktualizacje", detail: (res && res.text) || "Gotowe.", buttons: ["OK"] });
+  };
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: "Pokaż / ukryj widżet", click: toggleWidget },
+      { label: "Zwiń / rozwiń widżet", click: () => setCollapsed(!collapsed, true) },
+      { type: "separator" },
+      {
+        label: "Jak używać LiveDub",
+        click: () => dialog.showMessageBox({ type: "info", message: "Jak używać LiveDub", detail: HELP_TEXT_WIN, buttons: ["OK"] }),
+      },
+      {
+        label: "Otwórz log lektora",
+        click: () => {
+          if (!fs.existsSync(ENGINE_LOG)) fs.writeFileSync(ENGINE_LOG, "");
+          shell.openPath(ENGINE_LOG);
+        },
+      },
+      { label: "Ustawienia języka (polski OCR)", click: () => shell.openExternal("ms-settings:regionlanguage") },
+      { label: "Sprawdź aktualizacje…", click: () => checkNow() },
+      { label: "O LiveDub", click: () => showAbout() },
+      { type: "separator" },
+      { label: "Zakończ LiveDub", click: () => app.quit() },
+    ]),
+  );
+  tray.on("click", toggleWidget);
+}
+
 function setupAppMenu() {
+  if (IS_WIN) {
+    Menu.setApplicationMenu(null);
+    setupTray();
+    return;
+  }
   const year = new Date().getFullYear();
   app.setAboutPanelOptions({
     applicationName: "LiveDub",
@@ -772,7 +958,7 @@ function setupAppMenu() {
         {
           label: "Otwórz log lektora",
           click: () => {
-            const file = "/tmp/livedub-engine.log";
+            const file = ENGINE_LOG;
             if (!fs.existsSync(file)) fs.writeFileSync(file, "");
             shell.openPath(file);
           },
@@ -794,7 +980,7 @@ app.whenReady().then(() => {
   try {
     startHub();
     createMain();
-    startDockLoop();
+    if (!IS_WIN) startDockLoop();
     setTimeout(() => {
       startWorker().catch((err) => log(`worker-error ${err && err.stack ? err.stack : err}`));
     }, 400);
@@ -881,8 +1067,11 @@ ipcMain.on("region-guide", (_e, on) => setRegionGuide(!!on));
 ipcMain.on("set-collapsed", (_e, on) => setCollapsed(!!on, true));
 ipcMain.on("release-focus", () => releaseGameFocus());
 ipcMain.on("open-screen", () => {
+  if (IS_WIN) return; // Windows nie pyta o zgodę na zrzut ekranu
   shell.openExternal("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture");
 });
 ipcMain.on("open-mic", () => {
-  shell.openExternal("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone");
+  shell.openExternal(
+    IS_WIN ? "ms-settings:privacy-microphone" : "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
+  );
 });
