@@ -124,7 +124,7 @@ function ensureRegionGuide() {
     },
   });
   regionGuideWin.setAlwaysOnTop(true, "floating");
-  regionGuideWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  regionGuideWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
   regionGuideWin.setIgnoreMouseEvents(true);
   regionGuideWin.loadFile(path.join(__dirname, "renderer", "region.html"));
   regionGuideWin.on("closed", () => {
@@ -633,6 +633,9 @@ function createMain() {
     alwaysOnTop: true,
     fullscreenable: false,
     resizable: false,
+    // panel = widżet unosi się nad grą/filmem na pełnym ekranie, a ikona LiveDub zostaje w Docku
+    // (samo visibleOnFullScreen chowa ikonę z Docka — stąd skipTransformProcessType niżej)
+    type: "panel",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -640,7 +643,7 @@ function createMain() {
     },
   });
   mainWindow.setAlwaysOnTop(true, "floating");
-  mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
   mainWindow.setWindowButtonVisibility(false);
   mainWindow.setMovable(true);
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
