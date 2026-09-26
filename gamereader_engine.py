@@ -1056,7 +1056,12 @@ def player_controls_visible(info):
 def capture_remote_play_band(left, top, width, height, info=None):
     """Szybki zrzut paska z okna źródła (Quartz w procesie, bez spawn helpera)."""
     if IS_WIN:
-        # Windows: zrzut ekranu; okna LiveDub są wyłączone z przechwytywania (setContentProtection)
+        # PS5: obraz z samego okna PS Remote Play — to, co je zasłania (powiadomienia, inne okna), nie wchodzi
+        if info is not None and len(info) > 5 and info[5] == "ps" and info[4]:
+            frame = winplat.grab_window(info[4], left, top, width, height)
+            if frame is not None:
+                return frame
+        # reszta (i zapas): zrzut ekranu; okna LiveDub są wyłączone z przechwytywania (setContentProtection)
         return winplat.grab(left, top, width, height)
     try:
         from Quartz import (

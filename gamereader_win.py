@@ -190,6 +190,77 @@ def primary_display_bounds():
 
 _grab_local = threading.local()
 
+gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+user32.GetWindowDC.argtypes = [wintypes.HWND]
+user32.GetWindowDC.restype = ctypes.c_void_p
+user32.ReleaseDC.argtypes = [wintypes.HWND, ctypes.c_void_p]
+user32.PrintWindow.argtypes = [wintypes.HWND, ctypes.c_void_p, wintypes.UINT]
+user32.PrintWindow.restype = wintypes.BOOL
+gdi32.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+gdi32.CreateCompatibleDC.restype = ctypes.c_void_p
+gdi32.CreateCompatibleBitmap.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+gdi32.CreateCompatibleBitmap.restype = ctypes.c_void_p
+gdi32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+gdi32.SelectObject.restype = ctypes.c_void_p
+gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+gdi32.DeleteDC.argtypes = [ctypes.c_void_p]
+gdi32.GetDIBits.argtypes = [
+    ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT, wintypes.UINT, ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT,
+]
+PW_RENDERFULLCONTENT = 2
+
+
+class _BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG), ("biHeight", wintypes.LONG),
+        ("biPlanes", wintypes.WORD), ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+        ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", wintypes.LONG), ("biYPelsPerMeter", wintypes.LONG),
+        ("biClrUsed", wintypes.DWORD), ("biClrImportant", wintypes.DWORD),
+    ]
+
+
+def grab_window(hwnd, left, top, width, height):
+    """Zrzut prostokąta (współrzędne ekranu) z SAMEGO okna — także gdy coś je zasłania
+    (powiadomienia, inne okna). BGR uint8 albo None (okno zminimalizowane, czarny obraz)."""
+    if not hwnd or user32.IsIconic(hwnd):
+        return None
+    rect = wintypes.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return None
+    ww, wh = rect.right - rect.left, rect.bottom - rect.top
+    if ww < 8 or wh < 8:
+        return None
+    hwnd_dc = user32.GetWindowDC(hwnd)
+    if not hwnd_dc:
+        return None
+    mem_dc = gdi32.CreateCompatibleDC(hwnd_dc)
+    bmp = gdi32.CreateCompatibleBitmap(hwnd_dc, ww, wh)
+    old = gdi32.SelectObject(mem_dc, bmp)
+    try:
+        if not user32.PrintWindow(hwnd, mem_dc, PW_RENDERFULLCONTENT):
+            return None
+        header = _BITMAPINFOHEADER()
+        header.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+        header.biWidth, header.biHeight = ww, -wh  # od góry
+        header.biPlanes, header.biBitCount = 1, 32
+        buf = (ctypes.c_ubyte * (ww * wh * 4))()
+        if not gdi32.GetDIBits(mem_dc, bmp, 0, wh, buf, ctypes.byref(header), 0):
+            return None
+    finally:
+        gdi32.SelectObject(mem_dc, old)
+        gdi32.DeleteObject(bmp)
+        gdi32.DeleteDC(mem_dc)
+        user32.ReleaseDC(hwnd, hwnd_dc)
+    full = np.frombuffer(buf, dtype=np.uint8).reshape(wh, ww, 4)
+    x0, y0 = max(0, int(left) - rect.left), max(0, int(top) - rect.top)
+    x1, y1 = min(ww, x0 + int(width)), min(wh, y0 + int(height))
+    if x1 - x0 < 4 or y1 - y0 < 4:
+        return None
+    piece = np.ascontiguousarray(full[y0:y1, x0:x1, :3])
+    if float(piece.max()) < 8:
+        return None  # okno nie oddało obrazu (np. zabezpieczone) — zapas: zrzut ekranu
+    return piece
+
 
 def grab(left, top, width, height):
     """Zrzut prostokąta ekranu (BGR, uint8) albo None. mss nie jest bezpieczne między wątkami."""
