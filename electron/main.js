@@ -850,35 +850,41 @@ function setupTray() {
     if (mainWindow.isVisible()) mainWindow.hide();
     else mainWindow.showInactive();
   };
+  tray.setContextMenu(Menu.buildFromTemplate([{ label: "Pokaż / ukryj widżet", click: toggleWidget }, ...winMenuItems()]));
+  tray.on("click", toggleWidget);
+}
+
+// Windows: to samo, co menu aplikacji na Macu — w zasobniku i pod przyciskiem ☰ w widżecie
+function winMenuItems() {
   const checkNow = async () => {
     const res = await runUpdateCheck();
     if (res && res.state === "installing") return;
     dialog.showMessageBox({ type: "info", message: "Aktualizacje", detail: (res && res.text) || "Gotowe.", buttons: ["OK"] });
   };
-  tray.setContextMenu(
-    Menu.buildFromTemplate([
-      { label: "Pokaż / ukryj widżet", click: toggleWidget },
-      { label: "Zwiń / rozwiń widżet", click: () => setCollapsed(!collapsed, true) },
-      { type: "separator" },
-      {
-        label: "Jak używać LiveDub",
-        click: () => dialog.showMessageBox({ type: "info", message: "Jak używać LiveDub", detail: HELP_TEXT_WIN, buttons: ["OK"] }),
+  return [
+    { label: "Zwiń / rozwiń widżet", click: () => setCollapsed(!collapsed, true) },
+    { type: "separator" },
+    {
+      label: "Jak używać LiveDub",
+      click: () => dialog.showMessageBox({ type: "info", message: "Jak używać LiveDub", detail: HELP_TEXT_WIN, buttons: ["OK"] }),
+    },
+    {
+      label: "Otwórz log lektora",
+      click: () => {
+        if (!fs.existsSync(ENGINE_LOG)) fs.writeFileSync(ENGINE_LOG, "");
+        shell.openPath(ENGINE_LOG);
       },
-      {
-        label: "Otwórz log lektora",
-        click: () => {
-          if (!fs.existsSync(ENGINE_LOG)) fs.writeFileSync(ENGINE_LOG, "");
-          shell.openPath(ENGINE_LOG);
-        },
-      },
-      { label: "Ustawienia języka (polski OCR)", click: () => shell.openExternal("ms-settings:regionlanguage") },
-      { label: "Sprawdź aktualizacje…", click: () => checkNow() },
-      { label: "O LiveDub", click: () => showAbout() },
-      { type: "separator" },
-      { label: "Zakończ LiveDub", click: () => app.quit() },
-    ]),
-  );
-  tray.on("click", toggleWidget);
+    },
+    { label: "Ustawienia języka (polski OCR)", click: () => shell.openExternal("ms-settings:regionlanguage") },
+    { label: "Sprawdź aktualizacje…", click: () => checkNow() },
+    {
+      label: "Licencje składników",
+      click: () => dialog.showMessageBox({ type: "info", message: "Licencje składników", detail: licensesText(), buttons: ["OK"] }),
+    },
+    { label: "O LiveDub", click: () => showAbout() },
+    { type: "separator" },
+    { label: "Zakończ LiveDub", click: () => app.quit() },
+  ];
 }
 
 function setupAppMenu() {
@@ -1074,6 +1080,10 @@ ipcMain.on("quit-app", () => app.quit());
 ipcMain.on("region-guide", (_e, on) => setRegionGuide(!!on));
 ipcMain.on("set-collapsed", (_e, on) => setCollapsed(!!on, true));
 ipcMain.on("release-focus", () => releaseGameFocus());
+ipcMain.on("app-menu", () => {
+  if (!IS_WIN || !mainWindow || mainWindow.isDestroyed()) return;
+  Menu.buildFromTemplate(winMenuItems()).popup({ window: mainWindow });
+});
 ipcMain.on("open-screen", () => {
   if (IS_WIN) return; // Windows nie pyta o zgodę na zrzut ekranu
   shell.openExternal("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture");

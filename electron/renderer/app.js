@@ -158,6 +158,13 @@ document.getElementById("save").onclick = () => {
   send({ cmd: "save" });
   window.gr.releaseFocus();
 };
+// Windows: menu aplikacji (na Macu jest na pasku menu u góry ekranu)
+const appMenuBtn = document.getElementById("appMenu");
+if (window.gr.platform === "win32") {
+  appMenuBtn.classList.remove("hidden");
+  appMenuBtn.onclick = () => window.gr.appMenu();
+}
+
 document.getElementById("quit").onclick = (e) => {
   e.stopPropagation();
   window.gr.quit();
