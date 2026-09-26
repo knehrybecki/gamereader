@@ -331,33 +331,6 @@ function startSwiftTap(socket) {
   });
 }
 
-function pickRegion() {
-  return new Promise((resolve) => {
-    const bin = helperPath();
-    if (!fs.existsSync(bin)) {
-      resolve("ERR noexe");
-      return;
-    }
-    const env = { ...process.env };
-    delete env.ELECTRON_RUN_AS_NODE;
-    const proc = spawn(bin, ["--pick"], { env });
-    helperProc = proc;
-    let out = "";
-    proc.stdout.on("data", (chunk) => {
-      out += chunk.toString("utf8");
-    });
-    proc.on("close", (code) => {
-      if (helperProc === proc) helperProc = null;
-      const parts = out
-        .trim()
-        .split(",")
-        .map((item) => item.trim())
-        .filter(Boolean);
-      resolve(code === 0 && parts.length === 4 ? `OK ${parts.join(",")}` : "ERR cancel");
-    });
-  });
-}
-
 function writeLine(socket, text) {
   try {
     socket.write(`${text}\n`);
@@ -400,7 +373,9 @@ function handleHub(socket, line) {
     return;
   }
   if (cmd === "PICK") {
-    (IS_WIN ? pickRegionWin() : pickRegion())
+    // okno Electrona na obu systemach: na Macu (panel) widać je też nad Chrome na pełnym ekranie —
+    // pomocnik w Swifcie przełączał pulpit i nakładka lądowała obok filmu
+    pickRegionOverlay()
       .then((text) => writeLine(socket, text))
       .finally(() => socket.end());
     return;
@@ -453,8 +428,8 @@ function hubConnection(socket) {
   });
 }
 
-// Windows: zaznaczanie paska napisów — przezroczyste okno na cały ekran, przeciągnij prostokąt
-function pickRegionWin() {
+// Zaznaczanie paska napisów — przezroczyste okno na cały ekran, przeciągnij prostokąt
+function pickRegionOverlay() {
   return new Promise((resolve) => {
     const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
     const b = display.bounds;
@@ -473,6 +448,7 @@ function pickRegionWin() {
       fullscreenable: false,
       hasShadow: false,
       show: false,
+      ...(IS_MAC ? { type: "panel" } : {}),
       webPreferences: {
         preload: path.join(__dirname, "pick-preload.js"),
         contextIsolation: true,
@@ -480,6 +456,7 @@ function pickRegionWin() {
       },
     });
     win.setAlwaysOnTop(true, "screen-saver");
+    if (IS_MAC) win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
     let done = false;
     const finish = (rect) => {
       if (done) return;
@@ -490,12 +467,14 @@ function pickRegionWin() {
         resolve("ERR cancel");
         return;
       }
-      const phys = screen.dipToScreenRect(null, {
+      const dip = {
         x: Math.round(b.x + rect.x),
         y: Math.round(b.y + rect.y),
         width: Math.round(rect.width),
         height: Math.round(rect.height),
-      });
+      };
+      // Windows: silnik liczy w pikselach fizycznych; macOS: punkty = współrzędne Quartz silnika
+      const phys = IS_WIN ? screen.dipToScreenRect(null, dip) : dip;
       resolve(`OK ${phys.x},${phys.y},${phys.width},${phys.height}`);
     };
     const onDone = (event, rect) => {
@@ -803,6 +782,8 @@ const LICENSES = [
   ["python-mss", "MIT"],
   ["python-sounddevice", "MIT"],
   ["ocrmac", "MIT"],
+  ["pywinrt (OCR Windows)", "MIT"],
+  ["pycaw (ściszanie na Windows)", "MIT"],
   ["PyObjC", "MIT"],
   ["imageio-ffmpeg / FFmpeg", "BSD-2 / LGPL 2.1+"],
 ];
@@ -821,7 +802,8 @@ const HELP_TEXT_WIN = [
   "1. Włącz PS Remote Play albo Netflixa/YouTube w Chrome — okno musi być widoczne, nie zminimalizowane.",
   "2. LiveDub sam wykryje grę i zacznie czytać napisy (albo kliknij „Uruchom”).",
   "3. Polskie znaki w napisach: Windows musi mieć język polski (Ustawienia → Czas i język → Język i region).",
-  "4. Na Windowsie LiveDub czyta na razie tylko napisy — tłumaczenie dźwięku będzie w kolejnej wersji.",
+  "4. „Ścisz grę” ścisza Chrome/Edge albo PS Remote Play w mikserze Windowsa, gdy mówi lektor.",
+  "5. Na Windowsie LiveDub czyta na razie tylko napisy — tłumaczenie dźwięku będzie w kolejnej wersji.",
   "",
   "Gdy lektor się spóźnia albo coś nie gra: ikona LiveDub w zasobniku → Otwórz log lektora i wyślij jego końcówkę.",
 ].join("\n");

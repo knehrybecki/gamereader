@@ -2963,6 +2963,60 @@ class WindowsOcr(AppleVisionOcr):
         rows = self.backend.recognize(image, languages or self.languages)
         return self._rows_to_items(rows, image)
 
+    @staticmethod
+    def subtitle_mask(frame):
+        """Jasny napis (biały, żółtawy) → czarny tekst na białym tle. OCR Windowsa czyta tak
+        znacznie pewniej niż biały napis z obwódką na tle filmu. None = w kadrze nie ma napisu."""
+        rgb = frame[:, :, ::-1].astype(np.float32) if frame.shape[-1] == 3 else frame.astype(np.float32)
+        lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+        spread = rgb.max(axis=2) - rgb.min(axis=2)
+        text = (lum > 175) & ((spread < 70) | (lum > 215))
+        # napis ma ciemną obwódkę albo ciemne tło (Netflix, YouTube) — jasne plamy sceny bez niej odpadają
+        # (zasięg ~6 px w każdą stronę, liczony osobno w poziomie i w pionie — gruba litera zostaje cała)
+        r = max(4, text.shape[0] // 30)
+        h, w = text.shape
+        dark = np.pad(lum < 80, ((0, 0), (r, r)))
+        rows = np.zeros((h, w), dtype=bool)
+        for dx in range(-r, r + 1):
+            rows |= dark[:, r + dx : r + dx + w]
+        rows = np.pad(rows, ((r, r), (0, 0)))
+        near_dark = np.zeros((h, w), dtype=bool)
+        for dy in range(-r, r + 1):
+            near_dark |= rows[r + dy : r + dy + h, :]
+        text &= near_dark
+        share = float(text.mean())
+        # napis to kilka–kilkanaście % pikseli; więcej = jasna scena/tło strony, nie napis
+        if share < 0.003 or share > 0.35:
+            return None
+        mask = np.where(text, 0, 255).astype(np.uint8)
+        image = Image.fromarray(mask).convert("RGB")
+        width, height = image.size
+        if height < 120:
+            scale = 120 / max(height, 1)
+            image = image.resize((max(8, int(width * scale)), 120), Image.Resampling.LANCZOS)
+        return image
+
+    def read(self, frame):
+        if frame is None or frame.size == 0:
+            return ""
+        best, best_score = "", -1
+        mask = self.subtitle_mask(frame)
+        if mask is not None:
+            try:
+                raw = self._run(mask, "vision", "accurate", self.languages)
+                if self.skip_yellow_speaker:
+                    raw = strip_speaker_label(raw)
+                best_score = self._score(raw)
+                best = repair_polish_ocr(raw) if best_score >= 0 else ""
+            except Exception:
+                best, best_score = "", -1
+        # wyraźny odczyt z maski wystarczy; inaczej zwykłe warianty obrazu (jak na Macu)
+        if best_score < 14:
+            plain = super().read(frame)
+            if plain and self._score(plain) > best_score:
+                best = plain
+        return best if usable_ocr(best) else ""
+
 
 class Engine:
     def __init__(self, emit):
@@ -3020,6 +3074,7 @@ class Engine:
         # o ile ściszyć grę, gdy mówi lektor: 0 % = wcale (dźwięku gry nie przejmujemy), 100 % = cisza
         self.duck_amount = max(0, min(100, int(self.cfg.get("duckAmount", 70))))
         self._tap = None
+        self._win_ducker = None
         self._duck_timer = None
         self._auto_started = False
         self._user_stopped = False
@@ -3108,6 +3163,14 @@ class Engine:
         return 1.0 - self.duck_amount / 100.0
 
     def _set_game_gain(self, value):
+        if IS_WIN:
+            # Windows: głośność aplikacji źródła (Chrome/Edge/PS Remote Play) w mikserze systemu
+            kind = self._source_kind()
+            if kind and (self.duck or value >= 0.999):
+                if self._win_ducker is None:
+                    self._win_ducker = winplat.WinDucker()
+                self._win_ducker.set_gain(kind, value)
+            return
         tap = self._tap
         if tap is not None:
             tap.set_gain(value)
@@ -3460,6 +3523,8 @@ class Engine:
             self.transcriber.stop()
             self.transcriber = None
         self.lektor.stop()
+        if self._win_ducker is not None:
+            self._win_ducker.set_gain(self._source_kind() or "chrome", 1.0)
         self.emit({"event": "running", "on": False})
         self.emit({"event": "status", "text": "Zatrzymane."})
 
