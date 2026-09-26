@@ -756,7 +756,9 @@ def lektor_voice_params(arousal):
     """Przejęcie -1…1 → domieszka żywego głosu, tempo, głośność, pauza."""
     a = max(-1.0, min(1.0, float(arousal)))
     return {
-        "blend": max(0.0, min(0.75, 0.1 + 0.65 * a)) if a > -0.15 else 0.0,
+        # domieszka drugiego głosu tylko lekka — przy mocnej lektor brzmiał jak inna osoba i gorzej
+        # wymawiał; emocję niosą głównie tempo i głośność
+        "blend": max(0.0, min(0.3, 0.05 + 0.3 * a)) if a > -0.15 else 0.0,
         "speed": 1.0 + (0.14 * a if a > 0 else 0.10 * a),
         "gain": 1.0 + (0.32 * a if a > 0 else 0.35 * a),
         "pause": max(0.05, 0.10 - 0.06 * a),
@@ -1592,7 +1594,7 @@ _PRONOUNCE_RULES = [
 # (Jasona → Dżejsona, Lucię → Lusiję, Mike'a → Majka, Tony'ego → Toniego).
 ENGLISH_NAMES = {
     # GTA VI / GTA V
-    "Jason": "Dżejson", "Lucia": "Lusija", "Michael": "Majkel", "Trevor": "Trewor", "Lamar": "Lamar",
+    "Jason": "Dżejson", "Lucia": "Lusja", "Michael": "Majkel", "Trevor": "Trewor", "Lamar": "Lamar",
     "Lester": "Lester", "Amanda": "Amanda", "Tracey": "Trejsi", "Jimmy": "Dżimi", "Wade": "Łejd",
     "Floyd": "Flojd", "Ron": "Ron", "Devin": "Dewin", "Dave": "Dejw", "Steve": "Stiw", "Haines": "Hejns",
     "Norton": "Norton", "Townley": "Taunli", "Philips": "Filips", "Chop": "Czop", "Brad": "Bred",
@@ -1624,6 +1626,8 @@ ENGLISH_NAMES = {
     # GTA VI (Leonida) — postaci i miejsca
     "Duval": "Duwal", "Caminos": "Kaminos", "Hampton": "Hempton", "Ike": "Ajk", "Dre'Quan": "Drikłan",
     "Drequan": "Drikłan", "Dimez": "Dajmz", "Roxy": "Roksi", "Heder": "Heder", "Bautista": "Bautista",
+    "Bayside": "Bejsajd", "Starfish Island": "Starfisz Ajlend", "Ocean Beach": "Ołszen Bicz",
+    "Little Haiti": "Litl Hejti", "Brickell": "Brikel", "Hialeah": "Hajalija", "Everglades": "Ewerglejds",
     "Leonida": "Leonida", "Gellhorn": "Gelhorn", "Ambrosia": "Ambrozja", "Grassrivers": "Grasriwers",
     "Kalaga": "Kalaga", "Leonida Keys": "Leonida Kiz", "Vice Beach": "Wajs Bicz", "Port Gellhorn": "Port Gelhorn",
     # Red Dead Redemption 2 — postaci
@@ -1654,7 +1658,7 @@ SPANISH_WORDS = {
     "José": "Hose", "Jose": "Hose", "Juan": "Huan", "Jorge": "Horhe", "Jesús": "Hesus", "Javier": "Hawjer",
     "Julio": "Hulio", "Carlos": "Karlos", "Miguel": "Migel", "Guillermo": "Gijermo", "Alejandro": "Alehandro",
     "Ramón": "Ramon", "Raúl": "Raul", "Joaquín": "Hoakin", "Joaquin": "Hoakin", "Cristina": "Kristina",
-    "Carmen": "Karmen", "Guadalupe": "Gwadalupe", "Ximena": "Himena", "Lucía": "Lusija", "Sofía": "Sofija",
+    "Carmen": "Karmen", "Guadalupe": "Gwadalupe", "Ximena": "Himena", "Lucía": "Lusja", "Sofía": "Sofija",
     "Valentina": "Walentina", "Camila": "Kamila", "Gustavo": "Gustawo", "Ernesto": "Ernesto", "Cortez": "Kortes",
     "Rodríguez": "Rodriges", "Rodriguez": "Rodriges", "Hernández": "Ernandes", "Hernandez": "Ernandes",
     "González": "Gonsales", "Gonzalez": "Gonsales", "Martínez": "Martines", "Martinez": "Martines",
@@ -1733,6 +1737,9 @@ def _name_sub(match):
             return ENGLISH_NAMES.get(value, spoken + "a") if key.startswith("n") else spoken + ending
         # Toni + ego → Toniego (nie „Toniiego”), Majk + a → Majka, Dżesik + y → Dżesiki
         if spoken.endswith("i") and ending.startswith("i"):
+            ending = ending[1:]
+        # Lusj + ii → Lusji (Lucii), nie „Lusjii”
+        if spoken.endswith("j") and ending.startswith("ii"):
             ending = ending[1:]
         if spoken[-1:] in "kg" and ending.startswith("y"):
             ending = "i" + ending[1:]
@@ -2197,7 +2204,7 @@ class MaleLektor:
         # suwak Głośność = głośność lektora; przejęcie i interpunkcja ją modulują
         # volume 0…1 (suwak 0–100 %); 100 % = 1,3× — limiter i tak nie przepuści przesteru
         gain = 1.3 * max(0.0, min(1.0, float(volume))) * params["gain"] * punct_gain
-        key = f"st9|{self.voice}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
+        key = f"st10|{self.voice}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
         path = CACHE_DIR / f"{text_key(key)}.wav"
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         if path.exists() and path.stat().st_size >= 64:
