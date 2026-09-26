@@ -24,6 +24,21 @@ def step(name):
     print(f"\n=== {name}", flush=True)
 
 
+step("importy bibliotek natywnych (osobne procesy)")
+# kolejność ładowania DLL (pywinrt ma własne msvcp140.dll) — pokazuje, co z czym się gryzie
+for code in (
+    "import ctranslate2",
+    "import torch",
+    "import argostranslate.translate",
+    "import winrt.windows.media.ocr; import ctranslate2",
+    "import winrt.windows.media.ocr; import torch",
+    "import winrt.windows.media.ocr; import argostranslate.translate",
+    "import argostranslate.translate; import winrt.windows.media.ocr",
+):
+    res = subprocess.run([sys.executable, "-X", "faulthandler", "-c", code], capture_output=True, text=True, timeout=300)
+    tail = (res.stderr or "").strip().splitlines()[-6:]
+    print(f"  kod {res.returncode:>11} | {code}" + ("".join("\n      " + line for line in tail) if res.returncode else ""))
+
 step("okna")
 windows = win.list_windows()
 print(f"widocznych okien: {len(windows)}")
