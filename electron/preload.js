@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld("gr", {
   openScreen: () => ipcRenderer.send("open-screen"),
   openMic: () => ipcRenderer.send("open-mic"),
   quit: () => ipcRenderer.send("quit-app"),
+  platform: process.platform,
+  appMenu: () => ipcRenderer.send("app-menu"),
   appInfo: () => ipcRenderer.invoke("app-info"),
   checkUpdates: () => ipcRenderer.invoke("check-updates"),
   openUrl: (url) => ipcRenderer.send("open-url", url),

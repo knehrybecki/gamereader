@@ -95,8 +95,7 @@ function applyState(msg) {
       if (found) {
         el.textContent = `${msg.sourceLabel || "Gra"} · ${msg.psWindow[2]}×${msg.psWindow[3]}`;
       } else {
-        el.textContent =
-          state.source === "youtube" ? "Czekam na YouTube w Chrome…" : state.source === "chrome" ? "Czekam na Chrome…" : "Czekam na grę…";
+        el.textContent = state.source === "chrome" ? "Czekam na Chrome…" : "Czekam na grę…";
       }
     }
   }
@@ -112,7 +111,6 @@ function applyState(msg) {
     document.getElementById("srcAuto").classList.toggle("primary", msg.source === "auto");
     document.getElementById("srcPs").classList.toggle("primary", msg.source === "ps");
     document.getElementById("srcChrome").classList.toggle("primary", msg.source === "chrome");
-    document.getElementById("srcYt").classList.toggle("primary", msg.source === "youtube");
   }
   if (typeof msg.autoStart === "boolean") document.getElementById("autoStart").checked = msg.autoStart;
   if (typeof msg.running === "boolean") {
@@ -158,6 +156,13 @@ document.getElementById("save").onclick = () => {
   send({ cmd: "save" });
   window.gr.releaseFocus();
 };
+// Windows: menu aplikacji (na Macu jest na pasku menu u góry ekranu)
+const appMenuBtn = document.getElementById("appMenu");
+if (window.gr.platform === "win32") {
+  appMenuBtn.classList.remove("hidden");
+  appMenuBtn.onclick = () => window.gr.appMenu();
+}
+
 document.getElementById("quit").onclick = (e) => {
   e.stopPropagation();
   window.gr.quit();
@@ -180,7 +185,7 @@ for (const key of ["lektorVolume", "duckAmount"]) {
     window.gr.releaseFocus();
   };
 }
-for (const [id, source] of [["srcAuto", "auto"], ["srcPs", "ps"], ["srcChrome", "chrome"], ["srcYt", "youtube"]]) {
+for (const [id, source] of [["srcAuto", "auto"], ["srcPs", "ps"], ["srcChrome", "chrome"]]) {
   document.getElementById(id).onclick = () => {
     send({ cmd: "config", source });
     window.gr.releaseFocus();

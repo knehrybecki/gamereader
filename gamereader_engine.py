@@ -91,37 +91,6 @@ def utterance_tail(prev, nxt):
     return ""
 
 
-def _word_key(word):
-    return polish_fold(word)
-
-
-def rolling_new_words(prev, nxt):
-    """Słowa z `nxt`, których nie było w `prev`.
-
-    Automatyczne napisy YouTube pojawiają się słowo po słowie, a górna linia odjeżdża:
-    „A B” → „B C” — nowe jest tylko „C”. Zupełnie inny napis = wszystkie jego słowa."""
-    words = normalize_text(nxt or "").split()
-    if not prev:
-        return words
-    old = [k for k in (_word_key(w) for w in normalize_text(prev).split()) if k]
-    keyed = [(w, _word_key(w)) for w in words]
-    keyed = [(w, k) for w, k in keyed if k]
-    new = [k for _w, k in keyed]
-    if not new or not old:
-        return words
-    # ten sam napis albo jego kawałek (górna linia już zniknęła, nowej jeszcze nie ma)
-    for i in range(len(old) - len(new) + 1):
-        if old[i : i + len(new)] == new:
-            return []
-    # koniec poprzedniego = początek nowego
-    for k in range(min(len(old), len(new)), 0, -1):
-        if old[-k:] == new[:k] and (k >= 2 or k == len(old) or len(new[0]) >= 4):
-            return [w for w, _k in keyed[k:]]
-    if same_utterance(prev, nxt):
-        return []  # OCR przeczytał ten sam napis trochę inaczej
-    return words
-
-
 def same_utterance(a, b):
     left = normalize_text(a or "").lower()
     right = normalize_text(b or "").lower()
@@ -552,10 +521,6 @@ MAX_SPEECH_SEC = 8.0
 PREROLL_SEC = 0.25
 # po ostatnim napisie przez tyle sekund dźwięk nie jest tłumaczony (napisy = główne dialogi)
 SUBTITLE_PRIORITY_SEC = 30.0
-# YouTube: napisy (zwłaszcza automatyczne) rosną słowo po słowie — zbieramy słowa i czytamy
-# całą frazę, gdy kończy się zdanie, napis stoi przez chwilę albo fraza jest już długa
-YOUTUBE_FLUSH_SEC = 0.8
-YOUTUBE_MAX_CHARS = 90
 # zanim silnik nauczy się tempa napisów w grze: typowy napis ~16 znaków na sekundę
 SUBTITLE_CPS_DEFAULT = 16.0
 # skracanie tekstu: od tylu sekund spóźnienia lektora za napisem (poziom 1 / poziom 2)
@@ -952,7 +917,7 @@ def _quartz_remote_play_info():
     return best
 
 
-SOURCES = ("auto", "ps", "chrome", "youtube")
+SOURCES = ("auto", "ps", "chrome")
 CHROME_OWNERS = ("google chrome", "chrome", "google chrome canary", "chromium")
 VIDEO_TITLES = ("netflix", "youtube", "twitch", "max", "prime video", "disney")
 # Netflix/YouTube: napisy wyżej i większe niż w grach
@@ -996,9 +961,6 @@ def _quartz_chrome_info(video_only=False, titles=VIDEO_TITLES):
 
 def _win_source_window(source, prefer):
     """Windows: to samo co find_source_window, z listy okien systemu."""
-    if source == "youtube":
-        info = winplat.find_browser(video_only=True, video_titles=("youtube",))
-        return (*info[:5], "chrome", info[5]) if info is not None else None
     if source == "auto" and prefer == "chrome":
         info = winplat.find_browser(video_only=True, video_titles=VIDEO_TITLES)
         if info is not None:
@@ -1019,10 +981,6 @@ def find_source_window(source="auto", prefer="ps"):
     prefer="chrome": w trybie auto najpierw Netflix/YouTube w Chrome (np. GTA VI na wycinkach)."""
     if IS_WIN:
         return _win_source_window(source, prefer)
-    if source == "youtube":
-        # tylko karta YouTube (nie Netflix ani zwykłe przeglądanie)
-        info = _quartz_chrome_info(video_only=True, titles=("youtube",))
-        return (*info[:5], "chrome", info[5]) if info is not None else None
     if source == "auto" and prefer == "chrome":
         info = _quartz_chrome_info(video_only=True)
         if info is not None:
@@ -1040,125 +998,6 @@ def find_source_window(source="auto", prefer="ps"):
         if info is not None:
             return (*info[:5], "chrome", info[5])
     return None
-
-
-class PlayerFinder:
-    """Gdzie w oknie przeglądarki jest odtwarzacz wideo (YouTube nie na pełnym ekranie).
-
-    Strona stoi, a film się rusza: z kolejnych zrzutów okna liczymy, które miejsca się zmieniają,
-    i bierzemy największy prostokąt ruchu. Współrzędne w pikselach zrzutu okna (0…1 → mnożymy
-    przez rozmiar okna na ekranie)."""
-
-    CELLS_W = 96  # siatka analizy (szerokość); wysokość wg proporcji okna
-
-    def __init__(self):
-        self.reset()
-
-    def reset(self):
-        self.prev = None
-        self.heat = None
-        self.frames = 0
-        self.last = None  # (x, y, w, h) jako ułamki okna
-        self.pending = None
-        self.pending_n = 0
-
-    def _small(self, frame):
-        if frame.shape[1] >= 4 * self.CELLS_W:
-            frame = frame[::2, ::2]  # co drugi piksel wystarczy — siatka i tak jest zgrubna
-        gray = frame[:, :, :3].astype(np.int16).mean(axis=2)
-        h, w = gray.shape
-        step = max(1, w // self.CELLS_W)
-        return gray[: h - h % step, : w - w % step].reshape(h // step, step, w // step, step).mean(axis=(1, 3))
-
-    def feed(self, frame):
-        """Nowy zrzut okna (BGR). Zwraca prostokąt odtwarzacza (ułamki okna) albo None."""
-        if frame is None or frame.ndim != 3 or frame.shape[0] < 40 or frame.shape[1] < 80:
-            return self.last
-        small = self._small(frame)
-        if self.prev is None or self.prev.shape != small.shape:
-            self.prev = small
-            self.heat = np.zeros_like(small)
-            self.frames = 0
-            return self.last
-        changed = (np.abs(small - self.prev) > 10).astype(np.float32)
-        self.prev = small
-        self.heat = self.heat * 0.9 + changed
-        self.frames += 1
-        if self.frames < 4 or changed.mean() < 0.002:
-            return self.last  # za mało ruchu (pauza, zaczynamy) — zostaje poprzedni wynik
-        box = self._largest_box(self.heat > 0.6)
-        if box is None:
-            return self.last
-        gh, gw = self.heat.shape
-        x, y, w, h = box
-        frac = (x / gw, y / gh, w / gw, h / gh)
-        # stabilnie: nowy prostokąt dopiero, gdy wyjdzie dwa razy z rzędu podobny
-        if self.last is not None and max(abs(a - b) for a, b in zip(frac, self.last)) < 0.04:
-            return self.last
-        if self.pending is not None and max(abs(a - b) for a, b in zip(frac, self.pending)) < 0.04:
-            self.pending_n += 1
-        else:
-            self.pending, self.pending_n = frac, 1
-        if self.pending_n >= 2:
-            self.last = self.pending
-        return self.last
-
-    @staticmethod
-    def _largest_box(mask):
-        """Prostokąt otaczający największy spójny obszar ruchu (po lekkim rozmyciu)."""
-        # rozmycie o 2 pola łączy plamy ruchu w jeden obszar (bez zawijania na krawędziach)
-        gh, gw = mask.shape
-        padded = np.pad(mask, 2)
-        grown = np.zeros_like(mask)
-        for dy in range(-2, 3):
-            for dx in range(-2, 3):
-                grown |= padded[2 + dy : 2 + dy + gh, 2 + dx : 2 + dx + gw]
-        seen = np.zeros_like(grown, dtype=bool)
-        best = None
-        best_area = 0
-        for sy, sx in zip(*np.nonzero(grown)):
-            if seen[sy, sx]:
-                continue
-            stack = [(sy, sx)]
-            seen[sy, sx] = True
-            y0, y1, x0, x1 = gh, -1, gw, -1
-            count = 0
-            while stack:
-                cy, cx = stack.pop()
-                if mask[cy, cx]:
-                    # prostokąt tylko z pól, gdzie naprawdę był ruch (nie z rozmycia)
-                    count += 1
-                    y0, y1, x0, x1 = min(y0, cy), max(y1, cy), min(x0, cx), max(x1, cx)
-                for ny, nx in ((cy + 1, cx), (cy - 1, cx), (cy, cx + 1), (cy, cx - 1)):
-                    if 0 <= ny < gh and 0 <= nx < gw and grown[ny, nx] and not seen[ny, nx]:
-                        seen[ny, nx] = True
-                        stack.append((ny, nx))
-            if count > best_area and y1 >= y0:
-                best_area = count
-                best = (x0, y0, x1 - x0 + 1, y1 - y0 + 1)
-        if best is None:
-            return None
-        x, y, w, h = best
-        # odtwarzacz to spory prostokąt o proporcjach filmu (także pionowe Shorts)
-        if w * h < 0.06 * gw * gh or not (0.4 <= (w / max(h, 1)) * 1.0 <= 3.0):
-            return None
-        return best
-
-
-def player_subtitle_band(win, frac):
-    """Pasek napisów na dole wykrytego odtwarzacza (win = okno na ekranie, frac = odtwarzacz w ułamkach)."""
-    wx, wy, ww, wh = win
-    fx, fy, fw, fh = frac
-    px, py, pw, ph = wx + fx * ww, wy + fy * wh, fw * ww, fh * wh
-    # film z czarnymi pasami po bokach — napisy i tak mogą być szersze: poszerz do 16:9
-    target = ph * 16 / 9
-    if pw < target:
-        cx = px + pw / 2
-        pw = min(target, ww)
-        px = max(wx, min(cx - pw / 2, wx + ww - pw))
-    # napisy YouTube: dolne ~35 % odtwarzacza (wyżej, gdy widać pasek sterowania)
-    band_h = max(52, ph * 0.36)
-    return (int(px + pw * 0.04), int(py + ph - band_h - ph * 0.02), int(pw * 0.92), int(band_h))
 
 
 # Napisy interfejsu odtwarzaczy (Netflix/YouTube) — to nie dialog
@@ -3147,8 +2986,6 @@ class Engine:
         self.last_full = ""
         self._ocr_candidate = ""
         self._ocr_candidate_n = 0
-        self._roll_text = ""
-        self._roll_buf = []
         self._spoken_folds = {}
         self.confirm_frames = OCR_CONFIRM_FRAMES
         self.speak_cooldown = 5.5
@@ -3173,6 +3010,8 @@ class Engine:
         self.auto_start = bool(self.cfg.get("autoStart", True))
         # źródło: auto (PS Remote Play, a bez niego Chrome z Netflixem/YouTube), ps, chrome
         source = str(self.cfg.get("source") or "auto").lower()
+        if source == "youtube":
+            source = "chrome"  # osobne źródło YouTube zostało usunięte — Chrome czyta każdą stronę
         self.source = source if source in SOURCES else "auto"
         self.source_info = None
         self._last_ocr_logged = ""
@@ -3189,9 +3028,6 @@ class Engine:
         self._last_win_sync = 0.0
         self.ps_window = None
         self._region_key_cur = None
-        # YouTube: gdzie w oknie jest odtwarzacz (ułamki okna) — z ruchu obrazu
-        self._player_finder = PlayerFinder()
-        self._yt_player = None
         self.ocr = WindowsOcr() if IS_WIN else AppleVisionOcr()
         self._ocr_lang_warned = False
         self.lektor = MaleLektor()
@@ -3203,11 +3039,6 @@ class Engine:
         self.prosody = ProsodyMeter()
         # kiedy ostatnio gra pokazała napis — wtedy dialogi bierzemy tylko z napisów
         self._last_subtitle_seen = 0.0
-        # YouTube: ostatni odczyt napisu i słowa, których lektor jeszcze nie dostał
-        self._roll_text = ""
-        self._roll_buf = []
-        self._roll_at = 0.0
-        self._roll_start = 0.0
         self._heard_arousal = {}
         self._pl_subs_at = None
         # tempo napisów: ile znaków na sekundę gra pokazuje (z czasu między kolejnymi napisami)
@@ -3235,41 +3066,6 @@ class Engine:
         threading.Thread(target=self._spec_loop, daemon=True).start()
         threading.Thread(target=self._warmup_voice, daemon=True).start()
         threading.Thread(target=self._watch_remote_play, daemon=True).start()
-        threading.Thread(target=self._watch_player, daemon=True).start()
-
-    def _watch_player(self):
-        """YouTube w oknie (nie pełny ekran): pasek napisów idzie za odtwarzaczem, nie za dołem okna."""
-        last_win = None
-        while True:
-            time.sleep(0.6)
-            try:
-                win = self.ps_window
-                if not self._is_youtube() or win is None or self.lock_region:
-                    if self._yt_player is not None or last_win is not None:
-                        self._player_finder.reset()
-                        self._yt_player = None
-                        last_win = None
-                    continue
-                if win != last_win:
-                    # okno zmieniło rozmiar/miejsce — odtwarzacz szukamy od nowa
-                    self._player_finder.reset()
-                    last_win = win
-                frame = capture_remote_play_band(*win, info=self.source_info)
-                found = self._player_finder.feed(frame)
-                if found != self._yt_player:
-                    self._yt_player = found
-                    if found is not None:
-                        _x, _y, fw, fh = found
-                        self.emit({"event": "debug", "text": f"odtwarzacz YouTube: {fw * win[2]:.0f}×{fh * win[3]:.0f}"})
-                    self._sync_remote_band(force=True)
-            except Exception:
-                continue
-
-    def _auto_band(self, win):
-        """Pasek napisów w oknie źródła: na YouTube z wykrytego odtwarzacza, inaczej dół okna."""
-        if self._yt_player is not None and self._is_youtube():
-            return player_subtitle_band(win, self._yt_player)
-        return window_subtitle_band(win, self._band_profile())
 
     def _watch_remote_play(self):
         """Pilnuje okna gry (PS Remote Play / Chrome): autostart, autostop i podpis okna w UI."""
@@ -3335,24 +3131,15 @@ class Engine:
         return self.source_info[5] if self.source_info else None
 
     def _region_key(self):
-        """Pod jakim kluczem zapisany jest ręczny pasek: gra (PS5) albo przeglądarka — YouTube i reszta
-        Chrome mają własne paski, niezależne od gry wybranej na liście."""
-        kind = self._source_kind()
-        if kind == "chrome":
-            return "youtube" if self._is_youtube() else "chrome"
-        return self.game
-
-    def _is_youtube(self):
-        info = self.source_info
-        return bool(info) and info[5] == "chrome" and "youtube" in str(info[6] or "").lower()
+        """Pod jakim kluczem zapisany jest ręczny pasek: gra (PS5) albo przeglądarka — Chrome ma własny
+        pasek, niezależny od gry wybranej na liście."""
+        return "chrome" if self._source_kind() == "chrome" else self.game
 
     def _source_label(self):
         if not self.source_info:
             return "grę"
         if self.source_info[5] == "chrome":
             title = self.source_info[6] or ""
-            if "youtube" in title.lower():
-                return "YouTube"
             name = next((v.title() for v in VIDEO_TITLES if v in title.lower()), "")
             return f"Chrome ({name})" if name else "Chrome"
         return "PS Remote Play"
@@ -3535,7 +3322,7 @@ class Engine:
         self.ps_window = win
         key = self._region_key() if info else self._region_key_cur
         if key != self._region_key_cur:
-            # inne źródło (PS5 ↔ Chrome ↔ YouTube) — jego własny zapisany pasek albo automat
+            # inne źródło (PS5 ↔ Chrome) — jego własny zapisany pasek albo automat
             first = self._region_key_cur is None
             self._region_key_cur = key
             saved = self.game_regions.get(key) or {}
@@ -3549,7 +3336,7 @@ class Engine:
             if win is None or self._region_overlap(self.region, win) >= 0.12:
                 return True
             # okno się przesunęło: dociągnij pasek do dolnego pasa, zachowaj lock
-            band = self._auto_band(win)
+            band = window_subtitle_band(win, self._band_profile())
             # jeśli stary pasek był wyżej/niżej, zachowaj względną wysokość w oknie
             rx, ry, rw, rh = [int(v) for v in self.region]
             _wx, wy, _ww, wh = [int(v) for v in win]
@@ -3564,7 +3351,7 @@ class Engine:
             return True
         if win is None:
             return self.region is not None
-        band = self._auto_band(win)
+        band = window_subtitle_band(win, self._band_profile())
         if band != self.region:
             self.region = band
             self.emit({"event": "state", **self.snapshot()})
@@ -3610,8 +3397,6 @@ class Engine:
         self.last_full = ""
         self._ocr_candidate = ""
         self._ocr_candidate_n = 0
-        self._roll_text = ""
-        self._roll_buf = []
         self._spoken_folds = {}
         self._tts_interrupt.clear()
         self._flush_line_q()
@@ -4183,9 +3968,6 @@ class Engine:
             src = strip_player_ui(src)
             if not usable_ocr(src) or is_player_ui_text(src):
                 return
-            if self._is_youtube():
-                self._on_rolling_subtitle(src)
-                return
         self._last_subtitle_seen = time.monotonic()
         now = time.monotonic()
         base = self.speaking_full or self.last_full
@@ -4250,53 +4032,6 @@ class Engine:
             self._pl_subs_at = now
         self._offer_line(src, translate)
 
-    def _on_rolling_subtitle(self, src):
-        """YouTube: dopisz do frazy tylko nowe słowa (napis rośnie albo przewija się w górę)."""
-        now = time.monotonic()
-        self._last_subtitle_seen = now
-        new = rolling_new_words(self._roll_text, src)
-        self._roll_text = src
-        if new:
-            if not self._roll_buf:
-                self._roll_start = now
-            self._roll_buf.extend(new)
-            self._roll_at = now
-            self.last_subtitle = src
-            self.subtitle_until = now + 2.5
-        self._flush_rolling()
-
-    def _flush_rolling(self):
-        """Oddaj lektorowi zebraną frazę YouTube, gdy jest gotowa."""
-        buf = self._roll_buf
-        if not buf:
-            return
-        now = time.monotonic()
-        # koniec zdania w środku — czytaj do niego, resztę zbieraj dalej
-        end = max((i for i, w in enumerate(buf) if re.search(r"[.!?…][\"'”»)]*$", w)), default=-1)
-        if end >= 0:
-            words, rest = buf[: end + 1], buf[end + 1 :]
-        else:
-            text = " ".join(buf)
-            if now - self._roll_at < YOUTUBE_FLUSH_SEC and len(text) < YOUTUBE_MAX_CHARS:
-                return
-            words, rest = buf, []
-        self._roll_buf = rest
-        started = self._roll_start
-        self._roll_start = now
-        text = normalize_text(" ".join(words))
-        if not _speakable(text):
-            return
-        key = strip_fillers(text)
-        if key:
-            if len(self._seen_at) > 32:
-                self._seen_at.clear()
-            self._seen_at.setdefault(key, started)
-        self.last_key = text_key(text)
-        translate = should_translate(text)
-        if not translate:
-            self._pl_subs_at = now
-        self._offer_line(text, translate)
-
     def _ocr_scan_thread(self):
         try:
             self._ocr_scan_loop()
@@ -4349,8 +4084,6 @@ class Engine:
                     if now - self._controls_logged > 5.0:
                         self._controls_logged = now
                         self.emit({"event": "debug", "text": "pasek sterowania odtwarzacza widoczny — pomijam klatki"})
-                    if self._roll_buf:
-                        self._flush_rolling()
                     time.sleep(max(MIN_INTERVAL, self.interval))
                     continue
                 frame = self._capture_region()
@@ -4384,9 +4117,6 @@ class Engine:
                     # ta sama klatka = ten sam tekst: potwierdź czekający napis bez ponownego OCR
                     # (Netflix: wideo czarne przez DRM, więc przy stojącym napisie obraz się nie zmienia)
                     self._on_subtitle(self._ocr_candidate)
-                if self._roll_buf:
-                    # YouTube: napis stoi albo zniknął — po chwili przeczytaj zebraną frazę
-                    self._flush_rolling()
             except Exception as exc:
                 text = str(exc).strip() or "błąd"
                 if "timed out" in text.lower() or "timeout" in text.lower():
