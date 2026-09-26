@@ -5,6 +5,7 @@ o ile w systemie jest język polski (Ustawienia → Czas i język → Język i r
 Współrzędne są w fizycznych pikselach ekranu (proces jest „DPI aware”), tak jak zrzut mss.
 """
 import ctypes
+import importlib
 import os
 import threading
 from ctypes import wintypes
@@ -211,6 +212,14 @@ def grab(left, top, width, height):
         return None
 
 
+def preload_native_libs():
+    for name in ("torch", "ctranslate2", "onnxruntime"):
+        try:
+            importlib.import_module(name)
+        except Exception:
+            pass
+
+
 class WindowsOcrBackend:
     """Windows.Media.Ocr: jeden silnik na język. Zwraca wiersze jak Vision: (tekst, pewność, [x, y, w, h] w px)."""
 
@@ -219,6 +228,10 @@ class WindowsOcrBackend:
         self._lock = threading.Lock()
         self.missing_polish = False
         self.error = ""
+        # pywinrt ma w paczce własne (starsze) msvcp140.dll — załadowane pierwsze psuje start torch
+        # (tłumacz: „DLL initialization routine failed” / segfault). Biblioteki natywne tłumacza
+        # i lektora muszą więc wejść PRZED WinRT; potem kolejność jest już bez znaczenia.
+        preload_native_libs()
         try:
             # moduły WinRT ładujemy w głównym wątku — pozostałe wątki korzystają z tego samego MTA
             import winrt.windows.media.ocr  # noqa: F401
