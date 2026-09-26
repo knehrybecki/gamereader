@@ -12,10 +12,19 @@ import sys
 import tempfile
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
+
+try:
+    from lektor_brain import LektorBrain, brain_supported
+except Exception:  # starsza paczka bez modułu — lektor działa na samych regułach
+    LektorBrain = None
+
+    def brain_supported():
+        return False
 
 IS_WIN = sys.platform == "win32"
 if IS_WIN:
@@ -540,6 +549,99 @@ def usable_ocr(text):
     return sum(ch.isalpha() for ch in raw) >= 2
 
 
+def trim_ocr_edges(text):
+    """Śmieci OCR na brzegach napisu: kropka listy, myślnik dialogowy, „statku. -”, „alejkę. r”."""
+    raw = normalize_text(text)
+    raw = re.sub(r"^[•·∙◦]+\s*", "", raw)
+    raw = re.sub(r"^[-–—]+\s+", "", raw)
+    raw = re.sub(r"(?:\s+[-–—•·,;]+)+$", "", raw)
+    return re.sub(r"([.!?…])\s+[A-Za-z•·]$", r"\1", raw)
+
+
+# Tekst z ekranu, który nie jest dialogiem: powiadomienia z pulpitu (GitHub, terminal), ścieżki,
+# menu gry pisane wielkimi literami, podpowiedzi przycisków. „junk” = pomiń od razu,
+# „suspect” = pomiń, jeśli model decyzji (lektor_brain) też uzna, że to nie dialog.
+_UI_HARD = re.compile(
+    r"(?i)claude/|pull request|\bcommit\b|build livedub|\bminutes?\b|https?://|www\.|\bdlss\b|[<>{}\\|]|#\s*\d|#:"
+)
+_UI_SOFT = re.compile(
+    r"(?i)\b(?:tryb fotograficzny|ustawienia|naciśnij|przytrzymaj|wciśnij|anuluj|potwierdź|wczytywanie|zapisywanie|"
+    r"kontynuuj|menu|przy pomocy)\b|(?:^|\s)[LRXB△○□✕](?=[\s.,)]|$)|•"
+)
+
+
+def screen_junk_level(text):
+    raw = normalize_text(text)
+    if _UI_HARD.search(raw):
+        return "junk"
+    letters = [ch for ch in raw if ch.isalpha()]
+    caps = sum(ch.isupper() for ch in letters) / max(1, len(letters))
+    if len(letters) >= 12 and caps > 0.7:
+        # gra z dialogami WIELKIMI LITERAMI nie może zamilknąć — polskie zdanie rozstrzyga model
+        return "suspect" if looks_polish(raw) else "junk"
+    if _UI_SOFT.search(raw) or (len(letters) >= 6 and caps > 0.7):
+        return "suspect"
+    return "ok"
+
+
+class RecurringFragments:
+    """Znak wodny albo stały napis (logo kanału) doklejany przez OCR do różnych kwestii.
+
+    Końcówka z co najmniej 4 słów, która w niedawnych napisach stała przy 2 RÓŻNYCH kwestiach, to nie
+    dialog — zostaje wycięta (a gdy to cały napis, nie ma czego czytać). Warianty odczytu tej samej
+    kwestii („x Właśnie…”, „Właśnie…”) się nie liczą."""
+
+    MIN_WORDS = 4
+
+    def __init__(self, keep=40):
+        self.recent = deque(maxlen=keep)
+
+    @staticmethod
+    def _find_run(seq, run):
+        n = len(run)
+        return next((i for i in range(len(seq) - n + 1) if seq[i : i + n] == run), -1)
+
+    def strip(self, text):
+        words = normalize_text(text).split()
+        toks = [(i, polish_fold(w)) for i, w in enumerate(words)]
+        toks = [(i, f) for i, f in toks if f]
+        seq = [f for _i, f in toks]
+        cut = None
+        for n in range(len(seq), self.MIN_WORDS - 1, -1):
+            run = seq[-n:]
+            head = "".join(seq[:-n])
+            others = set()
+            for prev in self.recent:
+                j = self._find_run(prev, run)
+                if j < 0:
+                    continue
+                other = "".join(prev[:j] + prev[j + n :])
+                if len(other) >= 6 and not (head and (other in head or head in other)):
+                    others.add(other)
+            if len(others) >= 2:
+                cut = toks[-n][0]
+                break
+        if seq and seq not in self.recent:
+            self.recent.append(seq)
+        if cut is None:
+            return normalize_text(text)
+        return normalize_text(" ".join(words[:cut])).rstrip(" ,;:-–—")
+
+
+_INTERROGATIVES = ("co", "kto", "kim", "kogo", "komu", "gdzie", "kiedy", "dlaczego", "czemu", "jak", "czy", "ile", "który", "która", "które")
+
+
+def is_interjection(text):
+    """Krótkie wtrącenie („Tak jest.”, „Jadę!”, „Hej, stary.”) — w zrywie pierwsze do pominięcia.
+    Krótkie pytanie z treścią („Gdzie jesteśmy?”) wtrąceniem nie jest."""
+    words = re.findall(r"[\wÀ-ž']+", text or "")
+    if not words:
+        return True
+    if len(words) == 2 and (text or "").rstrip().endswith("?") and words[0].lower() in _INTERROGATIVES:
+        return False
+    return len(words) <= 2
+
+
 def load_config():
     try:
         return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
@@ -561,7 +663,15 @@ PREROLL_SEC = 0.25
 # po ostatnim napisie przez tyle sekund dźwięk nie jest tłumaczony (napisy = główne dialogi)
 SUBTITLE_PRIORITY_SEC = 30.0
 # kwestia czekająca w kolejce dłużej niż tyle sekund (a jest już nowsza) — przepada, lektor leci dalej
-CATCH_UP_STALE_SEC = 3.0
+CATCH_UP_STALE_SEC = 2.0
+# model decyzji (lektor_brain): poniżej tego p(dialog) napis to nie kwestia postaci; napis „podejrzany”
+# wg reguł (menu, przyciski) odpada już przy wyższym progu. Kwestia bez informacji (p < próg) w zrywie
+# wypada pierwsza — jak u lektora TV.
+BRAIN_JUNK_P = 0.10
+BRAIN_SUSPECT_P = 0.35
+BRAIN_SKIP_INFO_P = 0.2
+# krótkie wtrącenie (do 2 słów, nie pytanie z treścią) wypada, dopóki model nie jest pewny informacji
+BRAIN_SKIP_SHORT_P = 0.4
 # zanim silnik nauczy się tempa napisów w grze: typowy napis ~16 znaków na sekundę
 SUBTITLE_CPS_DEFAULT = 16.0
 # skracanie tekstu: od tylu sekund spóźnienia lektora za napisem (poziom 1 / poziom 2)
@@ -3304,6 +3414,10 @@ class Engine:
         self.translator = ArgosTranslator()
         self.stt = ParakeetSTT()
         self.prosody = ProsodyMeter()
+        # „open jev”: mały model w tle ocenia napisy (dialog czy śmieć z ekranu, czy niesie informację)
+        self.brain = LektorBrain(log=log_timing) if LektorBrain is not None and brain_supported() else None
+        self._recurring = RecurringFragments()
+        self._junk_logged = ""
         # kiedy ostatnio gra pokazała napis — wtedy dialogi bierzemy tylko z napisów
         self._last_subtitle_seen = 0.0
         self._heard_arousal = {}
@@ -3432,6 +3546,8 @@ class Engine:
             self.emit({"event": "status", "text": f"Lektor gotowy (Supertonic {self.lektor.voice}, {self.lektor.device_label})."})
         except Exception as exc:
             self.emit({"event": "status", "text": f"Lektor nie wstaje: {exc}"})
+        if self.brain is not None:
+            self.brain.start()  # po lektorze: pierwszy głos nie czeka na wczytanie modelu decyzji
 
     def snapshot(self):
         return {
@@ -3912,6 +4028,8 @@ class Engine:
         src = strip_fillers(src)
         if not src:
             return
+        if self.brain is not None:
+            self.brain.check(src)  # wynik zwykle gotowy, zanim lektor skończy syntezę
         if self._is_current(src):
             return
         if self._recently_spoken(src):
@@ -3951,10 +4069,15 @@ class Engine:
                 # lektor przeskakuje do tego, co jest teraz na ekranie (jak lektor w filmie)
                 now = time.monotonic()
                 *older, newest = self._queue
-                keep = [
-                    it for it in older
-                    if now - self._seen_at.get(strip_fillers(it[0]) or it[0], now) < CATCH_UP_STALE_SEC
-                ] + [newest]
+                def age(it):
+                    return now - self._seen_at.get(strip_fillers(it[0]) or it[0], now)
+
+                keep = [it for it in older if age(it) < CATCH_UP_STALE_SEC and not self._skippable(it[0])] + [newest]
+                if len(keep) == 1 and self._skippable(newest[0]):
+                    # najnowsze to samo „Do dzieła!” — lepiej przeczytać chwilę starszą kwestię z treścią
+                    content = [it for it in older if age(it) < CATCH_UP_STALE_SEC + 1.5 and not self._skippable(it[0])]
+                    if content:
+                        keep = content[-1:]
                 keep = keep[-getattr(self, "catch_up_keep", 2):]
                 if len(keep) < len(self._queue):
                     self._timing(f"nadganiam: pomijam {len(self._queue) - len(keep)} zaległe kwestie")
@@ -3975,6 +4098,35 @@ class Engine:
         srcs = [item[0] for item in parts]
         return _join_parts(srcs), first[1], parts[-1][2], srcs
 
+    def _log_junk(self, text, message):
+        """Jeden wpis na napis (OCR czyta ten sam napis kilka razy na sekundę)."""
+        if text != self._junk_logged:
+            self._junk_logged = text
+            self._timing(message)
+
+    def _brain_junk(self, text, wait=0.0):
+        """Model decyzji: napis to nie kwestia postaci (menu, znak wodny, powiadomienie, zlepek liter)."""
+        if self.brain is None:
+            return False
+        verdict = self.brain.verdict(text, wait)
+        if not verdict:
+            return False
+        p = verdict["dialog"]
+        suspect = screen_junk_level(text) == "suspect"
+        # sam model nie wyrzuca porządnego polskiego zdania (np. kwestii z doklejonym znakiem wodnym)
+        if (p < BRAIN_JUNK_P and not looks_polish(text)) or (suspect and p < BRAIN_SUSPECT_P):
+            self._log_junk(text, f"pomijam — to nie dialog (model {p:.2f}{', podejrzane' if suspect else ''}): {text[:70]!r}")
+            return True
+        return False
+
+    def _skippable(self, text):
+        """Kwestia bez nowej informacji (okrzyk, reakcja, potwierdzenie) — w zrywie wypada pierwsza."""
+        verdict = self.brain.verdict(text) if self.brain is not None else None
+        if verdict and verdict.get("info") is not None:
+            info = verdict["info"]
+            return info < BRAIN_SKIP_INFO_P or (is_interjection(text) and info < BRAIN_SKIP_SHORT_P)
+        return is_interjection(text)
+
     def _tts_loop(self):
         while True:
             if not self.has_pending.wait(timeout=0.15):
@@ -3984,6 +4136,12 @@ class Engine:
                 continue
             src, translate, full, parts = item
             parts = [p for p in parts if not self._recently_spoken(p)]
+            # śmieci z ekranu wg modelu decyzji (wynik zwykle już jest — liczony od pojawienia się napisu)
+            kept = [p for p in parts if not self._brain_junk(p)]
+            if len(kept) != len(parts):
+                parts = kept
+                if len(parts) > 1:
+                    src = _join_parts(parts)
             if not parts or same_utterance(src, self.speaking_text):
                 continue
             if len(parts) == 1:
@@ -4008,6 +4166,10 @@ class Engine:
                         segments[0][0], volume=self.lektor_volume / 100.0, mood=segments[0][1], arousal=arousal,
                         hurry=self._queue_waiting(src), boost=boost,
                     )
+                # nowy napis: model liczył w czasie syntezy — ostatnie słowo przed odtworzeniem
+                if len(parts) == 1 and self._brain_junk(parts[0], wait=0.15):
+                    self._mark_spoken(parts[0])
+                    continue
                 with self.pending_lock:
                     newer = self.pending
                 # przy no_barge_in dokończ obecną syntezę; nowszy zostanie na kolejkę
@@ -4112,6 +4274,10 @@ class Engine:
         # Przy spokojnej fabule wszystko się mieści i lektor czyta całość.
         seconds = self._screen_budget(parts or [src])
         before = text
+        if not translate and parts and len(parts) >= 2 and self.lektor.overload(text, seconds) > 1.0:
+            keep = [p for p in parts[:-1] if not self._skippable(p)] + [parts[-1]]
+            if len(keep) < len(parts):
+                text = strip_fillers(_join_parts(keep)) if len(keep) > 1 else keep[0]
         for level in (1, 2):
             if not text or self.lektor.overload(text, seconds) <= 1.0:
                 break
@@ -4120,7 +4286,8 @@ class Engine:
         # całe zdania ze starszych kwestii wypadają przy 2+ zaległych napisach — inaczej ginie kontekst
         min_parts = 2 if getattr(self, "catch_up", False) else 3
         while len(parts or []) >= min_parts and len(sentences) > 1 and self.lektor.overload(" ".join(sentences), seconds) > 1.15:
-            sentences.pop(0)
+            # najnowsze zdanie zostaje; najpierw wypadają wtrącenia („Dobra.”, „Jadę!”), potem najstarsze
+            sentences.pop(next((i for i, s_ in enumerate(sentences[:-1]) if is_interjection(s_)), 0))
         if len(sentences) > 1 or (sentences and self.lektor.overload(text, seconds) > 1.0):
             text = normalize_text(" ".join(s.strip() for s in sentences))
         if text != before:
@@ -4269,6 +4436,19 @@ class Engine:
             src = strip_player_ui(src)
             if not usable_ocr(src) or is_player_ui_text(src):
                 return
+        src = trim_ocr_edges(src)
+        if screen_junk_level(src) == "junk":
+            self._log_junk(src, f"pomijam — to nie dialog (reguła): {src[:70]!r}")
+            return
+        stripped = self._recurring.strip(src)
+        if stripped != src:
+            if stripped:
+                self._log_junk(src, f"wycinam znak wodny: {src[:70]!r} -> {stripped[:70]!r}")
+            else:
+                self._log_junk(src, f"pomijam — to nie dialog (znak wodny): {src[:70]!r}")
+            src = stripped
+        if not usable_ocr(src):
+            return
         self._last_subtitle_seen = time.monotonic()
         now = time.monotonic()
         base = self.speaking_full or self.last_full
@@ -4359,9 +4539,8 @@ class Engine:
             winplat.open_language_settings()
 
     def _ocr_only_loop(self):
-        if self.duck:
-            # bez tłumaczenia z dźwięku — tylko ściszanie gry i emocje z głosu postaci
-            threading.Thread(target=self._audio_loop_ps_remote, kwargs={"transcribe": False}, daemon=True).start()
+        # bez tłumaczenia z dźwięku: emocje z głosu postaci (zawsze) i ściszanie gry (gdy włączone)
+        threading.Thread(target=self._audio_loop_ps_remote, kwargs={"transcribe": False}, daemon=True).start()
         try:
             self._ocr_scan_loop()
         finally:
@@ -4497,7 +4676,7 @@ class Engine:
             elif transcribe:
                 self.emit({"event": "status", "text": f"Dźwięk gry: {exc}"})
             else:
-                self.emit({"event": "status", "text": f"Ściszanie gry niedostępne: {exc}"})
+                self.emit({"event": "status", "text": f"Dźwięk gry (emocje, ściszanie) niedostępny: {exc}"})
             # w trybie „Napisy” problem z dźwiękiem nie wyłącza czytania napisów
             if transcribe:
                 self.running = False

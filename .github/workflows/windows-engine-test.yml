@@ -14,6 +14,7 @@ on:
     paths:
       - "gamereader_engine.py"
       - "gamereader_worker.py"
+      - "lektor_brain.py"
       - "gamereader_win.py"
       - "requirements-win.txt"
       - "electron/setup.js"
@@ -60,6 +61,6 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE"
-          "$LIVEDUB_PY" -m py_compile gamereader_engine.py gamereader_worker.py gamereader_win.py
+          "$LIVEDUB_PY" -m py_compile gamereader_engine.py gamereader_worker.py lektor_brain.py gamereader_win.py
           "$LIVEDUB_PY" ci/win_smoke.py
 

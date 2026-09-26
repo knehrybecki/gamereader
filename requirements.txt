@@ -20,3 +20,6 @@ argostranslate>=1.9
 
 # obróbka głosu lektora: gotowe ffmpeg w paczce pip (gdy nie ma go z Homebrew)
 imageio-ffmpeg>=0.5
+
+# model decyzji lektora („open jev”: Qwen3.5-4B na GPU, lektor_brain.py) — śmieci z ekranu, co pominąć w zrywie
+mlx-lm>=0.31

@@ -34,6 +34,10 @@
         "to": "engine/gamereader_worker.py"
       },
       {
+        "from": "../lektor_brain.py",
+        "to": "engine/lektor_brain.py"
+      },
+      {
         "from": "../requirements.txt",
         "to": "engine/requirements.txt"
       },

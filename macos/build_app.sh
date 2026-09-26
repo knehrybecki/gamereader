@@ -42,7 +42,7 @@ fi
 cp "$HELPER" "$APP/Contents/Resources/GameReaderHelper"
 chmod +x "$APP/Contents/Resources/GameReaderHelper"
 mkdir -p "$APP/Contents/Resources/engine"
-cp "$ROOT/gamereader_engine.py" "$ROOT/gamereader_worker.py" "$ROOT/requirements.txt" "$ROOT/pl_diacritics.tsv" "$APP/Contents/Resources/engine/"
+cp "$ROOT/gamereader_engine.py" "$ROOT/gamereader_worker.py" "$ROOT/lektor_brain.py" "$ROOT/requirements.txt" "$ROOT/pl_diacritics.tsv" "$APP/Contents/Resources/engine/"
 
 PY_REL="Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python"
 PY_APP="/opt/homebrew/Cellar/python@3.14/3.14.7/$PY_REL"
