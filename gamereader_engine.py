@@ -412,12 +412,47 @@ def _normalize_polish_punct(text):
     return normalize_text(raw)
 
 
+_PL_DIACRITICS = None
+
+
+def _pl_diacritics():
+    """Słownik ~20 tys. częstych słów z napisów: „bledy” → „błędy” (pl_diacritics.tsv obok silnika)."""
+    global _PL_DIACRITICS
+    if _PL_DIACRITICS is None:
+        table = {}
+        try:
+            with open(Path(__file__).resolve().with_name("pl_diacritics.tsv"), encoding="utf-8") as handle:
+                for line in handle:
+                    if line.startswith("#"):
+                        continue
+                    fold, _tab, word = line.rstrip("\n").partition("\t")
+                    if word:
+                        table[fold] = word
+        except OSError:
+            pass
+        _PL_DIACRITICS = table
+    return _PL_DIACRITICS
+
+
+def _restore_from_dict(token):
+    """Uzupełnij zgubione ogonki („blędy”, „bledy” → „błędy”), jeśli reszta liter się zgadza."""
+    word = _pl_diacritics().get(polish_fold(token))
+    if not word or len(word) != len(token) or word == token.lower():
+        return None
+    for have, want in zip(token.lower(), word):
+        if have != want and (have in PL_MARK or have != polish_fold(want)):
+            return None  # OCR dał inny ogonek niż w słowniku — nie zgadujemy
+    return _preserve_case(token, word)
+
+
 def repair_polish_ocr(text):
     """Poprawia błędy OCR PL: śmieci, zgubione diakrytyki, «ze»→«że»."""
     raw = _normalize_polish_punct(text)
     if not raw:
         return ""
     dialogue = bool(re.search(r"[!?…]", raw)) or len(raw) >= 18
+    # słownik ogonków tylko dla polskiego tekstu — angielskie „zone” nie może zostać „żonę”
+    polish_text = not should_translate(raw)
     parts = re.split(r"([0-9A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+)", raw)
     out = []
     for part in parts:
@@ -435,6 +470,10 @@ def repair_polish_ocr(text):
         )
         token = cleaned or part
         folded = polish_fold(token)
+        big = _restore_from_dict(token) if polish_text and len(folded) >= 3 else None
+        if big:
+            out.append(big)
+            continue
         restored = _pick_polish_form(token, folded)
         if restored:
             out.append(_preserve_case(token, restored))
