@@ -100,15 +100,9 @@ def utterance_tail(prev, nxt):
     return ""
 
 
-def same_utterance(a, b):
-    left = normalize_text(a or "").lower()
-    right = normalize_text(b or "").lower()
-    if not left or not right:
-        return False
-    if left == right:
-        return True
-    fold_a = polish_fold(left)
-    fold_b = polish_fold(right)
+def folds_match(fold_a, fold_b):
+    """Ten sam napis po złożeniu (polish_fold), mimo migania OCR: brak końcówki albo 1–3 literówki
+    („więc”/„wiçc”, „żeń-szeń”/„żeń-szeńi”). Wspólne dla kolejki i dla „już przeczytane”."""
     if not fold_a or not fold_b:
         return False
     if fold_a == fold_b:
@@ -120,6 +114,14 @@ def same_utterance(a, b):
     if abs(len(fold_a) - len(fold_b)) <= 4 and min(len(fold_a), len(fold_b)) >= 8:
         return _lev(fold_a, fold_b) <= 3
     return False
+
+
+def same_utterance(a, b):
+    left = normalize_text(a or "").lower()
+    right = normalize_text(b or "").lower()
+    if not left or not right:
+        return False
+    return left == right or folds_match(polish_fold(left), polish_fold(right))
 
 
 def is_black_frame(frame):
@@ -462,6 +464,8 @@ def repair_polish_ocr(text):
     dialogue = bool(re.search(r"[!?…]", raw)) or len(raw) >= 18
     # słownik ogonków tylko dla polskiego tekstu — angielskie „zone” nie może zostać „żonę”
     polish_text = not should_translate(raw)
+    if polish_text:
+        raw = raw.replace("ç", "ę").replace("Ç", "Ę")  # OCR myli „ę” z „ç” („wiçc”)
     parts = re.split(r"([0-9A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+)", raw)
     out = []
     for part in parts:
@@ -1718,7 +1722,7 @@ _PRONOUNCE_RULES = [
 # (Jasona → Dżejsona, Lucię → Lusiję, Mike'a → Majka, Tony'ego → Toniego).
 ENGLISH_NAMES = {
     # GTA VI / GTA V
-    "Jason": "Dżejson", "Lucia": "Lusija", "Michael": "Majkel", "Trevor": "Trewor", "Lamar": "Lamar",
+    "Jason": "Dżejson", "Lucia": "Lus'ija", "Michael": "Majkel", "Trevor": "Trewor", "Lamar": "Lamar",
     "Lester": "Lester", "Amanda": "Amanda", "Tracey": "Trejsi", "Jimmy": "Dżimi", "Wade": "Łejd",
     "Floyd": "Flojd", "Ron": "Ron", "Devin": "Dewin", "Dave": "Dejw", "Steve": "Stiw", "Haines": "Hejns",
     "Norton": "Norton", "Townley": "Taunli", "Philips": "Filips", "Chop": "Czop", "Brad": "Bred",
@@ -1782,7 +1786,7 @@ SPANISH_WORDS = {
     "José": "Hose", "Jose": "Hose", "Juan": "Huan", "Jorge": "Horhe", "Jesús": "Hesus", "Javier": "Hawjer",
     "Julio": "Hulio", "Carlos": "Karlos", "Miguel": "Migel", "Guillermo": "Gijermo", "Alejandro": "Alehandro",
     "Ramón": "Ramon", "Raúl": "Raul", "Joaquín": "Hoakin", "Joaquin": "Hoakin", "Cristina": "Kristina",
-    "Carmen": "Karmen", "Guadalupe": "Gwadalupe", "Ximena": "Himena", "Lucía": "Lusija", "Sofía": "Sofija",
+    "Carmen": "Karmen", "Guadalupe": "Gwadalupe", "Ximena": "Himena", "Lucía": "Lus'ija", "Sofía": "Sofija",
     "Valentina": "Walentina", "Camila": "Kamila", "Gustavo": "Gustawo", "Ernesto": "Ernesto", "Cortez": "Kortes",
     "Rodríguez": "Rodriges", "Rodriguez": "Rodriges", "Hernández": "Ernandes", "Hernandez": "Ernandes",
     "González": "Gonsales", "Gonzalez": "Gonsales", "Martínez": "Martines", "Martinez": "Martines",
@@ -1796,7 +1800,7 @@ SPANISH_WORDS = {
     "sí": "si", "por favor": "por fawor", "jefe": "hefe", "carnal": "karnal", "loco": "loko", "loca": "loka",
     "cállate": "kajate", "ándale": "andale", "órale": "orale", "güey": "łej", "gringo": "gringo",
     "hijo": "iho", "hija": "iha", "mamá": "mama", "papá": "papa", "abuela": "abuela", "familia": "familja",
-    "dinero": "dinero", "policía": "polisija", "cerveza": "serwesa", "bueno": "bueno", "claro": "klaro",
+    "dinero": "dinero", "policía": "polis'ija", "cerveza": "serwesa", "bueno": "bueno", "claro": "klaro",
     "ay": "aj", "Dios": "Djos", "mío": "mijo", "mi amor": "mi amor", "cariño": "karinio", "querida": "kerida",
     "querido": "kerido", "perdón": "perdon", "adiós": "adjos", "buenas noches": "buenas noczes",
 }
@@ -1826,7 +1830,7 @@ def _spanish_word(match):
 
 
 def spanish_spoken(word):
-    """Hiszpańskie imię/nazwisko → wymowa zapisana po polsku (García → Garsija, Juan → Huan)."""
+    """Hiszpańskie imię/nazwisko → wymowa zapisana po polsku (García → Gars'ija, Juan → Huan)."""
     out = word.lower()
     out = re.sub(r"í(?=[aeiouáéóú])", "i\x02", out)  # akcent na „í”: osobna sylaba (Rocío → Rosijo)
     out = out.replace("ch", "\x01").replace("ll", "\x03").replace("ñ", "\x04")
@@ -1843,6 +1847,9 @@ def spanish_spoken(word):
     # po polsku „si” to „ś” — hiszpańskie brzmi jak „sj” przed samogłoską, „sy” przed spółgłoską
     out = re.sub(r"si(?=[aeiou])", "sj", out)
     out = re.sub(r"si(?![aeiouj\x02])", "sy", out)
+    # akcentowane „sí” + samogłoska (García, Lucía, Rocío): apostrof trzyma twarde „s” — bez niego lektor
+    # mówi „Garśija” (zmierzone: szum „s” ~5,4 kHz jak w „Lusa”, a bez apostrofu ~3,5 kHz jak w „Luśija”)
+    out = re.sub(r"si(?=\x02)", "s'i", out)
     out = re.sub(r"ni(?=[aeiou])", "nj", out)
     out = out.replace("\x02", "j")
     return out[:1].upper() + out[1:]
@@ -1915,7 +1922,7 @@ def _name_sub(match):
         # Toni + ego → Toniego (nie „Toniiego”), Majk + a → Majka, Dżesik + y → Dżesiki
         if spoken.endswith("i") and ending.startswith("i"):
             ending = ending[1:]
-        # Lusij + ii → Lusiji (Lucii), nie „Lusijii”
+        # Lus'ij + ii → Lus'iji (Lucii), nie „Lus'ijii”
         if spoken.endswith("j") and ending.startswith("ii"):
             ending = ending[1:]
         if spoken[-1:] in "kg" and ending.startswith("y"):
@@ -2391,7 +2398,7 @@ class MaleLektor:
         # suwak Głośność = głośność lektora; przejęcie i interpunkcja ją modulują
         # volume 0…1 (suwak 0–100 %); 100 % = 1,3× — limiter i tak nie przepuści przesteru
         gain = 1.3 * max(0.0, min(1.0, float(volume))) * params["gain"] * punct_gain
-        key = f"st12|{self.voice}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
+        key = f"st13|{self.voice}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
         path = CACHE_DIR / f"{text_key(key)}.wav"
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         if path.exists() and path.stat().st_size >= 64:
@@ -3493,6 +3500,8 @@ class Engine:
         self.brain = LektorBrain(log=log_timing) if LektorBrain is not None and brain_supported() else None
         self._recurring = RecurringFragments()
         self._junk_logged = ""
+        # ostatnie przeczytane kwestie (czas, tekst) — do rozpoznania napisu, który tylko urósł
+        self._spoken_recent = deque(maxlen=8)
         # kiedy ostatnio gra pokazała napis — wtedy dialogi bierzemy tylko z napisów
         self._last_subtitle_seen = 0.0
         self._heard_arousal = {}
@@ -4052,15 +4061,7 @@ class Engine:
             return False
         self._prune_spoken()
         now = time.monotonic()
-        for key, exp in self._spoken_folds.items():
-            if now >= exp:
-                continue
-            if key == fold:
-                return True
-            short, long = (key, fold) if len(key) <= len(fold) else (fold, key)
-            if len(short) >= 8 and short in long and len(short) / max(len(long), 1) >= 0.72:
-                return True
-        return False
+        return any(now < exp and folds_match(key, fold) for key, exp in self._spoken_folds.items())
 
     def _mark_spoken(self, text):
         fold = polish_fold(text or "")
@@ -4068,6 +4069,19 @@ class Engine:
             return
         self._prune_spoken()
         self._spoken_folds[fold] = time.monotonic() + float(self.speak_cooldown or 5.5)
+        recent = getattr(self, "_spoken_recent", None)
+        if recent is not None:
+            recent.append((time.monotonic(), text))
+
+    def _grown_from_recent(self, src, now, window=4.0):
+        """Niedawno przeczytana (albo właśnie czytana) kwestia, którą ten napis tylko przedłuża."""
+        fold = polish_fold(src)
+        recent = [text for at, text in self._spoken_recent if now - at < window] + list(self._speaking_parts)
+        for prev in recent:
+            left = polish_fold(prev)
+            if len(left) >= 8 and len(fold) > len(left) + 1 and fold.startswith(left):
+                return prev
+        return None
 
     @property
     def pending(self):
@@ -4245,6 +4259,9 @@ class Engine:
             if len(parts) == 1:
                 src = parts[0]
             try:
+                # od tej chwili kwestia jest „bieżąca” — wariant OCR tego samego napisu, który przyjdzie
+                # w trakcie syntezy albo czekania na głos postaci, nie trafi drugi raz do kolejki
+                self._speaking_parts = list(parts)
                 # przygotowana w tle, gdy lektor kończył poprzednią kwestię — start bez czekania
                 t0 = time.monotonic()
                 # ta kwestia właśnie syntezuje się na zapas — poczekaj, zamiast robić ją drugi raz
@@ -4557,6 +4574,16 @@ class Engine:
             self.last_subtitle = src
             self.subtitle_until = now + 2.5
             tail = utterance_tail(base, src)
+            if _speakable(tail) and not self._recently_spoken(tail):
+                self._offer_tail(tail, src)
+            return
+        # napis urósł względem jednej z ostatnich kwestii (OCR złapał najpierw początek, a lektor zdążył
+        # przeczytać coś innego) — doczytaj tylko nowe słowa; tylko gdy napis zaczyna się tak samo
+        grown = self._grown_from_recent(src, now)
+        if grown:
+            self.last_subtitle = src
+            self.subtitle_until = now + 2.5
+            tail = utterance_tail(grown, src)
             if _speakable(tail) and not self._recently_spoken(tail):
                 self._offer_tail(tail, src)
             return
