@@ -585,7 +585,11 @@ GAME_PROFILES = {
     "rdr2": {
         **_GAME_BASE,
         "label": "Red Dead Redemption 2",
-        "hint": "Napisy na dole, szybkie kwestie — te same ustawienia co GTA VI.",
+        "hint": "Szybkie napisy — lektor czyta od pierwszego odczytu i przeskakuje zaległe kwestie.",
+        # napis pojawia się od razu w całości — drugi odczyt OCR tylko opóźnia start
+        "confirm_frames": 1,
+        # kwestie zmieniają się szybciej, niż da się je przeczytać: nadganiaj jak lektor w filmie
+        "catch_up": True,
     },
     "generic": {
         **_GAME_BASE,
@@ -3429,6 +3433,7 @@ class Engine:
         self.confirm_frames = max(1, int(profile.get("confirm_frames", OCR_CONFIRM_FRAMES)))
         self.speak_cooldown = float(profile.get("speak_cooldown", 5.5))
         self.no_barge_in = bool(profile.get("no_barge_in", True))
+        self.catch_up = bool(profile.get("catch_up", False))
         if reset_lock:
             self.lock_region = False
             saved = self.game_regions.get(self._region_key()) or {}
@@ -3817,6 +3822,12 @@ class Engine:
             if not self._queue:
                 self.has_pending.clear()
                 return None
+            if getattr(self, "catch_up", False) and len(self._queue) > 2:
+                # zaległości: najstarsze kwestie przepadają, lektor przeskakuje do tego, co jest na ekranie
+                dropped = self._queue[:-2]
+                del self._queue[:-2]
+                self._prefetch_parts = None
+                self._timing(f"nadganiam: pomijam {len(dropped)} zaległe kwestie")
             first = self._queue.pop(0)
             parts = [first]
             # przygotowane zawczasu: weź dokładnie ten zestaw, dla którego dźwięk już czeka
@@ -3974,8 +3985,9 @@ class Engine:
                 break
             text = condense_polish(text, level=level)
         sentences = re.findall(r"[^.!?…]+(?:[.!?…]+|$)", text or "")
-        # całe zdania wypadają tylko przy dużym zatorze (3+ zaległe napisy) — inaczej ginie kontekst
-        while len(parts or []) >= 3 and len(sentences) > 1 and self.lektor.overload(" ".join(sentences), seconds) > 1.15:
+        # całe zdania wypadają tylko przy dużym zatorze (3+ zaległe napisy; RDR2: 2+) — inaczej ginie kontekst
+        min_parts = 2 if getattr(self, "catch_up", False) else 3
+        while len(parts or []) >= min_parts and len(sentences) > 1 and self.lektor.overload(" ".join(sentences), seconds) > 1.15:
             sentences.pop(0)
         if len(sentences) > 1 or (sentences and self.lektor.overload(text, seconds) > 1.0):
             text = normalize_text(" ".join(s.strip() for s in sentences))
