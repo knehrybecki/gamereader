@@ -65,12 +65,16 @@ codesign --force --sign - "$ENGINE_BUILD" || true
 
 # CI (GitHub Actions): tylko paczka do wydania, bez instalowania w ~/Applications
 if [ "${LIVEDUB_NO_INSTALL:-}" = "1" ]; then
+  # LIVEDUB_SIGN_ID = stały certyfikat „LiveDub Release” (z sekretów CI) — każda wersja ma ten sam podpis,
+  # więc macOS pamięta zgody po aktualizacji; bez niego ad-hoc
+  SIGN_ID="${LIVEDUB_SIGN_ID:--}"
   xattr -cr "$APP" || true
-  codesign --force --sign - "$APP/Contents/Resources/GameReaderHelper" || true
+  codesign --force --sign "$SIGN_ID" "$APP/Contents/Resources/GameReaderHelper"
   # podpis całej aplikacji na końcu — po dopisaniu silnika i helpera stary podpis Electrona
   # już się nie zgadza i macOS pokazuje „aplikacja jest uszkodzona”
-  codesign --force --deep --sign - "$APP"
+  codesign --force --deep --sign "$SIGN_ID" "$APP"
   codesign --verify --deep --strict "$APP"
+  codesign -d -r- "$APP" 2>&1 | grep designated || true
   rm -f "$ELEC/dist/LiveDub-mac-arm64.zip"
   ditto -c -k --keepParent "$APP" "$ELEC/dist/LiveDub-mac-arm64.zip"
   printf 'ZIP_OK %s\n' "$ELEC/dist/LiveDub-mac-arm64.zip"
