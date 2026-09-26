@@ -782,6 +782,8 @@ const LICENSES = [
   ["python-mss", "MIT"],
   ["python-sounddevice", "MIT"],
   ["ocrmac", "MIT"],
+  ["pywinrt (OCR Windows)", "MIT"],
+  ["pycaw (ściszanie na Windows)", "MIT"],
   ["PyObjC", "MIT"],
   ["imageio-ffmpeg / FFmpeg", "BSD-2 / LGPL 2.1+"],
 ];
@@ -800,7 +802,8 @@ const HELP_TEXT_WIN = [
   "1. Włącz PS Remote Play albo Netflixa/YouTube w Chrome — okno musi być widoczne, nie zminimalizowane.",
   "2. LiveDub sam wykryje grę i zacznie czytać napisy (albo kliknij „Uruchom”).",
   "3. Polskie znaki w napisach: Windows musi mieć język polski (Ustawienia → Czas i język → Język i region).",
-  "4. Na Windowsie LiveDub czyta na razie tylko napisy — tłumaczenie dźwięku będzie w kolejnej wersji.",
+  "4. „Ścisz grę” ścisza Chrome/Edge albo PS Remote Play w mikserze Windowsa, gdy mówi lektor.",
+  "5. Na Windowsie LiveDub czyta na razie tylko napisy — tłumaczenie dźwięku będzie w kolejnej wersji.",
   "",
   "Gdy lektor się spóźnia albo coś nie gra: ikona LiveDub w zasobniku → Otwórz log lektora i wyślij jego końcówkę.",
 ].join("\n");

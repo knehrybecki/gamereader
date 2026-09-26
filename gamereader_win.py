@@ -312,3 +312,79 @@ def open_language_settings():
         os.startfile("ms-settings:regionlanguage")
     except OSError:
         pass
+
+
+DUCK_TARGETS = {"chrome": BROWSER_EXES, "ps": REMOTE_PLAY_EXES}
+
+
+class WinDucker:
+    """Ściszanie gry/filmu, gdy mówi lektor: głośność aplikacji w mikserze Windowsa (Chrome, Edge,
+    PS Remote Play). COM (pycaw) żyje we własnym wątku; oryginalna głośność wraca przy gain=1 i na koniec."""
+
+    def __init__(self):
+        import atexit
+        import queue
+
+        self._jobs = queue.Queue()
+        self._orig = {}  # pid → głośność sprzed ściszenia
+        self.error = ""
+        self._thread = threading.Thread(target=self._loop, name="win-ducker", daemon=True)
+        self._thread.start()
+        atexit.register(self.close)
+
+    def set_gain(self, target, value):
+        """target: „chrome” | „ps”; value: 0…1 względem głośności ustawionej przez użytkownika."""
+        self._jobs.put((target, max(0.0, min(1.0, float(value)))))
+
+    def close(self):
+        self._jobs.put(None)
+        self._thread.join(timeout=2.0)
+
+    def _loop(self):
+        try:
+            import comtypes
+
+            comtypes.CoInitialize()
+            from pycaw.pycaw import AudioUtilities
+        except Exception as exc:
+            self.error = f"Ściszanie niedostępne: {exc}"
+            AudioUtilities = None
+        while True:
+            job = self._jobs.get()
+            # kolejka mogła urosnąć — liczy się ostatnie polecenie (None = koniec)
+            while job is not None and not self._jobs.empty():
+                job = self._jobs.get()
+            if job is None:
+                if AudioUtilities is not None:
+                    self._apply(AudioUtilities, None, 1.0)  # na koniec oddaj pełną głośność
+                return
+            if AudioUtilities is not None:
+                target, value = job
+                try:
+                    self._apply(AudioUtilities, DUCK_TARGETS.get(target, ()), value)
+                except Exception as exc:
+                    self.error = str(exc)
+
+    def _apply(self, audio, exes, value):
+        for session in audio.GetAllSessions():
+            proc = session.Process
+            if proc is None:
+                continue
+            try:
+                pid = proc.pid
+                name = proc.name().lower()
+            except Exception:
+                continue
+            if exes is not None and name not in exes and pid not in self._orig:
+                continue
+            volume = session.SimpleAudioVolume
+            if pid not in self._orig:
+                if value >= 0.999:
+                    continue
+                self._orig[pid] = volume.GetMasterVolume()
+            base = self._orig[pid]
+            if value >= 0.999 or exes is None:
+                volume.SetMasterVolume(base, None)
+                self._orig.pop(pid, None)
+            else:
+                volume.SetMasterVolume(base * value, None)

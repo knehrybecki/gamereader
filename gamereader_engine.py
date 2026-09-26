@@ -3074,6 +3074,7 @@ class Engine:
         # o ile ściszyć grę, gdy mówi lektor: 0 % = wcale (dźwięku gry nie przejmujemy), 100 % = cisza
         self.duck_amount = max(0, min(100, int(self.cfg.get("duckAmount", 70))))
         self._tap = None
+        self._win_ducker = None
         self._duck_timer = None
         self._auto_started = False
         self._user_stopped = False
@@ -3162,6 +3163,14 @@ class Engine:
         return 1.0 - self.duck_amount / 100.0
 
     def _set_game_gain(self, value):
+        if IS_WIN:
+            # Windows: głośność aplikacji źródła (Chrome/Edge/PS Remote Play) w mikserze systemu
+            kind = self._source_kind()
+            if kind and (self.duck or value >= 0.999):
+                if self._win_ducker is None:
+                    self._win_ducker = winplat.WinDucker()
+                self._win_ducker.set_gain(kind, value)
+            return
         tap = self._tap
         if tap is not None:
             tap.set_gain(value)
@@ -3514,6 +3523,8 @@ class Engine:
             self.transcriber.stop()
             self.transcriber = None
         self.lektor.stop()
+        if self._win_ducker is not None:
+            self._win_ducker.set_gain(self._source_kind() or "chrome", 1.0)
         self.emit({"event": "running", "on": False})
         self.emit({"event": "status", "text": "Zatrzymane."})
 

@@ -76,6 +76,14 @@ video = ocr.read(np.ascontiguousarray(np.asarray(noisy)[:, :, ::-1]))
 print("OCR na tle filmu:", repr(video))
 assert "money" in video.lower(), f"OCR nie przeczytał napisu na tle filmu: {video!r}"
 
+step("ściszanie (mikser Windowsa)")
+ducker = win.WinDucker()
+ducker.set_gain("chrome", 0.3)
+ducker.set_gain("chrome", 1.0)
+ducker.close()
+print("ściszanie:", ducker.error or "OK")
+assert not ducker.error, ducker.error
+
 step("tłumacz EN→PL")
 t0 = time.time()
 pl = eng.ArgosTranslator().translate("Where is our money? Let me know.")
