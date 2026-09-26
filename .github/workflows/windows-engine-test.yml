@@ -3,6 +3,13 @@ name: Test silnika (Windows)
 # Instalacja silnika jak u użytkownika + okna, zrzut, OCR Windowsa, tłumacz, lektor, worker.
 # Tylko gdy PR zmienia silnik (albo ręcznie) — oszczędza minuty Actions.
 on:
+  push:
+    # tylko żeby zapisać cache na main (PR-y korzystają z cache main) — gdy zmienia się lista pakietów
+    branches: [main]
+    paths:
+      - "requirements-win.txt"
+      - "electron/setup.js"
+      - ".github/workflows/windows-engine-test.yml"
   pull_request:
     paths:
       - "gamereader_engine.py"
@@ -28,6 +35,18 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      # Python + biblioteki (torch itd.) i modele (głos, tłumacz) — instalacja od zera tylko po zmianie
+      # requirements-win.txt / setup.js. Cache z main widzą wszystkie PR-y.
+      - name: Cache silnika i modeli
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\LiveDub\runtime
+            ~\.cache\huggingface
+            ~\.local\share\argos-translate
+            ~\.local\cache\argos-translate
+          key: engine-win-${{ hashFiles('requirements-win.txt', 'electron/setup.js') }}
 
       - name: Instalacja silnika (jak przy pierwszym uruchomieniu)
         env:

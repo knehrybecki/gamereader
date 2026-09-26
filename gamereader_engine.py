@@ -585,7 +585,11 @@ GAME_PROFILES = {
     "rdr2": {
         **_GAME_BASE,
         "label": "Red Dead Redemption 2",
-        "hint": "Napisy na dole, szybkie kwestie — te same ustawienia co GTA VI.",
+        "hint": "Szybkie napisy — lektor czyta od pierwszego odczytu i przeskakuje zaległe kwestie.",
+        # napis pojawia się od razu w całości — drugi odczyt OCR tylko opóźnia start
+        "confirm_frames": 1,
+        # kwestie zmieniają się szybciej, niż da się je przeczytać: nadganiaj jak lektor w filmie
+        "catch_up": True,
     },
     "generic": {
         **_GAME_BASE,
@@ -1056,7 +1060,12 @@ def player_controls_visible(info):
 def capture_remote_play_band(left, top, width, height, info=None):
     """Szybki zrzut paska z okna źródła (Quartz w procesie, bez spawn helpera)."""
     if IS_WIN:
-        # Windows: zrzut ekranu; okna LiveDub są wyłączone z przechwytywania (setContentProtection)
+        # PS5: obraz z samego okna PS Remote Play — to, co je zasłania (powiadomienia, inne okna), nie wchodzi
+        if info is not None and len(info) > 5 and info[5] == "ps" and info[4]:
+            frame = winplat.grab_window(info[4], left, top, width, height)
+            if frame is not None:
+                return frame
+        # reszta (i zapas): zrzut ekranu; okna LiveDub są wyłączone z przechwytywania (setContentProtection)
         return winplat.grab(left, top, width, height)
     try:
         from Quartz import (
@@ -1573,6 +1582,30 @@ ENGLISH_NAMES = {
     "Bruce": "Brus", "Grace": "Grejs", "Tony": "Toni", "Mia": "Mija", "Carl": "Karl", "Hugh": "Hju",
     "Grayson": "Grejson", "Nick": "Nik", "Frank": "Frenk", "Franklin": "Frenklin", 
     "Jenkins": "Dżenkins", "Smith": "Smit", "Jones": "Dżołns", "Brown": "Braun",
+    # GTA VI (Leonida) — postaci i miejsca
+    "Duval": "Duwal", "Caminos": "Kaminos", "Hampton": "Hempton", "Ike": "Ajk", "Dre'Quan": "Drikłan",
+    "Drequan": "Drikłan", "Dimez": "Dajmz", "Roxy": "Roksi", "Heder": "Heder", "Bautista": "Bautista",
+    "Leonida": "Leonida", "Gellhorn": "Gelhorn", "Ambrosia": "Ambrozja", "Grassrivers": "Grasriwers",
+    "Kalaga": "Kalaga", "Leonida Keys": "Leonida Kiz", "Vice Beach": "Wajs Bicz", "Port Gellhorn": "Port Gelhorn",
+    # Red Dead Redemption 2 — postaci
+    "Arthur": "Artur", "Morgan": "Morgan", "Dutch": "Dacz", "Van der Linde": "Wan der Lynde", "Marston": "Marston",
+    "Hosea": "Hołzeja", "Micah": "Majka", "Bell": "Bel", "Sadie": "Sejdi", "Adler": "Edler", "Abigail": "Abigejl",
+    "Lenny": "Leni", "Kieran": "Kiran", "Tilly": "Tili", "Karen": "Karen", "Mary-Beth": "Meri Bet", "Molly": "Moli",
+    "Susan": "Suzan", "Grimshaw": "Grimszo", "Pearson": "Pirson", "Strauss": "Sztraus", "Swanson": "Słonson",
+    "Uncle": "Ankl", "Josiah": "Dżozaja", "Trelawny": "Trelołni", "Escuella": "Eskuela", "Williamson": "Łiljamson",
+    "Colm": "Kolm", "O'Driscoll": "O'Driskol", "O'Driscolls": "O'Driskolów", "Cornwall": "Kornłol",
+    "Leviticus": "Lewitikus", "Braithwaite": "Brejtłejt", "Milton": "Milton", "Pinkerton": "Pinkerton",
+    "Pinkertons": "Pinkertonów", "Eagle Flies": "Igl Flajs", "Rains Fall": "Rejns Fol", "Hamish": "Hejmisz",
+    "Downes": "Dałns", "Callander": "Kalander", "Mac": "Mek", "Davey": "Dejwi", "Reverend": "Rewerend",
+    "Angelo Bronte": "Andżelo Bronte", "Bronte": "Bronte", "Guido": "Gwido", "Evelyn": "Ewelin",
+    # Red Dead Redemption 2 — miejsca
+    "Valentine": "Walentajn", "Saint Denis": "Sejnt Denis", "Blackwater": "Blekłoter", "Rhodes": "Rołds",
+    "Strawberry": "Stroberi", "Annesburg": "Enzberg", "Van Horn": "Wan Horn", "Tumbleweed": "Tamblłid",
+    "Armadillo": "Armadilo", "Emerald Ranch": "Emerald Rancz", "Horseshoe Overlook": "Horsszu Owerluk",
+    "Clemens Point": "Klemens Point", "Shady Belle": "Szejdi Bel", "Beaver Hollow": "Biwer Holoł", "Colter": "Kolter",
+    "Lemoyne": "Lemojn", "New Hanover": "Nju Hanower", "West Elizabeth": "Łest Elizabet", "New Austin": "Nju Ostin",
+    "Bayou Nwa": "Baju Nła", "Heartlands": "Hartlendz", "Big Valley": "Big Weli", "Tall Trees": "Tol Triz",
+    "Wapiti": "Łapiti", "Guarma": "Gwarma", "Flatneck": "Fletnek", "Twin Rocks": "Tłin Roks",
     # miejsca
     "Vice City": "Wajs Siti", "Liberty City": "Liberti Siti", "Miami": "Majami", "Grove Street": "Grołw Strit",
     "Vinewood": "Wajnłud", "Downtown": "Dałntaun", "Vespucci": "Wespuczi",
@@ -2588,6 +2621,63 @@ class LiveTranscriber:
                 self.on_error(str(exc))
 
 
+# Interfejs gry (nie dialog): menu, koło broni, podpowiedzi przycisków, liczniki, komunikaty misji.
+_UI_PROMPT = re.compile(
+    r"(?i)\b(?:naciśnij|nacisnij|wciśnij|wcisnij|przytrzymaj|kliknij|użyj|uzyj|press|hold|tap|click|use)\b"
+    r".{0,24}(?:\[[^\]]{1,6}\]|[△○□✕×⨯◯]|\b(?:[LR][123]|[LR]B|[LR]T|[ABXY]|E|F|Q|R|Esc|Enter|Spacj\w*|Space|Tab|Shift)\b)"
+)
+_UI_BUTTON = re.compile(r"(?:\[[A-Za-z0-9]{1,5}\]|[△○□✕◯])")
+_UI_COUNTER = re.compile(r"\d+\s*/\s*\d+|\$\s?\d|\d\s?(?:%|zł|\$)|\b\d{1,2}:\d{2}\b|\b[xX]\s?\d+\b|\b\d+\s?[xX]\b")
+_UI_WORDS = {polish_fold(w) for w in POLISH_UI} | {
+    "map", "mapa", "settings", "options", "resume", "quit", "exit", "back", "select", "confirm", "cancel",
+    "inventory", "weapons", "weapon", "ammo", "amunicja", "health", "zdrowie", "armor", "pancerz", "stats",
+    "statystyki", "brief", "online", "story", "mode", "pause", "save", "load", "game", "gallery", "galeria",
+    "help", "pomoc", "controls", "audio", "video", "display", "graphics", "camera", "kamera", "misja", "mission",
+    "passed", "failed", "zaliczona", "nieudana", "wasted", "busted", "zginales", "zginąłeś", "aresztowany",
+    "unarmed", "pieści", "piesci", "rzut", "radio", "telefon", "phone", "gps",
+}
+_UI_DIALOGUE_WORDS = None
+
+
+def looks_like_game_ui(text):
+    """Czy odczyt to element interfejsu gry, a nie kwestia postaci (wtedy lektor go pomija)."""
+    global _UI_DIALOGUE_WORDS
+    raw = normalize_text(text)
+    if not raw:
+        return True
+    if _UI_PROMPT.search(raw) or _UI_BUTTON.search(raw):
+        return True
+    words = re.findall(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż']+", raw)
+    if not words:
+        return True
+    if _UI_COUNTER.search(raw) and len(words) <= 4:
+        return True  # „Pistolet 12/120”, „$1 200”, „Zdrowie 100%”, „12:30”
+    folded = [polish_fold(w) for w in words]
+    if all(f in _UI_WORDS for f in folded if f):
+        return True  # samo menu: „Mapa”, „Ustawienia”, „Wróć”, „Misja zaliczona”
+    letters = [ch for ch in raw if ch.isalpha()]
+    if len(words) <= 4 and len(letters) >= 4 and all(ch.isupper() for ch in letters):
+        return True  # „MISJA ZALICZONA”, „WASTED”
+    if len(words) <= 3 and not re.search(r"[.!?…,]", raw):
+        # 1–3 słowa bez interpunkcji: nazwa broni/przedmiotu z koła wyboru („Karabin szturmowy”),
+        # chyba że to krótka kwestia („Chodź tu”, „Let's go”)
+        if _UI_DIALOGUE_WORDS is None:
+            _UI_DIALOGUE_WORDS = (
+                {polish_fold(w) for w in POLISH_DIALOGUE}
+                | {polish_fold(w) for w in DIALOGUE_STARTERS}
+                | {w.replace("'", "") for w in EN_COMMON}
+            )
+        if len(words) >= 2 and all(w[:1].isupper() for w in words):
+            return True  # „Radio Los Santos”, „Combat Pistol” — nazwa, nie kwestia
+        talk = [
+            f for f, w in zip(folded, words)
+            if f not in _UI_WORDS and (f in _UI_DIALOGUE_WORDS or w.lower().replace("'", "") in _UI_DIALOGUE_WORDS)
+        ]
+        if not talk:
+            return True
+    return False
+
+
 DIALOGUE_STARTERS = {
     "ja", "ty", "on", "ona", "my", "wy", "to", "nie", "tak", "ale", "czy", "jak", "co",
     "gdzie", "kiedy", "dlaczego", "czemu", "moze", "musze", "chce", "prosze", "przepraszam",
@@ -3343,6 +3433,7 @@ class Engine:
         self.confirm_frames = max(1, int(profile.get("confirm_frames", OCR_CONFIRM_FRAMES)))
         self.speak_cooldown = float(profile.get("speak_cooldown", 5.5))
         self.no_barge_in = bool(profile.get("no_barge_in", True))
+        self.catch_up = bool(profile.get("catch_up", False))
         if reset_lock:
             self.lock_region = False
             saved = self.game_regions.get(self._region_key()) or {}
@@ -3731,6 +3822,12 @@ class Engine:
             if not self._queue:
                 self.has_pending.clear()
                 return None
+            if getattr(self, "catch_up", False) and len(self._queue) > 2:
+                # zaległości: najstarsze kwestie przepadają, lektor przeskakuje do tego, co jest na ekranie
+                dropped = self._queue[:-2]
+                del self._queue[:-2]
+                self._prefetch_parts = None
+                self._timing(f"nadganiam: pomijam {len(dropped)} zaległe kwestie")
             first = self._queue.pop(0)
             parts = [first]
             # przygotowane zawczasu: weź dokładnie ten zestaw, dla którego dźwięk już czeka
@@ -3888,8 +3985,9 @@ class Engine:
                 break
             text = condense_polish(text, level=level)
         sentences = re.findall(r"[^.!?…]+(?:[.!?…]+|$)", text or "")
-        # całe zdania wypadają tylko przy dużym zatorze (3+ zaległe napisy) — inaczej ginie kontekst
-        while len(parts or []) >= 3 and len(sentences) > 1 and self.lektor.overload(" ".join(sentences), seconds) > 1.15:
+        # całe zdania wypadają tylko przy dużym zatorze (3+ zaległe napisy; RDR2: 2+) — inaczej ginie kontekst
+        min_parts = 2 if getattr(self, "catch_up", False) else 3
+        while len(parts or []) >= min_parts and len(sentences) > 1 and self.lektor.overload(" ".join(sentences), seconds) > 1.15:
             sentences.pop(0)
         if len(sentences) > 1 or (sentences and self.lektor.overload(text, seconds) > 1.0):
             text = normalize_text(" ".join(s.strip() for s in sentences))
@@ -4026,6 +4124,12 @@ class Engine:
 
     def _on_subtitle(self, src):
         if not usable_ocr(src):
+            return
+        if self._source_kind() != "chrome" and looks_like_game_ui(src):
+            # menu, koło wyboru broni, podpowiedzi przycisków, liczniki — lektor czyta tylko dialogi
+            if src != getattr(self, "_ui_logged", ""):
+                self._ui_logged = src
+                self.emit({"event": "debug", "text": f"pomijam interfejs gry: {src}"})
             return
         if self._source_kind() == "chrome":
             if player_paused(src):

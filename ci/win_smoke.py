@@ -51,6 +51,24 @@ frame = win.grab(0, 0, 320, 120)
 print("zrzut:", None if frame is None else frame.shape)
 assert frame is not None and frame.shape == (120, 320, 3), "mss nie zrzuca ekranu"
 
+step("zrzut z samego okna (PS5)")
+import tkinter as tk  # noqa: E402
+
+root = tk.Tk()
+root.geometry("400x300+50+50")
+root.configure(bg="#20a040")
+root.update()
+time.sleep(0.5)
+root.update()
+hwnd = int(root.wm_frame(), 16)
+wx, wy, _ww, _wh = win._window_rect(hwnd)
+piece = win.grab_window(hwnd, wx + 60, wy + 80, 160, 90)
+root.destroy()
+print("zrzut okna:", None if piece is None else (piece.shape, piece.reshape(-1, 3).mean(axis=0).round()))
+assert piece is not None and piece.shape == (90, 160, 3), "PrintWindow nie oddał obrazu okna"
+b, g, r = piece.reshape(-1, 3).mean(axis=0)
+assert g > 120 and r < 90, f"zły kolor z okna: {(b, g, r)}"
+
 step("OCR Windows")
 backend = win.WindowsOcrBackend()
 assert not backend.error, backend.error
