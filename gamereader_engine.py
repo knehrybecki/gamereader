@@ -2588,6 +2588,63 @@ class LiveTranscriber:
                 self.on_error(str(exc))
 
 
+# Interfejs gry (nie dialog): menu, koło broni, podpowiedzi przycisków, liczniki, komunikaty misji.
+_UI_PROMPT = re.compile(
+    r"(?i)\b(?:naciśnij|nacisnij|wciśnij|wcisnij|przytrzymaj|kliknij|użyj|uzyj|press|hold|tap|click|use)\b"
+    r".{0,24}(?:\[[^\]]{1,6}\]|[△○□✕×⨯◯]|\b(?:[LR][123]|[LR]B|[LR]T|[ABXY]|E|F|Q|R|Esc|Enter|Spacj\w*|Space|Tab|Shift)\b)"
+)
+_UI_BUTTON = re.compile(r"(?:\[[A-Za-z0-9]{1,5}\]|[△○□✕◯])")
+_UI_COUNTER = re.compile(r"\d+\s*/\s*\d+|\$\s?\d|\d\s?(?:%|zł|\$)|\b\d{1,2}:\d{2}\b|\b[xX]\s?\d+\b|\b\d+\s?[xX]\b")
+_UI_WORDS = {polish_fold(w) for w in POLISH_UI} | {
+    "map", "mapa", "settings", "options", "resume", "quit", "exit", "back", "select", "confirm", "cancel",
+    "inventory", "weapons", "weapon", "ammo", "amunicja", "health", "zdrowie", "armor", "pancerz", "stats",
+    "statystyki", "brief", "online", "story", "mode", "pause", "save", "load", "game", "gallery", "galeria",
+    "help", "pomoc", "controls", "audio", "video", "display", "graphics", "camera", "kamera", "misja", "mission",
+    "passed", "failed", "zaliczona", "nieudana", "wasted", "busted", "zginales", "zginąłeś", "aresztowany",
+    "unarmed", "pieści", "piesci", "rzut", "radio", "telefon", "phone", "gps",
+}
+_UI_DIALOGUE_WORDS = None
+
+
+def looks_like_game_ui(text):
+    """Czy odczyt to element interfejsu gry, a nie kwestia postaci (wtedy lektor go pomija)."""
+    global _UI_DIALOGUE_WORDS
+    raw = normalize_text(text)
+    if not raw:
+        return True
+    if _UI_PROMPT.search(raw) or _UI_BUTTON.search(raw):
+        return True
+    words = re.findall(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż']+", raw)
+    if not words:
+        return True
+    if _UI_COUNTER.search(raw) and len(words) <= 4:
+        return True  # „Pistolet 12/120”, „$1 200”, „Zdrowie 100%”, „12:30”
+    folded = [polish_fold(w) for w in words]
+    if all(f in _UI_WORDS for f in folded if f):
+        return True  # samo menu: „Mapa”, „Ustawienia”, „Wróć”, „Misja zaliczona”
+    letters = [ch for ch in raw if ch.isalpha()]
+    if len(words) <= 4 and len(letters) >= 4 and all(ch.isupper() for ch in letters):
+        return True  # „MISJA ZALICZONA”, „WASTED”
+    if len(words) <= 3 and not re.search(r"[.!?…,]", raw):
+        # 1–3 słowa bez interpunkcji: nazwa broni/przedmiotu z koła wyboru („Karabin szturmowy”),
+        # chyba że to krótka kwestia („Chodź tu”, „Let's go”)
+        if _UI_DIALOGUE_WORDS is None:
+            _UI_DIALOGUE_WORDS = (
+                {polish_fold(w) for w in POLISH_DIALOGUE}
+                | {polish_fold(w) for w in DIALOGUE_STARTERS}
+                | {w.replace("'", "") for w in EN_COMMON}
+            )
+        if len(words) >= 2 and all(w[:1].isupper() for w in words):
+            return True  # „Radio Los Santos”, „Combat Pistol” — nazwa, nie kwestia
+        talk = [
+            f for f, w in zip(folded, words)
+            if f not in _UI_WORDS and (f in _UI_DIALOGUE_WORDS or w.lower().replace("'", "") in _UI_DIALOGUE_WORDS)
+        ]
+        if not talk:
+            return True
+    return False
+
+
 DIALOGUE_STARTERS = {
     "ja", "ty", "on", "ona", "my", "wy", "to", "nie", "tak", "ale", "czy", "jak", "co",
     "gdzie", "kiedy", "dlaczego", "czemu", "moze", "musze", "chce", "prosze", "przepraszam",
@@ -4026,6 +4083,12 @@ class Engine:
 
     def _on_subtitle(self, src):
         if not usable_ocr(src):
+            return
+        if self._source_kind() != "chrome" and looks_like_game_ui(src):
+            # menu, koło wyboru broni, podpowiedzi przycisków, liczniki — lektor czyta tylko dialogi
+            if src != getattr(self, "_ui_logged", ""):
+                self._ui_logged = src
+                self.emit({"event": "debug", "text": f"pomijam interfejs gry: {src}"})
             return
         if self._source_kind() == "chrome":
             if player_paused(src):
