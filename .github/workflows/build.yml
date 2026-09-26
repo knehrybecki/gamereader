@@ -1,12 +1,14 @@
 name: Build LiveDub
 
-# Każdy push buduje aplikację na macOS i Windows (artefakty do pobrania z zakładki Actions).
-# Każdy push/merge na main publikuje nowe wydanie (Mac .zip + Windows .exe), z którego aplikacja
-# sama się aktualizuje. Numer: wersja z electron/package.json, a jeśli takie wydanie już jest —
-# kolejna wolna (1.3.0 → 1.3.1 → 1.3.2 …). Większy skok (np. 1.4.0) = zmień wersję w package.json.
+# Oszczędnie z minutami Actions (macOS liczy się 10×):
+# - PR: tylko szybki test składni na Linuksie (test silnika na Windowsie — osobny workflow, gdy zmienia się silnik),
+# - push/merge na main: budowa Mac .zip + Windows .exe i nowe wydanie, z którego aplikacja sama się aktualizuje,
+# - ręcznie (Run workflow): budowa paczek z dowolnej gałęzi, bez wydania.
+# Numer: wersja z electron/package.json, a jeśli takie wydanie już jest — kolejna wolna
+# (1.3.0 → 1.3.1 → 1.3.2 …). Większy skok (np. 1.4.0) = zmień wersję w package.json.
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -18,7 +20,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Składnia silnika i Electrona
+        run: |
+          python3 -m py_compile gamereader_engine.py gamereader_worker.py gamereader_gui.py gamereader_win.py ci/win_smoke.py
+          for f in electron/*.js electron/renderer/*.js ci/*.js; do node --check "$f"; done
+
   version:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
@@ -46,6 +59,7 @@ jobs:
 
   mac:
     needs: version
+    if: github.event_name != 'pull_request'
     runs-on: macos-15
     env:
       VERSION: ${{ needs.version.outputs.version }}
@@ -116,6 +130,7 @@ jobs:
 
   windows:
     needs: version
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
     env:
       VERSION: ${{ needs.version.outputs.version }}
@@ -148,33 +163,6 @@ jobs:
           name: LiveDub-win-x64
           path: electron/dist/LiveDub-Setup-win-x64.exe
           if-no-files-found: error
-
-  # Test silnika na prawdziwym Windowsie: instalacja jak u użytkownika, okna, zrzut, OCR, tłumacz, lektor.
-  # Osobno od budowania — wydanie nie czeka na pobieranie modeli.
-  windows-engine-test:
-    runs-on: windows-latest
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Instalacja silnika (jak przy pierwszym uruchomieniu)
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: node ci/win_setup.js
-
-      - name: Test silnika
-        shell: bash
-        env:
-          PYTHONIOENCODING: utf-8
-          PYTHONUNBUFFERED: "1"
-        run: |
-          export PYTHONPATH="$GITHUB_WORKSPACE"
-          "$LIVEDUB_PY" -m py_compile gamereader_engine.py gamereader_worker.py gamereader_win.py
-          "$LIVEDUB_PY" ci/win_smoke.py
 
   release:
     needs: [version, mac, windows]

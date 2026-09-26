@@ -1,0 +1,46 @@
+name: Test silnika (Windows)
+
+# Instalacja silnika jak u użytkownika + okna, zrzut, OCR Windowsa, tłumacz, lektor, worker.
+# Tylko gdy PR zmienia silnik (albo ręcznie) — oszczędza minuty Actions.
+on:
+  pull_request:
+    paths:
+      - "gamereader_engine.py"
+      - "gamereader_worker.py"
+      - "gamereader_win.py"
+      - "requirements-win.txt"
+      - "electron/setup.js"
+      - "ci/**"
+      - ".github/workflows/windows-engine-test.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: engine-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-engine-test:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Instalacja silnika (jak przy pierwszym uruchomieniu)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node ci/win_setup.js
+
+      - name: Test silnika
+        shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
+          PYTHONUNBUFFERED: "1"
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE"
+          "$LIVEDUB_PY" -m py_compile gamereader_engine.py gamereader_worker.py gamereader_win.py
+          "$LIVEDUB_PY" ci/win_smoke.py
+
