@@ -672,6 +672,13 @@ BRAIN_SUSPECT_P = 0.35
 BRAIN_SKIP_INFO_P = 0.2
 # krótkie wtrącenie (do 2 słów, nie pytanie z treścią) wypada, dopóki model nie jest pewny informacji
 BRAIN_SKIP_SHORT_P = 0.4
+# Wejście jak lektor w filmie: gotowy głos rusza chwilę po tym, jak postać zaczyna mówić (dźwięk gry),
+# a nie w chwili pojawienia się napisu. Czekamy najwyżej FILM_MAX_WAIT od napisu i nigdy, gdy lektor
+# się spóźnia, czeka już następna kwestia albo postać przed chwilą skończyła mówić (to była ta kwestia).
+FILM_DELAY = 0.3
+FILM_MAX_WAIT = 0.9
+FILM_MAX_LAG = 1.0
+FILM_RECENT_VOICE = 0.8
 # zanim silnik nauczy się tempa napisów w grze: typowy napis ~16 znaków na sekundę
 SUBTITLE_CPS_DEFAULT = 16.0
 # skracanie tekstu: od tylu sekund spóźnienia lektora za napisem (poziom 1 / poziom 2)
@@ -717,6 +724,8 @@ def normalize_mode(mode):
 # Wspólne ustawienia odczytu (dostrojone na GTA VI) — RDR2 i inne gry działają tak samo.
 # Pasek napisów w Chrome (Netflix/YouTube) ustawia osobno CHROME_BAND.
 _GAME_BASE = {
+    # napis zwykle pojawia się od razu w całości — drugi odczyt OCR tylko opóźnia start lektora
+    "confirm_frames": 1,
     "interval": 0.15,
     "tts": 0.92,
     "boost": 2.4,
@@ -736,11 +745,7 @@ GAME_PROFILES = {
     "rdr2": {
         **_GAME_BASE,
         "label": "Red Dead Redemption 2",
-        "hint": "Szybkie napisy — lektor czyta od pierwszego odczytu i przeskakuje zaległe kwestie.",
-        # napis pojawia się od razu w całości — drugi odczyt OCR tylko opóźnia start
-        "confirm_frames": 1,
-        # kwestie zmieniają się najszybciej: w kolejce tylko najnowsza (reszta przepada)
-        "catch_up_keep": 1,
+        "hint": "Napisy na dole, szybkie kwestie — te same ustawienia co w każdej grze.",
     },
     "generic": {
         **_GAME_BASE,
@@ -2768,6 +2773,74 @@ class ProsodyMeter:
         return max(-1.0, min(1.0, score / 1.2))
 
 
+class VoiceActivity:
+    """Czy postać teraz mówi (dźwięk gry) — żeby lektor wchodził jak w filmie, chwilę po oryginale.
+
+    Ramka 32 ms z głosem = wyraźnie ponad tłem ORAZ okresowa w paśmie głosu (55–400 Hz); szum
+    i wybuchy okresowe nie są. Wypowiedź = min. 3 takie ramki (~100 ms); jej początek (`onset`)
+    liczy się od ciszy dłuższej niż 0,35 s. Pomyłka detektora oznacza najwyżej start lektora jak
+    dotąd (od razu) — dlatego woli uznać muzykę za głos niż przegapić mowę."""
+
+    FRAME = 512
+    MIN_RUN = 3
+    GAP = 0.35
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.buf = np.zeros(0, dtype=np.float32)
+        self.floor = None
+        self.run = 0
+        self.fed = -1e9
+        self.last_voice = -1e9
+        self.onset = -1e9
+        self._seg_start = -1e9
+        self._confirmed = False
+
+    def _periodic(self, frame):
+        x = frame.astype(np.float64) - float(frame.mean())
+        spec = np.fft.rfft(x, 2 * self.FRAME)
+        ac = np.fft.irfft(spec * np.conj(spec))[: self.FRAME]
+        if ac[0] <= 0:
+            return False
+        lo, hi = SAMPLE_RATE // 400, SAMPLE_RATE // 55
+        return float(np.max(ac[lo:hi])) >= 0.35 * float(ac[0])
+
+    def feed(self, mono, now=None):
+        if mono is None or mono.size == 0:
+            return
+        now = time.monotonic() if now is None else now
+        with self.lock:
+            buf = np.concatenate([self.buf, np.asarray(mono, dtype=np.float32)])
+            n = buf.size // self.FRAME
+            self.buf = buf[n * self.FRAME :]
+            step = self.FRAME / float(SAMPLE_RATE)
+            for i in range(n):
+                frame = buf[i * self.FRAME : (i + 1) * self.FRAME]
+                t = now - (n - 1 - i) * step - self.buf.size / float(SAMPLE_RATE)
+                rms = float(np.sqrt(np.mean(frame.astype(np.float64) ** 2)))
+                # tło: szybko w dół, powoli w górę (mowa nie podnosi go w trakcie wypowiedzi)
+                self.floor = rms if self.floor is None or rms < self.floor else self.floor + 0.005 * (rms - self.floor)
+                if rms > max(SPEECH_RMS, 1.25 * self.floor) and self._periodic(frame):
+                    if t - self.last_voice > self.GAP:
+                        self._seg_start, self._confirmed = t - step, False
+                    self.run += 1
+                    self.last_voice = t
+                    if self.run >= self.MIN_RUN and not self._confirmed:
+                        self._confirmed = True
+                        self.onset = self._seg_start
+                else:
+                    self.run = 0
+            self.fed = now
+
+    def alive(self, now=None):
+        now = time.monotonic() if now is None else now
+        return now - self.fed < 1.0
+
+    def speaking(self, now=None, hold=0.3):
+        now = time.monotonic() if now is None else now
+        return self._confirmed and now - self.last_voice < hold
+
+
 class UtteranceCutter:
     """Dzieli strumień na wypowiedzi po ciszy; zwraca całą wypowiedź (z krótkim zapasem na początku)."""
 
@@ -3414,6 +3487,8 @@ class Engine:
         self.translator = ArgosTranslator()
         self.stt = ParakeetSTT()
         self.prosody = ProsodyMeter()
+        # czy postać teraz mówi (dźwięk gry) — lektor wchodzi chwilę po niej, jak w filmie
+        self.voice = VoiceActivity()
         # „open jev”: mały model w tle ocenia napisy (dialog czy śmieć z ekranu, czy niesie informację)
         self.brain = LektorBrain(log=log_timing) if LektorBrain is not None and brain_supported() else None
         self._recurring = RecurringFragments()
@@ -4127,6 +4202,29 @@ class Engine:
             return info < BRAIN_SKIP_INFO_P or (is_interjection(text) and info < BRAIN_SKIP_SHORT_P)
         return is_interjection(text)
 
+    def _film_entry(self, src, seen):
+        """Jak lektor w filmie: gotowy głos wchodzi FILM_DELAY po tym, jak postać zaczyna mówić.
+        Zwraca, ile sekund czekał (0 = od razu, jak dotąd)."""
+        vad = self.voice
+        t0 = time.monotonic()
+        if not vad.alive(t0) or self._lag > FILM_MAX_LAG or self._queue_waiting(src):
+            return 0.0
+        if not vad.speaking(t0) and t0 - vad.last_voice < FILM_RECENT_VOICE:
+            return 0.0  # postać właśnie skończyła — to jej kwestia, czytaj od razu
+        deadline = (seen or t0) + FILM_MAX_WAIT
+        while not self._tts_interrupt.is_set():
+            now = time.monotonic()
+            if vad.speaking(now):
+                start = vad.onset + FILM_DELAY
+                if now >= start:
+                    break
+                time.sleep(min(0.02, start - now))
+                continue
+            if now >= deadline or not vad.alive(now) or self._queue_waiting(src):
+                break
+            time.sleep(0.02)
+        return time.monotonic() - t0
+
     def _tts_loop(self):
         while True:
             if not self.has_pending.wait(timeout=0.15):
@@ -4178,15 +4276,17 @@ class Engine:
                 self._tts_interrupt.clear()
                 seens = [self._seen_at.pop(p, None) for p in parts]
                 seen = min((t for t in seens if t), default=None)
+                waited = self._film_entry(src, seen)
                 if seen:
                     # spóźnienie: szybko rośnie, powoli maleje (fabuła zwalnia = skracanie się wyłącza)
-                    lag = time.monotonic() - seen
+                    lag = time.monotonic() - seen - waited  # celowe wejście z głosem postaci to nie spóźnienie
                     self._lag = lag if lag > self._lag else 0.5 * self._lag + 0.5 * lag
                 self._timing(
                     f"{'GOTOWE' if ready else 'synteza'} {time.monotonic() - t0:.2f}s"
                     + (f", od napisu {time.monotonic() - seen:.2f}s" if seen else "")
                     + f", tempo x{boost:.2f}"
                     + (f", połączone {len(parts)}" if len(parts) > 1 else "")
+                    + (f", wejście z głosem postaci +{waited:.2f}s" if waited > 0.02 else "")
                     + f" | {text[:70]!r}"
                 )
                 self.speaking_text = src
@@ -4654,6 +4754,7 @@ class Engine:
                         raise RuntimeError(tap.message or "Źródło dźwięku się rozłączyło.")
                     continue
                 self.prosody.feed(chunk)
+                self.voice.feed(chunk)
                 if live is None:
                     continue
                 audio = state.feed(chunk)
