@@ -1042,6 +1042,125 @@ def find_source_window(source="auto", prefer="ps"):
     return None
 
 
+class PlayerFinder:
+    """Gdzie w oknie przeglądarki jest odtwarzacz wideo (YouTube nie na pełnym ekranie).
+
+    Strona stoi, a film się rusza: z kolejnych zrzutów okna liczymy, które miejsca się zmieniają,
+    i bierzemy największy prostokąt ruchu. Współrzędne w pikselach zrzutu okna (0…1 → mnożymy
+    przez rozmiar okna na ekranie)."""
+
+    CELLS_W = 96  # siatka analizy (szerokość); wysokość wg proporcji okna
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.prev = None
+        self.heat = None
+        self.frames = 0
+        self.last = None  # (x, y, w, h) jako ułamki okna
+        self.pending = None
+        self.pending_n = 0
+
+    def _small(self, frame):
+        if frame.shape[1] >= 4 * self.CELLS_W:
+            frame = frame[::2, ::2]  # co drugi piksel wystarczy — siatka i tak jest zgrubna
+        gray = frame[:, :, :3].astype(np.int16).mean(axis=2)
+        h, w = gray.shape
+        step = max(1, w // self.CELLS_W)
+        return gray[: h - h % step, : w - w % step].reshape(h // step, step, w // step, step).mean(axis=(1, 3))
+
+    def feed(self, frame):
+        """Nowy zrzut okna (BGR). Zwraca prostokąt odtwarzacza (ułamki okna) albo None."""
+        if frame is None or frame.ndim != 3 or frame.shape[0] < 40 or frame.shape[1] < 80:
+            return self.last
+        small = self._small(frame)
+        if self.prev is None or self.prev.shape != small.shape:
+            self.prev = small
+            self.heat = np.zeros_like(small)
+            self.frames = 0
+            return self.last
+        changed = (np.abs(small - self.prev) > 10).astype(np.float32)
+        self.prev = small
+        self.heat = self.heat * 0.9 + changed
+        self.frames += 1
+        if self.frames < 4 or changed.mean() < 0.002:
+            return self.last  # za mało ruchu (pauza, zaczynamy) — zostaje poprzedni wynik
+        box = self._largest_box(self.heat > 0.6)
+        if box is None:
+            return self.last
+        gh, gw = self.heat.shape
+        x, y, w, h = box
+        frac = (x / gw, y / gh, w / gw, h / gh)
+        # stabilnie: nowy prostokąt dopiero, gdy wyjdzie dwa razy z rzędu podobny
+        if self.last is not None and max(abs(a - b) for a, b in zip(frac, self.last)) < 0.04:
+            return self.last
+        if self.pending is not None and max(abs(a - b) for a, b in zip(frac, self.pending)) < 0.04:
+            self.pending_n += 1
+        else:
+            self.pending, self.pending_n = frac, 1
+        if self.pending_n >= 2:
+            self.last = self.pending
+        return self.last
+
+    @staticmethod
+    def _largest_box(mask):
+        """Prostokąt otaczający największy spójny obszar ruchu (po lekkim rozmyciu)."""
+        # rozmycie o 2 pola łączy plamy ruchu w jeden obszar (bez zawijania na krawędziach)
+        gh, gw = mask.shape
+        padded = np.pad(mask, 2)
+        grown = np.zeros_like(mask)
+        for dy in range(-2, 3):
+            for dx in range(-2, 3):
+                grown |= padded[2 + dy : 2 + dy + gh, 2 + dx : 2 + dx + gw]
+        seen = np.zeros_like(grown, dtype=bool)
+        best = None
+        best_area = 0
+        for sy, sx in zip(*np.nonzero(grown)):
+            if seen[sy, sx]:
+                continue
+            stack = [(sy, sx)]
+            seen[sy, sx] = True
+            y0, y1, x0, x1 = gh, -1, gw, -1
+            count = 0
+            while stack:
+                cy, cx = stack.pop()
+                if mask[cy, cx]:
+                    # prostokąt tylko z pól, gdzie naprawdę był ruch (nie z rozmycia)
+                    count += 1
+                    y0, y1, x0, x1 = min(y0, cy), max(y1, cy), min(x0, cx), max(x1, cx)
+                for ny, nx in ((cy + 1, cx), (cy - 1, cx), (cy, cx + 1), (cy, cx - 1)):
+                    if 0 <= ny < gh and 0 <= nx < gw and grown[ny, nx] and not seen[ny, nx]:
+                        seen[ny, nx] = True
+                        stack.append((ny, nx))
+            if count > best_area and y1 >= y0:
+                best_area = count
+                best = (x0, y0, x1 - x0 + 1, y1 - y0 + 1)
+        if best is None:
+            return None
+        x, y, w, h = best
+        # odtwarzacz to spory prostokąt o proporcjach filmu (także pionowe Shorts)
+        if w * h < 0.06 * gw * gh or not (0.4 <= (w / max(h, 1)) * 1.0 <= 3.0):
+            return None
+        return best
+
+
+def player_subtitle_band(win, frac):
+    """Pasek napisów na dole wykrytego odtwarzacza (win = okno na ekranie, frac = odtwarzacz w ułamkach)."""
+    wx, wy, ww, wh = win
+    fx, fy, fw, fh = frac
+    px, py, pw, ph = wx + fx * ww, wy + fy * wh, fw * ww, fh * wh
+    # film z czarnymi pasami po bokach — napisy i tak mogą być szersze: poszerz do 16:9
+    target = ph * 16 / 9
+    if pw < target:
+        cx = px + pw / 2
+        pw = min(target, ww)
+        px = max(wx, min(cx - pw / 2, wx + ww - pw))
+    # napisy YouTube: dolne ~35 % odtwarzacza (wyżej, gdy widać pasek sterowania)
+    band_h = max(52, ph * 0.36)
+    return (int(px + pw * 0.04), int(py + ph - band_h - ph * 0.02), int(pw * 0.92), int(band_h))
+
+
 # Napisy interfejsu odtwarzaczy (Netflix/YouTube) — to nie dialog
 PLAYER_UI_TEXT = (
     "wstrzymane", "oglądasz", "ogladasz", "pomiń czołówkę", "pomin czolowke", "pomiń podsumowanie",
@@ -3069,6 +3188,9 @@ class Engine:
             self.dock_corner = "tr"
         self._last_win_sync = 0.0
         self.ps_window = None
+        # YouTube: gdzie w oknie jest odtwarzacz (ułamki okna) — z ruchu obrazu
+        self._player_finder = PlayerFinder()
+        self._yt_player = None
         self.ocr = WindowsOcr() if IS_WIN else AppleVisionOcr()
         self._ocr_lang_warned = False
         self.lektor = MaleLektor()
@@ -3112,6 +3234,41 @@ class Engine:
         threading.Thread(target=self._spec_loop, daemon=True).start()
         threading.Thread(target=self._warmup_voice, daemon=True).start()
         threading.Thread(target=self._watch_remote_play, daemon=True).start()
+        threading.Thread(target=self._watch_player, daemon=True).start()
+
+    def _watch_player(self):
+        """YouTube w oknie (nie pełny ekran): pasek napisów idzie za odtwarzaczem, nie za dołem okna."""
+        last_win = None
+        while True:
+            time.sleep(0.6)
+            try:
+                win = self.ps_window
+                if not self._is_youtube() or win is None or self.lock_region:
+                    if self._yt_player is not None or last_win is not None:
+                        self._player_finder.reset()
+                        self._yt_player = None
+                        last_win = None
+                    continue
+                if win != last_win:
+                    # okno zmieniło rozmiar/miejsce — odtwarzacz szukamy od nowa
+                    self._player_finder.reset()
+                    last_win = win
+                frame = capture_remote_play_band(*win, info=self.source_info)
+                found = self._player_finder.feed(frame)
+                if found != self._yt_player:
+                    self._yt_player = found
+                    if found is not None:
+                        _x, _y, fw, fh = found
+                        self.emit({"event": "debug", "text": f"odtwarzacz YouTube: {fw * win[2]:.0f}×{fh * win[3]:.0f}"})
+                    self._sync_remote_band(force=True)
+            except Exception:
+                continue
+
+    def _auto_band(self, win):
+        """Pasek napisów w oknie źródła: na YouTube z wykrytego odtwarzacza, inaczej dół okna."""
+        if self._yt_player is not None and self._is_youtube():
+            return player_subtitle_band(win, self._yt_player)
+        return window_subtitle_band(win, self._band_profile())
 
     def _watch_remote_play(self):
         """Pilnuje okna gry (PS Remote Play / Chrome): autostart, autostop i podpis okna w UI."""
@@ -3372,7 +3529,7 @@ class Engine:
             if win is None or self._region_overlap(self.region, win) >= 0.12:
                 return True
             # okno się przesunęło: dociągnij pasek do dolnego pasa, zachowaj lock
-            band = window_subtitle_band(win, self._band_profile())
+            band = self._auto_band(win)
             # jeśli stary pasek był wyżej/niżej, zachowaj względną wysokość w oknie
             rx, ry, rw, rh = [int(v) for v in self.region]
             _wx, wy, _ww, wh = [int(v) for v in win]
@@ -3387,7 +3544,7 @@ class Engine:
             return True
         if win is None:
             return self.region is not None
-        band = window_subtitle_band(win, self._band_profile())
+        band = self._auto_band(win)
         if band != self.region:
             self.region = band
             self.emit({"event": "state", **self.snapshot()})
