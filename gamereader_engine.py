@@ -3188,6 +3188,7 @@ class Engine:
             self.dock_corner = "tr"
         self._last_win_sync = 0.0
         self.ps_window = None
+        self._region_key_cur = None
         # YouTube: gdzie w oknie jest odtwarzacz (ułamki okna) — z ruchu obrazu
         self._player_finder = PlayerFinder()
         self._yt_player = None
@@ -3333,6 +3334,14 @@ class Engine:
     def _source_kind(self):
         return self.source_info[5] if self.source_info else None
 
+    def _region_key(self):
+        """Pod jakim kluczem zapisany jest ręczny pasek: gra (PS5) albo przeglądarka — YouTube i reszta
+        Chrome mają własne paski, niezależne od gry wybranej na liście."""
+        kind = self._source_kind()
+        if kind == "chrome":
+            return "youtube" if self._is_youtube() else "chrome"
+        return self.game
+
     def _is_youtube(self):
         info = self.source_info
         return bool(info) and info[5] == "chrome" and "youtube" in str(info[6] or "").lower()
@@ -3416,7 +3425,7 @@ class Engine:
         # Zapisz = utrwal aktualny pasek jako ręczny (nie nadpisuj go automatem okna)
         if self.region:
             self.lock_region = True
-            self.game_regions[self.game] = {"region": [int(v) for v in self.region]}
+            self.game_regions[self._region_key()] = {"region": [int(v) for v in self.region]}
         self.persist()
         if self.region:
             x, y, w, h = [int(v) for v in self.region]
@@ -3486,7 +3495,7 @@ class Engine:
         self.no_barge_in = bool(profile.get("no_barge_in", True))
         if reset_lock:
             self.lock_region = False
-            saved = self.game_regions.get(self.game) or {}
+            saved = self.game_regions.get(self._region_key()) or {}
             if saved.get("region"):
                 self.region = tuple(saved["region"])
                 self.lock_region = True
@@ -3524,6 +3533,17 @@ class Engine:
         self.source_info = info
         win = info[:4] if info else None
         self.ps_window = win
+        key = self._region_key() if info else self._region_key_cur
+        if key != self._region_key_cur:
+            # inne źródło (PS5 ↔ Chrome ↔ YouTube) — jego własny zapisany pasek albo automat
+            first = self._region_key_cur is None
+            self._region_key_cur = key
+            saved = self.game_regions.get(key) or {}
+            if saved.get("region"):
+                self.region = tuple(saved["region"])
+                self.lock_region = True
+            elif not first or self._source_kind() == "chrome":
+                self.lock_region = False
         if self.lock_region and self.region:
             # Ręcznie zapisany pasek zostaje — nie kasuj go przez overlap/automatu.
             if win is None or self._region_overlap(self.region, win) >= 0.12:
@@ -3539,7 +3559,7 @@ class Engine:
                 self.region = (band[0], max(wy, min(new_top, wy + wh - rh)), band[2], rh)
             else:
                 self.region = band
-            self.game_regions[self.game] = {"region": list(self.region)}
+            self.game_regions[self._region_key()] = {"region": list(self.region)}
             self.emit({"event": "state", **self.snapshot()})
             return True
         if win is None:
@@ -3559,7 +3579,7 @@ class Engine:
         self.region = region
         self.lock_region = region is not None
         if region:
-            self.game_regions[self.game] = {"region": list(region)}
+            self.game_regions[self._region_key()] = {"region": list(region)}
         self.persist()
         if region is None:
             self.emit({"event": "status", "text": "Nie zaznaczono obszaru."})
@@ -4353,7 +4373,7 @@ class Engine:
                         if empty_streak >= 18 and not self.speaking_text:
                             self.last_subtitle = ""
                             self.last_full = ""
-                        if empty_streak >= 40 and self.lock_region and self.game not in self.game_regions:
+                        if empty_streak >= 40 and self.lock_region and self._region_key() not in self.game_regions:
                             self.lock_region = False
                             self.persist()
                             self._sync_remote_band(force=True)
