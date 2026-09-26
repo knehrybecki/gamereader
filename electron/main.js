@@ -12,7 +12,7 @@ const fs = require("fs");
 const net = require("net");
 const os = require("os");
 const path = require("path");
-const { desktopCapturer, session, screen } = electron;
+const { desktopCapturer, session, screen, Menu, dialog } = electron;
 const { checkForUpdates } = require("./updater");
 const { ensureEngine } = require("./setup");
 const pkg = require("./package.json");
@@ -663,9 +663,131 @@ function log(line) {
   }
 }
 
+
+// Licencje składników — pokazywane w „O LiveDub” i w menu Pomoc
+const LICENSES = [
+  ["Electron", "MIT"],
+  ["Supertonic 3 — kod", "MIT"],
+  ["Supertonic 3 — model głosu", "OpenRAIL-M"],
+  ["ONNX Runtime", "MIT"],
+  ["NVIDIA Parakeet TDT v3 — model mowy", "CC BY 4.0"],
+  ["parakeet-mlx", "Apache 2.0"],
+  ["MLX", "MIT"],
+  ["Argos Translate", "MIT"],
+  ["NumPy", "BSD-3-Clause"],
+  ["Pillow", "MIT-CMU"],
+  ["python-mss", "MIT"],
+  ["python-sounddevice", "MIT"],
+  ["ocrmac", "MIT"],
+  ["PyObjC", "MIT"],
+  ["imageio-ffmpeg / FFmpeg", "BSD-2 / LGPL 2.1+"],
+];
+
+const HELP_TEXT = [
+  "1. Włącz PS Remote Play (albo Netflixa w Chrome) — okno musi być widoczne, nie zminimalizowane.",
+  "2. LiveDub sam wykryje grę i zacznie czytać napisy (albo kliknij „Uruchom”).",
+  "3. Przy polskich napisach wybierz tryb „Napisy” (Więcej → Napisy).",
+  "4. Jeśli nic nie czyta: Ustawienia → Prywatność → Nagrywanie ekranu — włącz LiveDub.",
+  "5. „Ścisz grę” ścisza dźwięk gry, gdy mówi lektor (działa dla dźwięku z Remote Play / Chrome).",
+  "",
+  "Gdy lektor się spóźnia albo coś nie gra: Pomoc → Otwórz log lektora i wyślij jego końcówkę.",
+].join("\n");
+
+function licensesText() {
+  return LICENSES.map(([name, lic]) => `${name} — ${lic}`).join("\n");
+}
+
+function setupAppMenu() {
+  const year = new Date().getFullYear();
+  app.setAboutPanelOptions({
+    applicationName: "LiveDub",
+    applicationVersion: app.getVersion(),
+    version: "",
+    copyright: `© ${year} ${pkg.author || "Kamil"}. Wszelkie prawa zastrzeżone.`,
+    credits: `Polski lektor na żywo do gier i filmów.\n\nLicencje składników:\n${licensesText()}`,
+  });
+  const checkUpdatesNow = async () => {
+    const res = await runUpdateCheck();
+    if (res && res.state === "installing") return; // aplikacja zaraz sama się uruchomi ponownie
+    dialog.showMessageBox({
+      type: "info",
+      message: "Aktualizacje",
+      detail: (res && res.text) || "Gotowe.",
+      buttons: ["OK"],
+    });
+  };
+  const template = [
+    {
+      label: "LiveDub",
+      submenu: [
+        { role: "about", label: "O LiveDub" },
+        { label: "Sprawdź aktualizacje…", click: () => checkUpdatesNow() },
+        { type: "separator" },
+        { role: "services", label: "Usługi" },
+        { type: "separator" },
+        { role: "hide", label: "Ukryj LiveDub" },
+        { role: "hideOthers", label: "Ukryj pozostałe" },
+        { role: "unhide", label: "Pokaż wszystkie" },
+        { type: "separator" },
+        { role: "quit", label: "Zakończ LiveDub" },
+      ],
+    },
+    {
+      label: "Edycja",
+      submenu: [
+        { role: "undo", label: "Cofnij" },
+        { role: "redo", label: "Przywróć" },
+        { type: "separator" },
+        { role: "cut", label: "Wytnij" },
+        { role: "copy", label: "Kopiuj" },
+        { role: "paste", label: "Wklej" },
+        { role: "selectAll", label: "Zaznacz wszystko" },
+      ],
+    },
+    {
+      label: "Okno",
+      submenu: [
+        { role: "minimize", label: "Minimalizuj" },
+        { label: "Zwiń / rozwiń widżet", click: () => setCollapsed(!collapsed, true) },
+        { type: "separator" },
+        { role: "front", label: "Wszystko na wierzch" },
+      ],
+    },
+    {
+      role: "help",
+      label: "Pomoc",
+      submenu: [
+        {
+          label: "Jak używać LiveDub",
+          click: () => dialog.showMessageBox({ type: "info", message: "Jak używać LiveDub", detail: HELP_TEXT, buttons: ["OK"] }),
+        },
+        {
+          label: "Licencje składników",
+          click: () => dialog.showMessageBox({ type: "info", message: "Licencje składników", detail: licensesText(), buttons: ["OK"] }),
+        },
+        { type: "separator" },
+        {
+          label: "Otwórz log lektora",
+          click: () => {
+            const file = "/tmp/livedub-engine.log";
+            if (!fs.existsSync(file)) fs.writeFileSync(file, "");
+            shell.openPath(file);
+          },
+        },
+        {
+          label: "Ustawienia: nagrywanie ekranu",
+          click: () => shell.openExternal("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"),
+        },
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
 app.whenReady().then(() => {
   log("ready");
   app.setName("LiveDub");
+  setupAppMenu();
   try {
     startHub();
     createMain();
