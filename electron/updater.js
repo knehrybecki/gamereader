@@ -7,8 +7,11 @@ const os = require("os");
 const path = require("path");
 
 const REPO = "knehrybecki/gamereader";
-const ASSET = "LiveDub-mac-arm64.zip";
-const TOKEN_FILE = path.join(os.homedir(), "Library/Application Support/GameReader/github-token");
+const IS_WIN = process.platform === "win32";
+const ASSET = IS_WIN ? "LiveDub-Setup-win-x64.exe" : "LiveDub-mac-arm64.zip";
+const TOKEN_FILE = IS_WIN
+  ? path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "LiveDub", "github-token")
+  : path.join(os.homedir(), "Library/Application Support/GameReader/github-token");
 
 // repo jest prywatne: token z pliku, zmiennej środowiskowej albo z zalogowanego `gh`
 function githubToken() {
@@ -20,9 +23,10 @@ function githubToken() {
   } catch (_err) {
     /* brak pliku */
   }
-  for (const gh of ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"]) {
-    if (!fs.existsSync(gh)) continue;
-    const res = spawnSync(gh, ["auth", "token"], { encoding: "utf8", timeout: 5000 });
+  const ghs = IS_WIN ? ["gh"] : ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"];
+  for (const gh of ghs) {
+    if (!IS_WIN && !fs.existsSync(gh)) continue;
+    const res = spawnSync(gh, ["auth", "token"], { encoding: "utf8", timeout: 5000, windowsHide: true });
     if (res.status === 0 && res.stdout.trim()) return res.stdout.trim();
   }
   return "";
@@ -65,13 +69,28 @@ function currentBundle() {
   return bundle.endsWith(".app") ? bundle : null;
 }
 
+// Windows: nowy instalator (NSIS) po cichu instaluje wersję na miejsce starej i uruchamia LiveDub
+async function installWindows({ asset, token, version, log, status }) {
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "livedub-update-"));
+  const setup = path.join(work, ASSET);
+  const dl = await fetch(asset.url, { headers: headers(token, "application/octet-stream") });
+  if (!dl.ok) throw new Error(`pobieranie: HTTP ${dl.status}`);
+  fs.writeFileSync(setup, Buffer.from(await dl.arrayBuffer()));
+  status(`Aktualizacja ${version} gotowa — instaluję i uruchamiam ponownie…`);
+  log(`update-install ${version}`);
+  // /S = bez okien, --updated --force-run = po instalacji uruchom LiveDub (instalator electron-builder)
+  spawn(setup, ["/S", "--updated", "--force-run"], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+  setTimeout(() => app.quit(), 800);
+  return { state: "installing", text: `Instaluję wersję ${version}…` };
+}
+
 // Wynik: { state: "none" | "installing" | "no-token" | "unavailable" | "dev", text }
 async function checkForUpdates({ log, status }) {
-  if (!app.isPackaged || process.platform !== "darwin" || process.env.LIVEDUB_NO_UPDATE) {
+  if (!app.isPackaged || !["darwin", "win32"].includes(process.platform) || process.env.LIVEDUB_NO_UPDATE) {
     return { state: "dev", text: "Aktualizacje działają tylko w zainstalowanej aplikacji." };
   }
-  const bundle = currentBundle();
-  if (!bundle) return { state: "dev", text: "Nie znalazłem LiveDub.app." };
+  const bundle = IS_WIN ? null : currentBundle();
+  if (!IS_WIN && !bundle) return { state: "dev", text: "Nie znalazłem LiveDub.app." };
   const token = githubToken();
   const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
     headers: headers(token, "application/vnd.github+json"),
@@ -96,6 +115,7 @@ async function checkForUpdates({ log, status }) {
   const version = String(release.tag_name).replace(/^v/i, "");
   status(`Pobieram aktualizację ${version}…`);
   log(`update-download ${local} -> ${version}`);
+  if (IS_WIN) return installWindows({ asset, token, version, log, status });
 
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "livedub-update-"));
   const zip = path.join(work, ASSET);

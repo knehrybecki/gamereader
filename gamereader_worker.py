@@ -28,7 +28,14 @@ except Exception:
 from gamereader_engine import Engine
 
 
-LOG_PATH = os.path.expanduser("~/Library/Logs/LiveDub.log")
+if sys.platform == "win32":
+    LOG_PATH = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "LiveDub", "LiveDub.log")
+    os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+    # polskie znaki w komunikatach do Electrona — zawsze UTF-8, niezależnie od strony kodowej konsoli
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stdin.reconfigure(encoding="utf-8")
+else:
+    LOG_PATH = os.path.expanduser("~/Library/Logs/LiveDub.log")
 
 
 def log_event(payload):
