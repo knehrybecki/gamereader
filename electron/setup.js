@@ -30,6 +30,8 @@ const PROBE = IS_WIN
   : "import numpy, PIL, onnxruntime, supertonic";
 
 const LEGACY_VENV = path.join(HOME, "gamer", "gr");
+// .pyc poza paczką aplikacji — zapis do LiveDub.app psuje jej podpis
+const PYCACHE = IS_WIN ? path.join(RUNTIME, "..", "pycache") : path.join(HOME, "Library/Caches/LiveDub/pycache");
 const BREW_CELLAR = "/opt/homebrew/Cellar/python@3.14";
 
 function run(cmd, args, { env, onLine, timeout } = {}) {
@@ -91,6 +93,7 @@ function legacyEngine(engineDir, candidates) {
     PYTHONUNBUFFERED: "1",
     VIRTUAL_ENV: LEGACY_VENV,
     PYTHONPATH: `${engineDir}${path.delimiter}${site}`,
+    PYTHONPYCACHEPREFIX: PYCACHE,
     __PYVENV_LAUNCHER__: "",
   };
   const home = brewPythonHome();
@@ -99,7 +102,14 @@ function legacyEngine(engineDir, candidates) {
 }
 
 function runtimeEngine(engineDir) {
-  const env = { ...process.env, ELECTRON_RUN_AS_NODE: "", PYTHONUNBUFFERED: "1", PYTHONPATH: engineDir, PYTHONIOENCODING: "utf-8" };
+  const env = {
+    ...process.env,
+    ELECTRON_RUN_AS_NODE: "",
+    PYTHONUNBUFFERED: "1",
+    PYTHONPATH: engineDir,
+    PYTHONPYCACHEPREFIX: PYCACHE,
+    PYTHONIOENCODING: "utf-8",
+  };
   delete env.PYTHONHOME;
   delete env.VIRTUAL_ENV;
   return { py: RUNTIME_PY, env, kind: "runtime" };
