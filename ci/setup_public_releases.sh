@@ -33,7 +33,7 @@ fi
 
 # 2) certyfikat podpisu dla CI
 if has_secret MAC_SIGN_P12 && has_secret MAC_SIGN_PASSWORD; then
-  echo "✓ certyfikat „$CERT_NAME” już jest w sekretach (nie twórz nowego — zmiana podpisu = wszyscy jeszcze raz dają zgody)"
+  echo "✓ certyfikat „${CERT_NAME}” już jest w sekretach (nie twórz nowego — zmiana podpisu = wszyscy jeszcze raz dają zgody)"
 else
   TMP="$(mktemp -d)"
   trap 'rm -rf "$TMP"' EXIT
@@ -63,7 +63,7 @@ EOF
   cp "$TMP/id.p12" "$BACKUP/livedub-release.p12"
   printf '%s\n' "$PASSWORD" > "$BACKUP/password.txt"
   chmod 600 "$BACKUP/livedub-release.p12" "$BACKUP/password.txt"
-  echo "✓ certyfikat „$CERT_NAME” w sekretach $SRC_REPO (kopia: $BACKUP)"
+  echo "✓ certyfikat „${CERT_NAME}” w sekretach $SRC_REPO (kopia: $BACKUP)"
 fi
 
 # 3) token do publikowania w publicznym repo

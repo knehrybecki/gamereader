@@ -8,7 +8,7 @@ NAME="LiveDub Local"
 KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 
 if security find-identity -v -p codesigning | grep -q "$NAME"; then
-  echo "Certyfikat „$NAME” już jest — nic do zrobienia."
+  echo "Certyfikat „${NAME}” już jest — nic do zrobienia."
   exit 0
 fi
 
@@ -38,7 +38,7 @@ echo "Za chwilę macOS zapyta o hasło — to zgoda na zaufanie certyfikatowi do
 security add-trusted-cert -r trustRoot -p codeSign -k "$KEYCHAIN" "$TMP/cert.pem"
 
 if security find-identity -v -p codesigning | grep -q "$NAME"; then
-  echo "Gotowe: certyfikat „$NAME” utworzony."
+  echo "Gotowe: certyfikat „${NAME}” utworzony."
   echo "Teraz podpisz aplikację:  codesign --force --deep --sign \"$NAME\" /Applications/LiveDub.app"
   echo "i jeszcze raz daj zgodę w Ustawieniach → Prywatność → Nagrywanie ekranu (ostatni raz)."
 else
