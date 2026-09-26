@@ -837,6 +837,59 @@ function setupTray() {
 }
 
 // Windows: to samo, co menu aplikacji na Macu — w zasobniku i pod przyciskiem ☰ w widżecie
+// Windows: odinstalowanie bez deinstalatora NSIS (gdy ten pokazuje „Error launching installer”).
+// Skrypt PowerShell czeka na zamknięcie LiveDub, kasuje folder aplikacji, wpis w „Aplikacjach”
+// i skróty; na życzenie także pobrane składniki (Python, modele) i ustawienia.
+async function uninstallWindows() {
+  const res = await dialog.showMessageBox({
+    type: "warning",
+    message: "Odinstalować LiveDub?",
+    detail: "Aplikacja zostanie zamknięta i usunięta z komputera.",
+    buttons: ["Odinstaluj", "Anuluj"],
+    defaultId: 1,
+    cancelId: 1,
+    checkboxLabel: "Usuń też pobrane składniki (Python, modele głosu i tłumacza — kilka GB) i ustawienia",
+    checkboxChecked: true,
+  });
+  if (res.response !== 0) return;
+  const installDir = path.dirname(process.execPath);
+  // tylko zainstalowana aplikacja w folderze LiveDub — nigdy katalog Electrona z trybu deweloperskiego
+  if (!app.isPackaged || !/livedub/i.test(path.basename(installDir))) {
+    dialog.showMessageBox({ type: "info", message: "Odinstalowanie działa tylko w zainstalowanej aplikacji.", buttons: ["OK"] });
+    return;
+  }
+  const local = process.env.LOCALAPPDATA || path.join(HOME, "AppData", "Local");
+  const roaming = process.env.APPDATA || path.join(HOME, "AppData", "Roaming");
+  const q = (p) => `'${String(p).replace(/'/g, "''")}'`;
+  const lines = [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    `while (Get-Process -Id ${process.pid}) { Start-Sleep -Milliseconds 300 }`,
+    // silnik (Python z runtime LiveDub) i pozostałe procesy aplikacji
+    `Get-Process | Where-Object { $_.Path -and ($_.Path.StartsWith(${q(installDir)}) -or $_.Path.StartsWith(${q(path.join(local, "LiveDub"))})) } | Stop-Process -Force`,
+    "Start-Sleep -Milliseconds 500",
+    `Remove-Item -LiteralPath ${q(installDir)} -Recurse -Force`,
+    "Get-ChildItem 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall' | Where-Object { (Get-ItemProperty $_.PSPath).DisplayName -like 'LiveDub*' } | Remove-Item -Recurse -Force",
+    "Remove-Item -LiteralPath (Join-Path ([Environment]::GetFolderPath('Desktop')) 'LiveDub.lnk') -Force",
+    "Remove-Item -LiteralPath (Join-Path ([Environment]::GetFolderPath('Programs')) 'LiveDub.lnk') -Force",
+  ];
+  if (res.checkboxChecked) {
+    lines.push(`Remove-Item -LiteralPath ${q(path.join(local, "LiveDub"))} -Recurse -Force`);
+    lines.push(`Remove-Item -LiteralPath ${q(path.join(roaming, "LiveDub"))} -Recurse -Force`);
+  }
+  lines.push("Remove-Item -LiteralPath $PSCommandPath -Force");
+  const script = path.join(os.tmpdir(), `livedub-uninstall-${Date.now()}.ps1`);
+  // BOM: PowerShell 5 czyta wtedy ścieżki z polskimi znakami poprawnie
+  fs.writeFileSync(script, "\ufeff" + lines.join("\r\n"), "utf8");
+  log(`uninstall ${installDir} data=${res.checkboxChecked}`);
+  spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", script], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+  }).unref();
+  engineSend({ cmd: "quit" });
+  setTimeout(() => app.exit(0), 400);
+}
+
 function winMenuItems() {
   const checkNow = async () => {
     const res = await runUpdateCheck();
@@ -864,6 +917,7 @@ function winMenuItems() {
       click: () => dialog.showMessageBox({ type: "info", message: "Licencje składników", detail: licensesText(), buttons: ["OK"] }),
     },
     { label: "O LiveDub", click: () => showAbout() },
+    { label: "Odinstaluj LiveDub…", click: () => uninstallWindows() },
     { type: "separator" },
     { label: "Zakończ LiveDub", click: () => app.quit() },
   ];
