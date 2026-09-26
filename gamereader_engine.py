@@ -364,11 +364,37 @@ def _fix_ze_conjunction(text):
     return "".join(out)
 
 
+# cudzysłowy i apostrofy — lektor ich nie czyta, a OCR myli „ ” z ' ' ' i przecinkami
+_QUOTES = "\"'`´‘’‚‛“”„‟«»‹›″′"
+_QUOTE_CLASS = "[" + re.escape(_QUOTES) + "]"
+_LETTER = r"[^\W\d_]"
+# litery spoza polskiego alfabetu, które Vision dokleja zamiast cudzysłowu („okazjachiằ”)
+_OCR_FOREIGN = re.compile(r"[\u0300-\u036f\u1e00-\u1eff\u0100-\u0103\u0108-\u010f\u0112-\u0117\u011a-\u0131\u0134-\u013e\u0147\u0148\u014c-\u0151\u0154-\u0159\u015c-\u015f\u0162-\u0178]")
+
+
+def ocr_junk_count(text):
+    """Ile śmieci OCR w tekście: obce litery i ciągi cudzysłowów („' ' '”) — do wyboru lepszego odczytu."""
+    raw = text or ""
+    return len(_OCR_FOREIGN.findall(raw)) + 2 * len(re.findall(rf"{_QUOTE_CLASS}(?:\s*{_QUOTE_CLASS})+", raw))
+
+
+def strip_ocr_quotes(text):
+    """Usuwa cudzysłowy (zostaje apostrof w środku słowa) i obce litery doklejone przez OCR."""
+    raw = _OCR_FOREIGN.sub("", text or "")
+    raw = re.sub(rf"(?<!{_LETTER}){_QUOTE_CLASS}+|{_QUOTE_CLASS}+(?!{_LETTER})", " ", raw)
+    raw = re.sub(r"\s+([!?…,.;:])", r"\1", raw)
+    raw = re.sub(r"^[\s,.;:]+", "", raw)
+    # „ka ,Proszę” → „ka, Proszę”; liczby („1,5”) zostają bez zmian
+    raw = re.sub(rf"([,!?…;:])(?={_LETTER})", r"\1 ", raw)
+    raw = re.sub(rf"(?<={_LETTER}{{2}})\.(?=[A-ZĄĆĘŁŃÓŚŹŻ])", ". ", raw)
+    return normalize_text(raw)
+
+
 def _normalize_polish_punct(text):
     raw = text or ""
     raw = raw.replace("…", "…").replace("...", "…").replace("..", "…")
     raw = raw.replace("！", "!").replace("？", "?")
-    raw = raw.replace("„", "\"").replace("”", "\"").replace("«", "\"").replace("»", "\"")
+    raw = strip_ocr_quotes(raw)
     raw = re.sub(r"\s+([!?…,.;:])", r"\1", raw)
     raw = re.sub(r"([!?…]){2,}", lambda m: m.group(0)[0] if m.group(0)[0] in "…" else m.group(0)[:2], raw)
     return normalize_text(raw)
@@ -2573,6 +2599,8 @@ class AppleVisionOcr:
         penalty = 0
         if "lodz" in folded and "łódź" not in raw.lower() and "łodz" not in raw.lower():
             penalty += 4
+        # „kasa”?” odczytane jako „ka' ' '” — taki kandydat przegrywa z czystym
+        penalty += 15 * ocr_junk_count(raw)
         return marks * 12 + len(raw) - penalty
 
     def _pick_pl_candidate(self, observation):
@@ -2758,6 +2786,7 @@ class AppleVisionOcr:
         score += 2 * sum(1 for token in fixed.lower().split() if polish_fold(token) in _POLISH_BY_FOLD)
         score -= 4 * len(re.findall(r"[A-Za-z][0-9]|[0-9][A-Za-z]", raw))
         score -= 2 * len(re.findall(r"[0-9]", raw))
+        score -= 15 * ocr_junk_count(raw)
         # kara za brak diakrytyków przy długim polskim tekście
         if len(raw) >= 12 and sum(ch in PL_MARK for ch in raw + fixed) == 0 and looks_polish(fixed):
             score -= 18
