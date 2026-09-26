@@ -1,6 +1,6 @@
 // Automatyczna aktualizacja: raz przy starcie sprawdza najnowsze wydanie na GitHubie,
 // a gdy jest nowsze — pobiera, podmienia LiveDub.app i uruchamia aplikację ponownie.
-const { app } = require("electron");
+const { app, shell } = require("electron");
 const { spawn, spawnSync } = require("child_process");
 const fs = require("fs");
 const os = require("os");
@@ -145,21 +145,26 @@ async function checkForUpdates({ log, status }) {
   // zachowuje zgodę na nagrywanie ekranu; bez niego ad-hoc = zgodę trzeba dać ponownie.
   run("/usr/bin/codesign", ["--force", "--deep", "--sign", signingIdentity(), fresh]);
 
-  // podmiana po zamknięciu tej instancji; stara wersja zostaje jako kopia, gdyby coś poszło źle
+  // podmiana po zamknięciu tej instancji. Stara wersja idzie do folderu tymczasowego (nie obok,
+  // jako „LiveDub.app.old” w Aplikacjach — gdy macOS nie pozwolił jej usunąć, kopie się mnożyły)
+  // i wraca na miejsce tylko wtedy, gdy nowej nie udało się wstawić.
   const script = path.join(work, "swap.sh");
   fs.writeFileSync(
     script,
     [
       "#!/bin/sh",
+      `exec >>"${UPDATE_LOG}" 2>&1`,
+      'echo "--- $(date) aktualizacja"',
       `while kill -0 ${process.pid} 2>/dev/null; do sleep 0.3; done`,
       `OLD="${bundle}"`,
       `NEW="${fresh}"`,
-      'BAK="$OLD.old"',
-      'rm -rf "$BAK"',
+      `BAK="${path.join(work, "previous.app")}"`,
       'if mv "$OLD" "$BAK" && mv "$NEW" "$OLD"; then',
-      '  rm -rf "$BAK"',
+      '  echo "podmienione: $OLD"',
+      '  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u "$BAK" >/dev/null 2>&1',
       '  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$OLD" >/dev/null 2>&1',
       "else",
+      '  echo "podmiana nie wyszła — przywracam poprzednią wersję"',
       '  [ -d "$OLD" ] || mv "$BAK" "$OLD"',
       "fi",
       'open "$OLD"',
@@ -175,4 +180,49 @@ async function checkForUpdates({ log, status }) {
   return { state: "installing", text: `Instaluję wersję ${version}…` };
 }
 
-module.exports = { checkForUpdates, newer };
+const UPDATE_LOG = "/tmp/livedub-update.log";
+const BUNDLE_ID = "pl.kamil.gamereader.mac";
+
+function isLiveDubBundle(dir) {
+  try {
+    return fs.readFileSync(path.join(dir, "Contents", "Info.plist"), "utf8").includes(BUNDLE_ID);
+  } catch (_err) {
+    return false;
+  }
+}
+
+// macOS: kopie LiveDub zostawione przez wcześniejsze aktualizacje („LiveDub.app.old”, „LiveDub 2.app”,
+// druga LiveDub.app w ~/Applications albo /Applications) — do Kosza. Zostaje tylko uruchomiona.
+async function cleanupOldCopies({ log }) {
+  if (!app.isPackaged || process.platform !== "darwin") return 0;
+  const bundle = currentBundle();
+  if (!bundle) return 0;
+  const dirs = [...new Set([path.dirname(bundle), "/Applications", path.join(os.homedir(), "Applications")])];
+  let moved = 0;
+  for (const dir of dirs) {
+    let names = [];
+    try {
+      names = fs.readdirSync(dir);
+    } catch (_err) {
+      continue;
+    }
+    for (const name of names) {
+      if (!/^LiveDub.*\.app(\.old)?$/i.test(name)) continue;
+      const full = path.join(dir, name);
+      if (path.resolve(full) === path.resolve(bundle)) continue;
+      // „LiveDub.app.old” z zagnieżdżoną kopią w środku też jest nasza
+      const ours = isLiveDubBundle(full) || isLiveDubBundle(path.join(full, "LiveDub.app"));
+      if (!ours) continue;
+      try {
+        await shell.trashItem(full);
+        moved += 1;
+        log(`cleanup-trash ${full}`);
+      } catch (err) {
+        log(`cleanup-fail ${full} ${err && err.message ? err.message : err}`);
+      }
+    }
+  }
+  return moved;
+}
+
+module.exports = { checkForUpdates, cleanupOldCopies, newer };
