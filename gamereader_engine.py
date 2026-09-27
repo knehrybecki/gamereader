@@ -3695,19 +3695,19 @@ class AppleVisionOcr:
             image = image.resize((max(8, int(width * scale)), 120), Image.Resampling.LANCZOS)
         return image
 
-    def read(self, frame):
-        if frame is None or frame.size == 0:
-            return ""
-        image = self.subtitle_mask(frame)
-        if image is None:
-            return ""
-        # Nigdy nie wracaj do kolorowego kadru: taki fallback czytał tablice,
-        # szyldy i HUD właśnie wtedy, gdy na ekranie nie było napisów.
+    def _frame_image(self, frame, size):
+        rgb = frame[:, :, ::-1] if frame.shape[-1] == 3 else frame
+        image = Image.fromarray(np.ascontiguousarray(rgb)).convert("RGB")
+        if image.size != size:
+            image = image.resize(size, Image.Resampling.LANCZOS)
+        return image
+
+    def _text_on_ink(self, image, ink):
+        """Zostaw tylko odczyt leżący na białych literach napisu. Tablica i HUD odpadają."""
         try:
             items = self._run_items(image, "vision", "accurate", self.languages)
         except Exception:
             return ""
-        ink = np.asarray(image)[:, :, 0] < 128
         height, width = ink.shape
         kept = []
         for _y, _x, text, box, _conf in items:
@@ -3722,7 +3722,29 @@ class AppleVisionOcr:
             if self.skip_yellow_speaker and looks_like_speaker_name(text):
                 continue
             kept.append(text)
-        raw = normalize_text(" ".join(kept))
+        return normalize_text(" ".join(kept))
+
+    def read(self, frame):
+        if frame is None or frame.size == 0:
+            return ""
+        mask = self.subtitle_mask(frame)
+        if mask is None:
+            return ""
+        # Maska tylko wykrywa napis. Sam obraz z maski Vision czyta dobrze na Netflixie
+        # (grube białe litery na czarnym), a w grze — biały tekst z obwódką na jasnej
+        # scenie — zamienia w plamy („Wpadłem” → „Wpadiem”). Kolorowy kadr tego paska
+        # czyta te same litery. Bez maski wcale nie czytamy: inaczej lecą tablice i HUD.
+        ink = np.asarray(mask)[:, :, 0] < 128
+        color = self._frame_image(frame, mask.size)
+        if IS_WIN:
+            primary, secondary = mask, color
+        else:
+            primary, secondary = color, mask
+        raw = self._text_on_ink(primary, ink)
+        if self._score(raw) < 14:
+            other = self._text_on_ink(secondary, ink)
+            if self._score(other) > self._score(raw):
+                raw = other
         best = repair_polish_ocr(raw)
         return best if usable_ocr(best) else ""
 

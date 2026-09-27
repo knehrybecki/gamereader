@@ -53,6 +53,20 @@ class SubtitleMaskTest(unittest.TestCase):
         self.assertIs(WindowsOcr.read, AppleVisionOcr.read)
         self.assertIs(WindowsOcr.subtitle_mask, AppleVisionOcr.subtitle_mask)
 
+    def test_outlined_game_subtitle_is_read_from_the_color_frame(self):
+        ocr = AppleVisionOcr()
+        seen = []
+
+        def run(image, *_args, **_kwargs):
+            seen.append(np.asarray(image))
+            return [(0, 40, "Wpadłem na drinka, którego proponowałeś.", (50, 30, 480, 50), 0.9)]
+
+        ocr._run_items = run
+        frame = fixture(background=(180, 160, 120), outline=True)
+        self.assertIn("Wpadłem", ocr.read(frame))
+        colors = seen[0]
+        self.assertGreater(len(np.unique(colors[:, :, 0])), 4)
+
 
 if __name__ == '__main__':
     unittest.main()
