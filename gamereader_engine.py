@@ -139,6 +139,16 @@ def ocr_twins(a, b):
     return True
 
 
+def _tail_like(words, tail):
+    """Urywek końca kwestii przeczytany przez OCR z literówkami („dornu” = „domu”, „dom” = ucięte „domu”)."""
+    for got, want in zip(words, tail):
+        if got == want or (len(got) >= 3 and want.startswith(got)):
+            continue
+        if len(got) < 3 or SequenceMatcher(None, got, want, autojunk=False).ratio() < 0.6:
+            return False
+    return True
+
+
 def folds_match(fold_a, fold_b):
     """Ten sam napis po złożeniu (polish_fold), mimo migania OCR: brak końcówki albo 1–3 literówki
     („więc”/„wiçc”, „żeń-szeń”/„żeń-szeńi”). Wspólne dla kolejki i dla „już przeczytane”."""
@@ -4321,8 +4331,12 @@ class Engine:
                 return True
             # sam początek przeczytanej już kwestii (napis znika albo wjeżdża): „Stuchaj” po
             # „Stuchaj, mieliśmy z Lamarem ci go zwrócić.”
-            head = _fold_words(spoken)[: len(words)]
-            if words and len("".join(words)) >= 3 and len(head) > 0 and head == words and len(words) < len(_fold_words(spoken)):
+            said = _fold_words(spoken)
+            head = said[: len(words)]
+            if words and len("".join(words)) >= 3 and len(head) > 0 and head == words and len(words) < len(said):
+                return True
+            # albo sam koniec (napis znika po kawałku): „dom”, „dornu.” po „Dostań się do domu.”
+            if words and len(words) <= 3 and len(words) < len(said) and _tail_like(words, said[-len(words):]):
                 return True
         return False
 
