@@ -4247,9 +4247,18 @@ class Engine:
         now = time.monotonic()
         if any(now < exp and folds_match(key, fold) for key, exp in self._spoken_folds.items()):
             return True
-        return any(
-            now < exp and ocr_twins(spoken, text) for spoken, exp in getattr(self, "_spoken_texts", {}).items()
-        )
+        words = _fold_words(text)
+        for spoken, exp in getattr(self, "_spoken_texts", {}).items():
+            if now >= exp:
+                continue
+            if ocr_twins(spoken, text):
+                return True
+            # sam początek przeczytanej już kwestii (napis znika albo wjeżdża): „Stuchaj” po
+            # „Stuchaj, mieliśmy z Lamarem ci go zwrócić.”
+            head = _fold_words(spoken)[: len(words)]
+            if words and len("".join(words)) >= 3 and len(head) > 0 and head == words and len(words) < len(_fold_words(spoken)):
+                return True
+        return False
 
     def _mark_spoken(self, text):
         fold = polish_fold(text or "")
