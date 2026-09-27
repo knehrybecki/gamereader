@@ -134,6 +134,16 @@ def _same_words_any_order(wa, wb):
 def ocr_twins(a, b):
     """Ten sam napis przeczytany przez OCR dwa razy z literówkami w kilku słowach (nie inna kwestia)."""
     wa, wb = _fold_words(a), _fold_words(b)
+    # Krótkie „To tutaj.” nie osiąga progu 15 znaków. Vision myli końcowe
+    # j z i/l („To tutai.”, „To tutal.”), co wcześniej uruchamiało głos ponownie.
+    if wa and len(wa) == len(wb) and all(
+        left == right or (
+            len(left) >= 5 and len(left) == len(right)
+            and left[:-1] == right[:-1] and {left[-1], right[-1]} <= {"i", "j", "l"}
+        )
+        for left, right in zip(wa, wb)
+    ):
+        return True
     if _same_words_any_order(wa, wb):
         return True
     ja, jb = "".join(wa), "".join(wb)
@@ -141,6 +151,22 @@ def ocr_twins(a, b):
         return False
     if SequenceMatcher(None, ja, jb, autojunk=False).ratio() < OCR_TWIN_RATIO:
         return False
+    # Kilka błędów tej samej klatki („Jeev bezdomny: Nie ma dokąd pójść” /
+    # „Jest bezdomny. Ne ma dekad posr”). Długi identyczny wyraz kotwiczy
+    # porównanie; nie wystarcza podobna długość dwóch różnych zdań.
+    if len(wa) == len(wb) and len(wa) >= 5:
+        anchors = [x for x, y in zip(wa, wb) if x == y]
+        if len(anchors) >= 2 and any(len(w) >= 7 for w in anchors):
+            def compatible(x, y):
+                if x == y:
+                    return True
+                known_x = x in _POLISH_BY_FOLD or x in _POLISH_FOLDED
+                known_y = y in _POLISH_BY_FOLD or y in _POLISH_FOLDED
+                if known_x and known_y:
+                    return False  # dwa różne poprawne słowa to nie literówka
+                return SequenceMatcher(None, x, y, autojunk=False).ratio() >= 0.4
+            if all(compatible(x, y) for x, y in zip(wa, wb)):
+                return True
     for tag, i1, i2, j1, j2 in SequenceMatcher(None, wa, wb, autojunk=False).get_opcodes():
         if tag == "equal":
             continue
@@ -812,6 +838,11 @@ class RecurringFragments:
             for prev in self.recent:
                 j = self._find_run(prev, run)
                 if j < 0:
+                    continue
+                # Ten sam dialog z innym śmieciem OCR przed nim nie jest dowodem
+                # na znak wodny. Porównujemy całe napisy, nie same różniące się
+                # początki: długie losowe prefiksy też mogą mieć ponad 12 znaków.
+                if SequenceMatcher(None, seq, prev, autojunk=False).ratio() >= 0.75:
                     continue
                 other = "".join(prev[:j] + prev[j + n :])
                 # początek przekręcony przez OCR („Jebany pedał”/„ebar, perlat”) to ta sama kwestia
@@ -3631,79 +3662,14 @@ class AppleVisionOcr:
             score -= 30
         return score
 
-    def read(self, frame):
-        if frame is None or frame.size == 0:
-            return ""
-        from PIL import ImageEnhance, ImageOps
-
-        rgb = frame[:, :, ::-1] if frame.shape[-1] == 3 else frame
-        image = Image.fromarray(np.ascontiguousarray(rgb)).convert("RGB")
-        width, height = image.size
-        if 8 <= height < 120:
-            scale = 120 / max(height, 1)
-            image = image.resize((max(8, int(width * scale)), int(height * scale)), Image.Resampling.LANCZOS)
-            rgb = np.array(image)
-        langs = list(self.languages or ["pl-PL"])
-        if "pl-PL" not in langs:
-            langs = ["pl-PL"] + langs
-        contrast = ImageOps.autocontrast(ImageEnhance.Contrast(image.convert("L")).enhance(self.boost)).convert("RGB")
-        auto = ImageOps.autocontrast(image).convert("RGB")
-        # wyłącznie accurate — fast na macOS gubi ąęćłńóśźż
-        attempts = [
-            (image, langs),
-            (auto, langs),
-            (contrast, langs),
-        ]
-        best = ""
-        best_raw = ""
-        best_score = -1
-        for candidate, lang_pref in attempts:
-            try:
-                text = self._run(candidate, "vision", "accurate", lang_pref, rgb=rgb if candidate is image else None)
-            except Exception:
-                continue
-            if self.skip_yellow_speaker:
-                text = strip_speaker_label(text)
-            score = self._score(text)
-            if score > best_score:
-                best_score = score
-                best_raw = text
-                best = repair_polish_ocr(text)
-                # wystarczy wynik z polskimi znakami
-                if score >= 14 and sum(ch in PL_MARK for ch in best) >= 1:
-                    break
-                if score >= 22:
-                    break
-                # angielski napis nie ma ąęćłńóśźż do zgubienia — kolejne przebiegi nic nie dadzą
-                if score >= 12 and not looks_polish(best):
-                    break
-        if best_raw and (not usable_ocr(best) or len(best) + 8 < len(re.sub(r"\s+", "", best_raw))):
-            best = repair_polish_ocr(best_raw) or normalize_text(best_raw)
-        if self.skip_yellow_speaker:
-            best = strip_speaker_label(best)
-        return best if usable_ocr(best) else ""
-
-class WindowsOcr(AppleVisionOcr):
-    """Windows: ten sam wybór odczytu i poprawki PL co przy Vision, rozpoznawanie — Windows.Media.Ocr."""
-
-    def __init__(self):
-        super().__init__()
-        self.backend = winplat.WindowsOcrBackend()
-
-    def _run_items(self, image, framework="vision", recognition_level="accurate", languages=None):
-        if self.backend.error:
-            raise RuntimeError(self.backend.error)
-        rows = self.backend.recognize(image, languages or self.languages)
-        return self._rows_to_items(rows, image)
-
     @staticmethod
     def subtitle_mask(frame):
-        """Jasny napis (biały, żółtawy) → czarny tekst na białym tle. OCR Windowsa czyta tak
-        znacznie pewniej niż biały napis z obwódką na tle filmu. None = w kadrze nie ma napisu."""
+        """Białe/szare litery przy czarnej obwódce lub tle → czarny tekst na białym tle.
+        Kolorowe litery i jasne tło bez ciemnego sąsiedztwa nie trafiają do OCR."""
         rgb = frame[:, :, ::-1].astype(np.float32) if frame.shape[-1] == 3 else frame.astype(np.float32)
         lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
         spread = rgb.max(axis=2) - rgb.min(axis=2)
-        text = (lum > 175) & ((spread < 70) | (lum > 215))
+        text = (lum > 175) & (spread < 35)
         # napis ma ciemną obwódkę albo ciemne tło (Netflix, YouTube) — jasne plamy sceny bez niej odpadają
         # (zasięg ~6 px w każdą stronę, liczony osobno w poziomie i w pionie — gruba litera zostaje cała)
         r = max(4, text.shape[0] // 30)
@@ -3732,23 +3698,48 @@ class WindowsOcr(AppleVisionOcr):
     def read(self, frame):
         if frame is None or frame.size == 0:
             return ""
-        best, best_score = "", -1
-        mask = self.subtitle_mask(frame)
-        if mask is not None:
-            try:
-                raw = self._run(mask, "vision", "accurate", self.languages)
-                if self.skip_yellow_speaker:
-                    raw = strip_speaker_label(raw)
-                best_score = self._score(raw)
-                best = repair_polish_ocr(raw) if best_score >= 0 else ""
-            except Exception:
-                best, best_score = "", -1
-        # wyraźny odczyt z maski wystarczy; inaczej zwykłe warianty obrazu (jak na Macu)
-        if best_score < 14:
-            plain = super().read(frame)
-            if plain and self._score(plain) > best_score:
-                best = plain
+        image = self.subtitle_mask(frame)
+        if image is None:
+            return ""
+        # Nigdy nie wracaj do kolorowego kadru: taki fallback czytał tablice,
+        # szyldy i HUD właśnie wtedy, gdy na ekranie nie było napisów.
+        try:
+            items = self._run_items(image, "vision", "accurate", self.languages)
+        except Exception:
+            return ""
+        ink = np.asarray(image)[:, :, 0] < 128
+        height, width = ink.shape
+        kept = []
+        for _y, _x, text, box, _conf in items:
+            if box is None:
+                continue  # bez położenia nie możemy sprawdzić wyglądu liter
+            x, y, w, h = box
+            crop = ink[max(0, y):min(height, y + h), max(0, x):min(width, x + w)]
+            # Jasna tablica z ciemnymi literami tworzy niemal pełną plamę,
+            # a białe litery napisu — cienkie, oddzielone kreski.
+            if crop.size == 0 or not 0.025 <= float(crop.mean()) <= 0.55:
+                continue
+            if self.skip_yellow_speaker and looks_like_speaker_name(text):
+                continue
+            kept.append(text)
+        raw = normalize_text(" ".join(kept))
+        best = repair_polish_ocr(raw)
         return best if usable_ocr(best) else ""
+
+
+class WindowsOcr(AppleVisionOcr):
+    """Windows: ten sam wybór odczytu i poprawki PL co przy Vision, rozpoznawanie — Windows.Media.Ocr."""
+
+    def __init__(self):
+        super().__init__()
+        self.backend = winplat.WindowsOcrBackend()
+
+    def _run_items(self, image, framework="vision", recognition_level="accurate", languages=None):
+        if self.backend.error:
+            raise RuntimeError(self.backend.error)
+        rows = self.backend.recognize(image, languages or self.languages)
+        return self._rows_to_items(rows, image)
+
 
 
 class Engine:
@@ -4648,13 +4639,10 @@ class Engine:
             if item is None:
                 continue
             src, translate, full, parts = item
-            parts = [p for p in parts if not self._recently_spoken(p)]
-            # śmieci z ekranu wg modelu decyzji (wynik zwykle już jest — liczony od pojawienia się napisu)
-            kept = [p for p in parts if not self._brain_junk(p)]
-            if len(kept) != len(parts):
-                parts = kept
-                if len(parts) > 1:
-                    src = _join_parts(parts)
+            parts = self._fresh_parts(parts)
+            # Zawsze zbuduj tekst od nowa: stary src zawiera także części,
+            # które powyżej odpadły jako już przeczytane.
+            src = _join_parts(parts) if len(parts) > 1 else (parts[0] if parts else "")
             if not parts or same_utterance(src, self.speaking_text):
                 continue
             if len(parts) == 1:
@@ -4753,6 +4741,16 @@ class Engine:
                 self.speaking_full = ""
                 self._tts_interrupt.clear()
                 self._duck_release()
+
+    def _fresh_parts(self, parts):
+        """Usuń przeczytane kwestie i warianty OCR także wewnątrz jednej paczki."""
+        kept = []
+        for part in parts:
+            if self._recently_spoken(part) or any(same_utterance(part, prev) for prev in kept):
+                continue
+            if not self._brain_junk(part):
+                kept.append(part)
+        return kept
 
     def _queue_waiting(self, current):
         """Czy w kolejce czeka już następna kwestia — wtedy lektor przyspiesza, żeby jej nie zgubić."""
@@ -5090,7 +5088,13 @@ class Engine:
         need = max(1, int(getattr(self, "confirm_frames", OCR_CONFIRM_FRAMES)))
         if self._source_kind() == "chrome":
             need = 1  # Netflix/YouTube pokazują napis od razu w całości — jeden odczyt wystarczy
-        if self._ocr_candidate and same_utterance(src, self._ocr_candidate) and not extends_utterance(self._ocr_candidate, src):
+        elif not re.search(r"[.!?…]$", src) and (len(src.split()) <= 3 or not looks_polish(src)):
+            # Migające fragmenty tablic („Andersi,”, „ta Had”, „Have”) potrafią
+            # dostać wysoką ocenę modelu. Wymagaj drugiego odczytu (~150 ms),
+            # zamiast czytać pojedynczą błędną klatkę.
+            need = max(2, need)
+        if (self._ocr_candidate and now - getattr(self, "_ocr_candidate_at", -1e9) < 0.6
+                and same_utterance(src, self._ocr_candidate) and not extends_utterance(self._ocr_candidate, src)):
             self._ocr_candidate_n += 1
         else:
             self._ocr_candidate = src
@@ -5103,6 +5107,7 @@ class Engine:
                 # zanim OCR potwierdzi napis, lektor już go tłumaczy i syntezuje
                 if need > 1 and len(key) >= 6:
                     self._speculate(key, should_translate(src))
+        self._ocr_candidate_at = now
         if self._ocr_candidate_n < need:
             return
         src = self._ocr_candidate
@@ -5306,4 +5311,3 @@ class Engine:
         finally:
             self._tap = None
             tap.stop()
-
