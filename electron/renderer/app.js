@@ -114,6 +114,27 @@ function applyState(msg) {
     document.getElementById("srcChrome").classList.toggle("primary", msg.source === "chrome");
   }
   if (typeof msg.autoStart === "boolean") document.getElementById("autoStart").checked = msg.autoStart;
+  if (typeof msg.elevenKeySet === "boolean") {
+    const key = document.getElementById("elevenKey");
+    if (document.activeElement !== key) {
+      key.value = "";
+      key.placeholder = msg.elevenKeySet ? "klucz zapisany ✓ (wpisz nowy albo usuń)" : "klucz API (puste = Supertonic)";
+    }
+    state.elevenKeySet = msg.elevenKeySet;
+  }
+  if (Array.isArray(msg.elevenVoices)) {
+    const sel = document.getElementById("elevenVoice");
+    const row = document.getElementById("elevenVoiceRow");
+    row.classList.toggle("hidden", !msg.elevenVoices.length);
+    sel.innerHTML = "";
+    for (const voice of msg.elevenVoices) {
+      const opt = document.createElement("option");
+      opt.value = voice.id;
+      opt.textContent = voice.name;
+      sel.appendChild(opt);
+    }
+    if (msg.elevenVoice) sel.value = msg.elevenVoice;
+  }
   if (typeof msg.running === "boolean") {
     state.running = msg.running;
     setLive(msg.running);
@@ -197,6 +218,27 @@ document.getElementById("autoStart").onchange = (e) => {
   window.gr.releaseFocus();
 };
 document.getElementById("game").onchange = (e) => send({ cmd: "config", game: e.target.value });
+{
+  const key = document.getElementById("elevenKey");
+  const submit = () => {
+    const value = key.value.trim();
+    // puste pole przy zapisanym kluczu = bez zmian; „-” albo Backspace na pustym = usuń klucz
+    if (!value && !key.dataset.clear) return;
+    send({ cmd: "config", elevenKey: value === "-" ? "" : value });
+    delete key.dataset.clear;
+    key.value = "";
+    key.blur();
+  };
+  key.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submit();
+    if (e.key === "Backspace" && !key.value && state.elevenKeySet) {
+      key.dataset.clear = "1";
+      submit();
+    }
+  });
+  key.addEventListener("change", submit);
+}
+document.getElementById("elevenVoice").onchange = (e) => send({ cmd: "config", elevenVoice: e.target.value });
 fillGames(GAMES, "gta6");
 
 window.gr.onEvent((msg) => {

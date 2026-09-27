@@ -79,6 +79,8 @@ LEKTOR_FILTER = (
     "equalizer=f=3200:t=q:w=1.2:g=3,"
     "acompressor=threshold=-22dB:ratio=3:attack=5:release=90:makeup=2"
 )
+# ElevenLabs przychodzi już czysty i zmasterowany — tylko lekkie wyrównanie, bez kompresji Supertonic
+LEKTOR_CLOUD_FILTER = "highpass=f=60,acompressor=threshold=-18dB:ratio=2:attack=10:release=150:makeup=1"
 LEKTOR_LIMITER = "alimiter=limit=0.89:attack=4:release=60:level=disabled"
 LEKTOR_TARGET_RMS = 0.1
 
@@ -1035,6 +1037,11 @@ def load_config():
 def save_config(data):
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    if not IS_WIN:
+        try:
+            os.chmod(CONFIG_PATH, 0o600)  # w pliku bywa klucz ElevenLabs — tylko dla właściciela
+        except OSError:
+            pass
 
 
 SAMPLE_RATE = 16000
@@ -2674,6 +2681,102 @@ def log_timing(line):
         pass
 
 
+# ElevenLabs (klucz API użytkownika): naturalny głos lektora; Flash v2.5 = najniższe opóźnienie, zna polski.
+# Bez sieci, po wyczerpaniu limitu albo przy złym kluczu lektor wraca do Supertonic.
+ELEVEN_HOST = "api.elevenlabs.io"
+ELEVEN_MODEL = "eleven_flash_v2_5"
+ELEVEN_RATE = 24000
+# lektor filmowy: równy, spokojny głos — wysoka stabilność, bez „aktorskiego” stylu
+ELEVEN_SETTINGS = {"stability": 0.6, "similarity_boost": 0.8, "style": 0.0, "use_speaker_boost": True}
+
+
+class ElevenLabsTTS:
+    def __init__(self, key, voice):
+        self.key = (key or "").strip()
+        self.voice = re.sub(r"[^A-Za-z0-9]", "", voice or "")
+        self.lock = threading.Lock()
+        self.conn = None
+        self.error = ""
+        self.failed_until = 0.0
+
+    def _request(self, method, path, body=None, timeout=8.0):
+        import http.client
+
+        headers = {"xi-api-key": self.key, "Accept": "*/*"}
+        data = None
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+            data = json.dumps(body).encode("utf-8")
+        with self.lock:
+            for attempt in (0, 1):
+                try:
+                    # jedno połączenie na stałe — bez nowego TLS przy każdej kwestii
+                    if self.conn is None:
+                        self.conn = http.client.HTTPSConnection(ELEVEN_HOST, timeout=timeout)
+                    self.conn.request(method, path, body=data, headers=headers)
+                    resp = self.conn.getresponse()
+                    return resp.status, resp.read()
+                except (OSError, http.client.HTTPException):
+                    try:
+                        self.conn.close()
+                    except Exception:
+                        pass
+                    self.conn = None
+                    if attempt:
+                        raise
+
+    @staticmethod
+    def _detail(payload):
+        try:
+            detail = json.loads(payload.decode("utf-8", "replace")).get("detail")
+            if isinstance(detail, dict):
+                return str(detail.get("message") or detail.get("status") or detail)
+            return str(detail or "")
+        except Exception:
+            return ""
+
+    def voices(self):
+        """[{id, name}] z konta (własne, z biblioteki i gotowe) albo [] przy błędzie."""
+        try:
+            status, payload = self._request("GET", "/v1/voices")
+        except Exception as exc:
+            self.error = f"ElevenLabs: brak połączenia ({exc})."
+            return []
+        if status != 200:
+            self.error = f"ElevenLabs: {self._detail(payload) or f'błąd {status}'}"
+            return []
+        self.error = ""
+        voices = json.loads(payload.decode("utf-8")).get("voices") or []
+        return [{"id": v.get("voice_id"), "name": v.get("name") or v.get("voice_id")} for v in voices if v.get("voice_id")]
+
+    def synth(self, text, speed=1.0, previous=""):
+        """Mono float32 (ELEVEN_RATE) albo None — wtedy lektor czyta Supertonic."""
+        if not self.key or not self.voice or time.monotonic() < self.failed_until:
+            return None
+        body = {
+            "text": text, "model_id": ELEVEN_MODEL, "language_code": "pl",
+            "voice_settings": {**ELEVEN_SETTINGS, "speed": round(max(0.8, min(1.2, speed)), 2)},
+        }
+        if previous:
+            body["previous_text"] = previous  # intonacja płynie dalej, jak u jednego lektora
+        try:
+            status, payload = self._request(
+                "POST", f"/v1/text-to-speech/{self.voice}?output_format=pcm_{ELEVEN_RATE}", body
+            )
+        except Exception as exc:
+            self.error = f"ElevenLabs: brak połączenia ({exc}) — czytam Supertonic."
+            self.failed_until = time.monotonic() + 30.0
+            return None
+        if status != 200 or len(payload) < 64:
+            detail = self._detail(payload) or f"błąd {status}"
+            self.error = f"ElevenLabs: {detail} — czytam Supertonic."
+            # zły klucz / brak znaków: nie pytaj co kwestię
+            self.failed_until = time.monotonic() + (300.0 if status in (401, 402, 403) else 20.0)
+            return None
+        self.error = ""
+        return np.frombuffer(payload[: len(payload) // 2 * 2], dtype="<i2").astype(np.float32) / 32768.0
+
+
 class MaleLektor:
     """Lektor filmowy: Supertonic 3 na GPU (CoreML), równy głos, zmasterowany przez ffmpeg."""
 
@@ -2692,6 +2795,12 @@ class MaleLektor:
         self.cps1 = LEKTOR_CPS_PRIOR
         self.out = PlayerProcess()
         self.ffmpeg = which_bin("ffmpeg") or bundled_ffmpeg()
+        self.cloud = None  # ElevenLabsTTS, gdy użytkownik podał klucz
+        self._cloud_prev = ("", 0.0)
+        self.on_cloud_error = None
+
+    def set_cloud(self, key, voice):
+        self.cloud = ElevenLabsTTS(key, voice) if key and voice else None
 
     @property
     def backend(self):
@@ -2829,16 +2938,27 @@ class MaleLektor:
         # suwak Głośność = głośność lektora; przejęcie i interpunkcja ją modulują
         # volume 0…1 (suwak 0–100 %); 100 % = 1,3× — limiter i tak nie przepuści przesteru
         gain = 1.3 * max(0.0, min(1.0, float(volume))) * params["gain"] * punct_gain
-        key = f"st14|{self.voice}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
+        cloud = self.cloud
+        voice_tag = f"el1|{cloud.voice}" if cloud is not None and time.monotonic() >= cloud.failed_until else f"st14|{self.voice}"
+        key = f"{voice_tag}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
         path = CACHE_DIR / f"{text_key(key)}.wav"
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         if path.exists() and path.stat().st_size >= 64:
             return path
         raw = Path(str(path) + ".raw.wav")
         t0 = time.monotonic()
-        stretch = self._synth(text, raw, pace, self._style(params["blend"]), pause)
+        stretch = None
+        if voice_tag.startswith("el"):
+            stretch = self._synth_cloud(cloud, text, raw, pace, pause)
+            if stretch is None:
+                path = CACHE_DIR / f"{text_key(key.replace(voice_tag, f'st14|{self.voice}', 1))}.wav"
+                if path.exists() and path.stat().st_size >= 64:
+                    return path
+        filt = LEKTOR_CLOUD_FILTER if stretch is not None else LEKTOR_FILTER
+        if stretch is None:
+            stretch = self._synth(text, raw, pace, self._style(params["blend"]), pause)
         t1 = time.monotonic()
-        self._master(raw, path, gain, stretch)
+        self._master(raw, path, gain, stretch, filt)
         t2 = time.monotonic()
         try:
             with wave.open(str(path), "rb") as handle:
@@ -2866,8 +2986,24 @@ class MaleLektor:
             wav, _dur = self.model.synthesize(
                 spoken, voice_style=style, total_steps=SUPERTONIC_STEPS, speed=speed, lang="pl"
             )
-        audio = np.asarray(wav, dtype=np.float32).reshape(-1)
-        sr = int(self.model.sample_rate)
+        self._write_voice(np.asarray(wav, dtype=np.float32).reshape(-1), int(self.model.sample_rate), text, speed, path, pause)
+        return stretch
+
+    def _synth_cloud(self, cloud, text, path, pace, pause):
+        """ElevenLabs; None = nie wyszło (lektor czyta Supertonic). Tempo w całości po stronie głosu."""
+        speed, stretch = lektor_speed_split(pace, text)
+        rate = speed * stretch / LEKTOR_SPEED  # 1,0 = zwykłe tempo lektora
+        prev, at = self._cloud_prev
+        audio = cloud.synth(text, speed=rate, previous=prev if time.monotonic() - at < 12.0 else "")
+        if audio is None:
+            if cloud.error and self.on_cloud_error:
+                self.on_cloud_error(cloud.error)
+            return None
+        self._cloud_prev = (text, time.monotonic())
+        self._write_voice(audio, ELEVEN_RATE, text, max(0.5, rate * LEKTOR_SPEED), path, pause)
+        return 1.0
+
+    def _write_voice(self, audio, sr, text, speed, path, pause):
         # przytnij ciszę na brzegach (szybszy start), dodaj pauzę zależną od nastroju
         # próg niski i zapas na końcu: ciche „dź”, „ś”, „ć” nie mogą zostać ucięte
         loud = np.flatnonzero(np.abs(audio) > 0.004)
@@ -2891,13 +3027,12 @@ class MaleLektor:
         with wave.open(str(path), "wb") as handle:
             handle.setnchannels(1)
             handle.setsampwidth(2)
-            handle.setframerate(int(self.model.sample_rate))
+            handle.setframerate(int(sr))
             handle.writeframes(pcm.tobytes())
-        return stretch
 
-    def _master(self, src, dst, gain, stretch=1.0):
+    def _master(self, src, dst, gain, stretch=1.0, filt=LEKTOR_FILTER):
         tmp = Path(str(dst) + ".part.wav")
-        chain = f"{LEKTOR_FILTER},volume={gain:.2f},{LEKTOR_LIMITER}"
+        chain = f"{filt},volume={gain:.2f},{LEKTOR_LIMITER}"
         if stretch > 1.01:
             chain = f"atempo={stretch:.3f},{chain}"
         try:
@@ -3990,6 +4125,15 @@ class Engine:
         voice = str(self.cfg.get("lektorVoice") or DEFAULT_SUPERTONIC_VOICE).strip().upper()
         if voice in SUPERTONIC_VOICES:
             self.lektor.voice = voice
+        # ElevenLabs: klucz i głos z ustawień; lista głosów z konta dociąga się w tle
+        self.eleven_key = str(self.cfg.get("elevenKey") or "").strip()
+        self.eleven_voice = str(self.cfg.get("elevenVoice") or "").strip()
+        self.eleven_voices = []
+        self._cloud_error_shown = ""
+        self.lektor.on_cloud_error = self._on_cloud_error
+        self.lektor.set_cloud(self.eleven_key, self.eleven_voice)
+        if self.eleven_key:
+            threading.Thread(target=self._load_eleven_voices, daemon=True).start()
         self.translator = ArgosTranslator()
         self.stt = ParakeetSTT()
         self.prosody = ProsodyMeter()
@@ -4157,7 +4301,31 @@ class Engine:
             "source": self.source,
             "sourceKind": self._source_kind(),
             "sourceLabel": self._source_label() if self.source_info else None,
+            # klucz nie wraca do okna — tylko informacja, że jest
+            "elevenKeySet": bool(getattr(self, "eleven_key", "")),
+            "elevenVoice": getattr(self, "eleven_voice", ""),
+            "elevenVoices": getattr(self, "eleven_voices", []),
         }
+
+    def _on_cloud_error(self, text):
+        if text != self._cloud_error_shown:
+            self._cloud_error_shown = text
+            self.emit({"event": "status", "text": text})
+
+    def _load_eleven_voices(self):
+        client = ElevenLabsTTS(self.eleven_key, "")
+        voices = client.voices()
+        if client.error:
+            self._on_cloud_error(client.error)
+        self.eleven_voices = voices
+        if voices and self.eleven_voice not in {v["id"] for v in voices}:
+            self.eleven_voice = voices[0]["id"]  # pierwszy głos z konta — zmienisz w „Więcej”
+            self.persist()
+        self.lektor.set_cloud(self.eleven_key, self.eleven_voice)
+        if voices:
+            name = next((v["name"] for v in voices if v["id"] == self.eleven_voice), self.eleven_voice)
+            self.emit({"event": "status", "text": f"Lektor: ElevenLabs — {name}."})
+        self.emit({"event": "state", **self.snapshot()})
 
     def persist(self):
         save_config(
@@ -4180,6 +4348,8 @@ class Engine:
                 "source": self.source,
                 "gta6Added": True,
                 "lektorVoice": self.lektor.voice,
+                "elevenKey": self.eleven_key,
+                "elevenVoice": self.eleven_voice,
             }
         )
 
@@ -4205,6 +4375,19 @@ class Engine:
             self.overlay = bool(data["overlay"])
         if "lektorVolume" in data:
             self.lektor_volume = max(0, min(100, int(data["lektorVolume"])))
+        if "elevenKey" in data:
+            self.eleven_key = str(data["elevenKey"] or "").strip()
+            self.eleven_voices = []
+            self._cloud_error_shown = ""
+            self.lektor.set_cloud(self.eleven_key, self.eleven_voice)
+            if self.eleven_key:
+                threading.Thread(target=self._load_eleven_voices, daemon=True).start()
+            else:
+                self.emit({"event": "status", "text": "Lektor: Supertonic (bez ElevenLabs)."})
+        if "elevenVoice" in data:
+            self.eleven_voice = re.sub(r"[^A-Za-z0-9]", "", str(data["elevenVoice"] or ""))
+            self._cloud_error_shown = ""
+            self.lektor.set_cloud(self.eleven_key, self.eleven_voice)
         if "game" in data:
             self.apply_game(data["game"], persist=False, announce=True, reset_lock=True)
         if "showRegion" in data:
@@ -5057,7 +5240,9 @@ class Engine:
         if ocr_junk_count(src) or self._like_spoken(key):
             return
         rank = ocr_reading_rank(src)
-        if rank < self._spec_rank or self._spec_redo >= 2:
+        # ElevenLabs liczy znaki — poprawiony odczyt syntezuje się najwyżej raz
+        redo_cap = 1 if getattr(getattr(self, "lektor", None), "cloud", None) is not None else 2
+        if rank < self._spec_rank or self._spec_redo >= redo_cap:
             return  # gorszy wariant albo już dwie poprawki — CPU zostaje dla gry, lektor syntezuje po zatwierdzeniu
         if not fresh:
             self._spec_redo += 1

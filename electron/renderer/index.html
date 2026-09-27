@@ -67,6 +67,15 @@
         <label class="toggle"><input id="autoStart" type="checkbox" checked /> Startuj sam, gdy wykryję grę</label>
 
         <div class="row">
+          <label class="muted" for="elevenKey" title="Klucz API z elevenlabs.io (Profil → API Keys). Puste = lokalny głos Supertonic.">ElevenLabs</label>
+          <input id="elevenKey" class="text" type="password" autocomplete="off" spellcheck="false" placeholder="klucz API (puste = Supertonic)" />
+        </div>
+        <div id="elevenVoiceRow" class="row hidden">
+          <label class="muted" for="elevenVoice">Głos</label>
+          <select id="elevenVoice"></select>
+        </div>
+
+        <div class="row">
           <button id="test" class="btn grow">Test napisu</button>
           <button id="pick" class="btn grow">Zaznacz obszar</button>
         </div>
