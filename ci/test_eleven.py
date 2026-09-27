@@ -39,6 +39,23 @@ class ElevenLabsTest(unittest.TestCase):
             self.assertIsNone(tts.synth("Hej."))  # nie pyta co kwestię
             req.assert_not_called()
 
+    def test_polish_library_voices_are_offered_and_added(self):
+        tts = ge.ElevenLabsTTS("key", "")
+        listing = {"voices": [
+            {"public_owner_id": "own1", "voice_id": "v1", "name": "Mikołaj", "descriptive": "calm"},
+            {"public_owner_id": "own2", "voice_id": "v2", "name": "Już dodany", "is_added_by_user": True},
+        ]}
+        with patch.object(tts, "_request", return_value=(200, ge.json.dumps(listing).encode())) as req:
+            voices = tts.library()
+        self.assertIn("language=pl", req.call_args[0][1])
+        self.assertEqual([v["id"] for v in voices], ["lib:own1:v1"])
+        with patch.object(tts, "_request", return_value=(200, b'{"voice_id": "new9"}')) as req:
+            self.assertEqual(tts.add_shared("own1", "v1", "Mikołaj"), "new9")
+        self.assertEqual(req.call_args[0][:2], ("POST", "/v1/voices/add/own1/v1"))
+        with patch.object(tts, "_request", return_value=(403, b'{"detail": {"message": "Upgrade your plan"}}')):
+            self.assertIsNone(tts.add_shared("own1", "v1", "Mikołaj"))
+        self.assertIn("Upgrade", tts.error)
+
     def test_lektor_writes_cloud_voice_and_falls_back(self):
         lektor = ge.MaleLektor()
         lektor.ffmpeg = None

@@ -127,11 +127,19 @@ function applyState(msg) {
     const row = document.getElementById("elevenVoiceRow");
     row.classList.toggle("hidden", !msg.elevenVoices.length);
     sel.innerHTML = "";
+    const groups = new Map();
     for (const voice of msg.elevenVoices) {
+      const label = voice.group || "Głosy";
+      if (!groups.has(label)) {
+        const group = document.createElement("optgroup");
+        group.label = label;
+        groups.set(label, group);
+        sel.appendChild(group);
+      }
       const opt = document.createElement("option");
       opt.value = voice.id;
       opt.textContent = voice.name;
-      sel.appendChild(opt);
+      groups.get(label).appendChild(opt);
     }
     if (msg.elevenVoice) sel.value = msg.elevenVoice;
   }

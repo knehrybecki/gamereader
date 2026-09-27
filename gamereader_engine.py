@@ -2747,7 +2747,56 @@ class ElevenLabsTTS:
             return []
         self.error = ""
         voices = json.loads(payload.decode("utf-8")).get("voices") or []
-        return [{"id": v.get("voice_id"), "name": v.get("name") or v.get("voice_id")} for v in voices if v.get("voice_id")]
+        def polish(v):
+            labels = v.get("labels") or {}
+            return "pl" in {str(labels.get("language", "")).lower(), str(v.get("fine_tuning", {}).get("language", "")).lower()} \
+                or "polish" in str(labels.get("accent", "")).lower()
+
+        return [
+            {"id": v["voice_id"], "name": v.get("name") or v["voice_id"],
+             "group": "Twoje polskie" if polish(v) else "Twoje konto (akcent angielski)"}
+            for v in sorted(voices, key=lambda v: not polish(v)) if v.get("voice_id")
+        ]
+
+    def library(self):
+        """Polskie męskie głosy z biblioteki ElevenLabs (najczęściej używane), jeszcze nie dodane do konta."""
+        from urllib.parse import urlencode
+
+        query = urlencode({
+            "language": "pl", "gender": "male", "page_size": 40,
+            "sort": "usage_character_count_1y", "include_custom_rates": "false",
+        })
+        try:
+            status, payload = self._request("GET", f"/v1/shared-voices?{query}")
+        except Exception:
+            return []
+        if status != 200:
+            return []
+        out = []
+        for v in json.loads(payload.decode("utf-8")).get("voices") or []:
+            if v.get("is_added_by_user") or not v.get("public_owner_id") or not v.get("voice_id"):
+                continue
+            note = v.get("descriptive") or v.get("use_case") or ""
+            out.append({
+                "id": f"lib:{v['public_owner_id']}:{v['voice_id']}",
+                "name": f"{v.get('name') or v['voice_id']}" + (f" — {note}" if note else ""),
+                "group": "Polskie z biblioteki (dodam do konta)",
+            })
+        return out
+
+    def add_shared(self, owner, voice, name):
+        """Dodaj głos z biblioteki do konta; zwraca jego voice_id albo None (np. darmowy plan)."""
+        owner = re.sub(r"[^A-Za-z0-9]", "", owner)
+        voice = re.sub(r"[^A-Za-z0-9]", "", voice)
+        try:
+            status, payload = self._request("POST", f"/v1/voices/add/{owner}/{voice}", {"new_name": name[:60]})
+        except Exception as exc:
+            self.error = f"ElevenLabs: brak połączenia ({exc})."
+            return None
+        if status != 200:
+            self.error = f"ElevenLabs: nie dodam głosu — {self._detail(payload) or f'błąd {status}'}"
+            return None
+        return json.loads(payload.decode("utf-8")).get("voice_id")
 
     def synth(self, text, speed=1.0, previous=""):
         """Mono float32 (ELEVEN_RATE) albo None — wtedy lektor czyta Supertonic."""
@@ -4317,7 +4366,8 @@ class Engine:
         voices = client.voices()
         if client.error:
             self._on_cloud_error(client.error)
-        self.eleven_voices = voices
+        library = client.library() if voices else []
+        self.eleven_voices = voices + library
         if voices and self.eleven_voice not in {v["id"] for v in voices}:
             self.eleven_voice = voices[0]["id"]  # pierwszy głos z konta — zmienisz w „Więcej”
             self.persist()
@@ -4326,6 +4376,23 @@ class Engine:
             name = next((v["name"] for v in voices if v["id"] == self.eleven_voice), self.eleven_voice)
             self.emit({"event": "status", "text": f"Lektor: ElevenLabs — {name}."})
         self.emit({"event": "state", **self.snapshot()})
+
+    def _add_library_voice(self, choice):
+        """Głos z biblioteki: dodaj do konta, ustaw jako lektora, odśwież listę."""
+        _lib, owner, voice = (choice.split(":") + ["", ""])[:3]
+        name = next((v["name"].split(" — ")[0] for v in self.eleven_voices if v["id"] == choice), voice)
+        self.emit({"event": "status", "text": f"Dodaję głos {name} do konta ElevenLabs…"})
+        client = ElevenLabsTTS(self.eleven_key, "")
+        new_id = client.add_shared(owner, voice, name)
+        if not new_id:
+            self._on_cloud_error(client.error or "ElevenLabs: nie udało się dodać głosu.")
+            self.emit({"event": "state", **self.snapshot()})
+            return
+        self.eleven_voice = new_id
+        self._cloud_error_shown = ""
+        self.lektor.set_cloud(self.eleven_key, self.eleven_voice)
+        self.persist()
+        self._load_eleven_voices()
 
     def persist(self):
         save_config(
@@ -4385,9 +4452,13 @@ class Engine:
             else:
                 self.emit({"event": "status", "text": "Lektor: Supertonic (bez ElevenLabs)."})
         if "elevenVoice" in data:
-            self.eleven_voice = re.sub(r"[^A-Za-z0-9]", "", str(data["elevenVoice"] or ""))
-            self._cloud_error_shown = ""
-            self.lektor.set_cloud(self.eleven_key, self.eleven_voice)
+            choice = str(data["elevenVoice"] or "")
+            if choice.startswith("lib:"):
+                threading.Thread(target=self._add_library_voice, args=(choice,), daemon=True).start()
+            else:
+                self.eleven_voice = re.sub(r"[^A-Za-z0-9]", "", choice)
+                self._cloud_error_shown = ""
+                self.lektor.set_cloud(self.eleven_key, self.eleven_voice)
         if "game" in data:
             self.apply_game(data["game"], persist=False, announce=True, reset_lock=True)
         if "showRegion" in data:
