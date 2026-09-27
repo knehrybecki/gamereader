@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from gamereader_engine import (
     Engine, RecurringFragments, strip_lead_junk, screen_junk_level, same_utterance, ocr_reading_rank,
-    trim_ocr_edges, condense_polish,
+    trim_ocr_edges, condense_polish, lektor_speed_split, LEKTOR_MAX_RATE, LEKTOR_MAX_STRETCH,
 )
 
 
@@ -186,6 +186,13 @@ class SubtitleFiltersTest(unittest.TestCase):
         spoken = engine._offer_line.call_args[0][0]
         self.assertIn("będziesz", spoken)
         self.assertNotIn("bedkles", spoken)
+
+    def test_catchup_pace_stays_intelligible(self):
+        # pace jak przy doganianiu z sesji 13:48 (boost 1,40, tts 0,92, żywy głos)
+        speed, stretch = lektor_speed_split(0.53, "Zabierz Franklina blisko jachtu.")
+        self.assertLessEqual(speed, LEKTOR_MAX_RATE)
+        self.assertLessEqual(stretch, LEKTOR_MAX_STRETCH)
+        self.assertLessEqual(speed * stretch, LEKTOR_MAX_RATE + 1e-6)
 
 
 if __name__ == "__main__":

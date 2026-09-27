@@ -1153,10 +1153,11 @@ SUPERTONIC_STEPS = 5
 LEKTOR_SPEED = 1.10
 # najszybsze tempo samego modelu — powyżej Supertonic bełkocze (1,5 → 15 % słów źle rozpoznanych)
 LEKTOR_MAX_SPEED = 1.35
-# spóźniony lektor: resztę tempa dokłada ffmpeg (atempo — szybciej bez zmiany wysokości głosu);
-# w pomiarach 18 zn/s przy tej samej zrozumiałości co dziś 13 zn/s z samego modelu
-LEKTOR_MAX_RATE = 1.65
-LEKTOR_MAX_STRETCH = 1.4
+# spóźniony lektor może tylko lekko przyspieszyć. W sesji z 13:48 doganianie
+# (tempo ×1,40 i atempo ×1,40) dawało 20–24 zn/s i mowa się zlewała; czytelne
+# było ~17 zn/s bez rozciągania ffmpeg. 1,25 to sufit łącznego tempa względem speed=1.
+LEKTOR_MAX_RATE = 1.25
+LEKTOR_MAX_STRETCH = 1.12
 # gdy w kolejce czeka już następny napis: kolejne fragmenty syntezują się szybciej, bez pauz
 LEKTOR_CATCHUP_RATE = 1.08
 # tempo dopasowane do napisów: lektor ma się zmieścić w czasie, w którym napis wisi na ekranie
@@ -4863,13 +4864,14 @@ class Engine:
 
     def _screen_budget(self, parts):
         """Ile sekund zostało, zanim zniknie najnowszy z napisów (tyle ma lektor na wypowiedź)."""
-        cps = self._sub_cps or SUBTITLE_CPS_DEFAULT
+        # powyżej ~18 zn/s plan i tak wpychał lektora w bełkot; zaległe kwestie i tak wypadają
+        cps = min(self._sub_cps or SUBTITLE_CPS_DEFAULT, 18.0)
         # kwestia przygotowywana zawczasu zacznie się dopiero, gdy lektor skończy bieżącą
         now = max(time.monotonic(), self.lektor.busy_until)
         natural = sum(len(p) for p in parts) / cps
         deadline = max(self._seen_at.get(p, now) + len(p) / cps for p in parts)
-        # spóźniony lektor czyta szybciej, ale nie wymagamy cudów (min. 65% naturalnego czasu)
-        return max(0.65 * natural, deadline - now, 1.0)
+        # spóźnienie nie skraca budżetu: lektor czyta w tempie napisu, a nie w 65 % tego czasu
+        return max(natural, deadline - now, 1.0)
 
     def _plan_line(self, src, translate, parts=None):
         """Tłumaczenie, podział na zdania i emocja kwestii: (tekst, fragmenty, przejęcie, tempo)."""
