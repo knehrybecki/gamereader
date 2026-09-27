@@ -629,6 +629,21 @@ _UI_SOFT = re.compile(
 )
 
 
+# tablica rejestracyjna auta w kadrze (GTA: „San Andreas” + kod „85BNR757”/„BNR 757”) — to nie dialog
+_PLATE_CODE = re.compile(r"(?<![\w])(?:\d{0,2}[A-Z]{2,4}\s?\d{3,4}|\d{1,2}[A-Z]{3}\d{2,4})(?![\w])")
+
+
+def looks_like_plate(text):
+    raw = normalize_text(text)
+    if not raw or len(raw.split()) > 6:
+        return False
+    if _PLATE_CODE.search(raw):
+        return True
+    if looks_polish(raw):
+        return False
+    return any(SequenceMatcher(None, w, "andreas", autojunk=False).ratio() >= 0.75 for w in _fold_words(raw) if len(w) >= 5)
+
+
 def screen_junk_level(text):
     raw = normalize_text(text)
     if _UI_HARD.search(raw):
@@ -745,6 +760,8 @@ CATCH_UP_STALE_SEC = 2.0
 # wypada pierwsza — jak u lektora TV.
 BRAIN_JUNK_P = 0.10
 BRAIN_ODD_WAIT = 0.6
+# słowa napisów odrzuconych przez model (szyld, nazwa ulicy) — ich warianty z OCR odpadają od razu
+JUNK_MEMORY_SEC = 90.0
 BRAIN_SUSPECT_P = 0.35
 BRAIN_SKIP_INFO_P = 0.2
 # krótkie wtrącenie (do 2 słów, nie pytanie z treścią) wypada, dopóki model nie jest pewny informacji
@@ -4401,6 +4418,9 @@ class Engine:
         """Model decyzji: napis to nie kwestia postaci (menu, znak wodny, powiadomienie, zlepek liter)."""
         if self.brain is None:
             return False
+        if self._pl_subs_active and self._like_recent_junk(text):
+            self._log_junk(text, f"pomijam — to nie dialog (jak odrzucony przed chwilą): {text[:70]!r}")
+            return True
         verdict = self.brain.verdict(text, wait)
         if not verdict:
             return False
@@ -4410,8 +4430,38 @@ class Engine:
         # sam model nie wyrzuca porządnego polskiego zdania (np. kwestii z doklejonym znakiem wodnym)
         if (p < BRAIN_JUNK_P and not looks_polish(text)) or (suspect and p < BRAIN_SUSPECT_P):
             self._log_junk(text, f"pomijam — to nie dialog (model {p:.2f}{', podejrzane' if suspect else ''}): {text[:70]!r}")
+            self._remember_junk(text)
             return True
         return False
+
+    def _remember_junk(self, text):
+        now = time.monotonic()
+        junk = self._junk_words = {w: at for w, at in getattr(self, "_junk_words", {}).items() if now - at < JUNK_MEMORY_SEC}
+        for word in _fold_words(text):
+            if len(word) >= 5:
+                junk[word] = now
+        # skrót WIELKIMI literami (logo, „BNR”) — OCR czyta go stale tak samo
+        for token in re.findall(r"[A-ZĄĆĘŁŃÓŚŹŻ]{3,}", normalize_text(text)):
+            junk["!" + polish_fold(token)] = now
+
+    def _like_recent_junk(self, text):
+        """Stały napis z ekranu (nazwa ulicy, szyld), który model już odrzucił, a OCR czyta go za każdym
+        razem inaczej („San Andreas BNR” → „Aodreas BNR”, „Medres? BNR”) — bez czekania na model."""
+        junk = getattr(self, "_junk_words", None)
+        if not junk or looks_polish(text):
+            return False
+        words = _fold_words(text)
+        if not words or len(words) > 4:
+            return False
+        now = time.monotonic()
+        caps = {"!" + polish_fold(t) for t in re.findall(r"[A-ZĄĆĘŁŃÓŚŹŻ]{3,}", normalize_text(text))}
+        if any(now - junk.get(tag, -1e9) < JUNK_MEMORY_SEC for tag in caps):
+            return True
+        return any(
+            now - at < JUNK_MEMORY_SEC and SequenceMatcher(None, word, bad, autojunk=False).ratio() >= 0.7
+            for word in words if len(word) >= 4
+            for bad, at in junk.items() if not bad.startswith("!")
+        )
 
     def _skippable(self, text):
         """Kwestia bez nowej informacji (okrzyk, reakcja, potwierdzenie) — w zrywie wypada pierwsza."""
@@ -4834,6 +4884,10 @@ class Engine:
         src = trim_ocr_edges(src)
         if screen_junk_level(src) == "junk":
             self._log_junk(src, f"pomijam — to nie dialog (reguła): {src[:70]!r}")
+            return
+        if looks_like_plate(src):
+            self._log_junk(src, f"pomijam — tablica rejestracyjna: {src[:70]!r}")
+            self._remember_junk(src)
             return
         stripped = self._recurring.strip(src)
         if stripped != src:
