@@ -53,6 +53,12 @@ RADIO_QUESTION = (
     "Tekst rozpoznany z dźwięku gry. Czy to rozmowa postaci w grze, czy piosenka albo audycja radiowa (DJ, reklama, wiadomości)?",
     ["piosenka albo radio", "rozmowa postaci"],
 )
+# wypowiedź NPC bez napisu: ktoś mówi do gracza albo o akcji (policja przez radio, ostrzeżenie, groźba,
+# pytanie) — p 0,85–0,98, czy przypadkowe gadanie przechodniów — p 0,02–0,03
+IMPORTANT_QUESTION = (
+    "Wypowiedź postaci z gry (bez napisów). Czy ktoś mówi do gracza albo o akcji (ostrzeżenie, pytanie, polecenie, groźba, komunikat policji), czy to przypadkowe gadanie przechodniów w tle?",
+    ["przypadkowe gadanie w tle", "mówi do gracza albo o akcji"],
+)
 # o informację pytamy tylko, gdy to (chyba) dialog — śmieci kosztują jeden przebieg
 INFO_MIN_DIALOGUE = 0.10
 
@@ -160,7 +166,9 @@ class LektorBrain:
             try:
                 t0 = time.monotonic()
                 if kind == "heard":
-                    result = {"radio": self._ask(text, *RADIO_QUESTION)[0]}
+                    result = {"radio": self._ask(text, *RADIO_QUESTION)[0], "important": None}
+                    if result["radio"] < 0.5:
+                        result["important"] = self._ask(text, *IMPORTANT_QUESTION)[1]
                 else:
                     result = {"dialog": self._ask(text, *DIALOGUE_QUESTION)[0], "info": None}
                     if result["dialog"] >= INFO_MIN_DIALOGUE:

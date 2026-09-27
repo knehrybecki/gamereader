@@ -688,6 +688,8 @@ AUDIO_MIN_SPEECH_SEC = 0.8
 # a DJ i reklamy grają na podkładzie — wypowiedź bez żadnej pauzy aż do limitu długości
 AUDIO_SUNG_MAX = 0.55
 BRAIN_RADIO_P = 0.5
+# kwestia NPC bez napisu tłumaczona, gdy ważna dla gracza (policja, ostrzeżenie), nie gadanie przechodniów
+BRAIN_IMPORTANT_P = 0.5
 AUDIO_MIN_VOICED = 0.10  # mowa: 0,17 pod szumem 6 dB … 0,35 czysta; szum i wybuchy: 0,00
 # kwestia czekająca w kolejce dłużej niż tyle sekund (a jest już nowsza) — przepada, lektor leci dalej
 CATCH_UP_STALE_SEC = 2.0
@@ -2828,7 +2830,7 @@ class ProsodyMeter:
         return max(-1.0, min(1.0, score / 1.2))
 
 
-def _periodic_frame(frame, threshold=0.35):
+def _periodic_frame(frame, threshold=0.35, strict=False):
     """Ramka okresowa w paśmie głosu (55–400 Hz) — głos tak, szum i wybuchy nie."""
     n = frame.size
     x = frame.astype(np.float64) - float(frame.mean())
@@ -2837,7 +2839,14 @@ def _periodic_frame(frame, threshold=0.35):
     if ac[0] <= 0:
         return False
     lo, hi = SAMPLE_RATE // 400, min(n - 1, SAMPLE_RATE // 55)
-    return float(np.max(ac[lo:hi])) >= threshold * float(ac[0])
+    k = lo + int(np.argmax(ac[lo:hi]))
+    if ac[k] < threshold * float(ac[0]):
+        return False
+    if not strict:
+        return True
+    # prawdziwy okres = szczyt z dołkiem przed nim; buczenie ruchu ulicznego (niskie częstotliwości)
+    # daje autokorelację opadającą gładko — maksimum na brzegu zakresu, bez dołka
+    return k > lo + 2 and float(np.min(ac[lo:k])) < float(ac[k]) - 0.2 * float(ac[0])
 
 
 def voiced_fraction(audio, frame=512):
@@ -2966,12 +2975,22 @@ class UtteranceCutter:
         self.buf = []
         self.spoken = 0.0
         self.quiet = 0.0
+        self.floor = None
+
+    def _voice(self, mono):
+        """Czy w kawałku jest głos: wyraźnie ponad tłem (ulica, tłum nigdy nie cichną) i okresowy
+        jak głos — szum miasta to „cisza”, więc zdania NPC się rozdzielają; muzyka jest okresowa."""
+        rms = float(np.sqrt(np.mean(np.square(mono))))
+        self.floor = rms if self.floor is None or rms < self.floor else self.floor + 0.01 * (rms - self.floor)
+        if rms < max(SPEECH_RMS, 1.1 * self.floor):
+            return False
+        return mono.size < 256 or _periodic_frame(mono[-512:], strict=True)
 
     def feed(self, mono):
         if mono is None or mono.size == 0:
             return None
         duration = mono.size / float(SAMPLE_RATE)
-        loud = float(np.sqrt(np.mean(np.square(mono)))) >= SPEECH_RMS
+        loud = self._voice(mono)
         if not self.buf:
             if not loud:
                 self.preroll.append(mono)
@@ -4310,7 +4329,8 @@ class Engine:
         if not verdict:
             return False
         p = verdict["dialog"]
-        suspect = screen_junk_level(text) == "suspect"
+        # przy polskich napisach niepolski tekst z ekranu (szyld, reklama w grze) też jest podejrzany
+        suspect = screen_junk_level(text) == "suspect" or (self._pl_subs_active and not looks_polish(text))
         # sam model nie wyrzuca porządnego polskiego zdania (np. kwestii z doklejonym znakiem wodnym)
         if (p < BRAIN_JUNK_P and not looks_polish(text)) or (suspect and p < BRAIN_SUSPECT_P):
             self._log_junk(text, f"pomijam — to nie dialog (model {p:.2f}{', podejrzane' if suspect else ''}): {text[:70]!r}")
@@ -4617,6 +4637,9 @@ class Engine:
             verdict = self.brain.verdict(heard, wait=0.4, kind="heard")
             if verdict and verdict["radio"] >= BRAIN_RADIO_P:
                 self._timing(f"pomijam dźwięk — radio/piosenka (model {verdict['radio']:.2f}): {heard[:70]!r}")
+                return
+            if verdict and verdict.get("important") is not None and verdict["important"] < BRAIN_IMPORTANT_P:
+                self._timing(f"pomijam dźwięk — gadanie w tle, nieważne (model {verdict['important']:.2f}): {heard[:70]!r}")
                 return
         # ciche mruczenie pod nosem i tłum w tle — pomijamy
         if quiet:
