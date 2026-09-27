@@ -1,5 +1,6 @@
 """Regresje OCR z sesji LiveDub; bez modeli, dźwięku i przechwytywania ekranu."""
 import sys
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 from pathlib import Path
@@ -9,6 +10,7 @@ from gamereader_engine import (
     Engine, RecurringFragments, strip_lead_junk, screen_junk_level, same_utterance, ocr_reading_rank,
     trim_ocr_edges, condense_polish, lektor_speed_split, LEKTOR_MAX_RATE, LEKTOR_MAX_STRETCH,
     strip_known_prefix, ocr_reading_unsettled, repair_polish_ocr, RecurringLead, extends_utterance,
+    strip_hud_prompts,
 )
 
 
@@ -260,6 +262,13 @@ class SubtitleFiltersTest(unittest.TestCase):
         self.assertEqual(seen[2:], ["Dobra. Dzięki.", "Już nie.", "Lotnisko jest blisko."])
         self.assertEqual(lead.strip("Lotnisko n Patrzeć?"), "Patrzeć?")
         self.assertEqual(lead.strip("Lotnisko."), "")
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Path(tmp) / "lead.json"
+            first = RecurringLead(store=store)
+            for text in ("Lotnisko n Tato! Jezu!", "Lotnisko n Coś ci się popierdoliło, mały?"):
+                first.observe(text)
+            self.assertEqual(RecurringLead(store=store).strip("Lotnisko n Napraw samochód Amandy."),
+                             "Napraw samochód Amandy.")
         # imię przed zdaniem bez przecinka raz się zdarza — nie jest śmieciem
         names = RecurringLead()
         names.observe("Franklin Chodź tu.")
@@ -280,15 +289,28 @@ class SubtitleFiltersTest(unittest.TestCase):
         self.assertFalse(extends_utterance("Tata?", "Nie nazywaj mnie tata, małe ścierwo! Lepiej, żeby nadal pływała."))
         self.assertTrue(extends_utterance("Złap Franklina", "Złap Franklina i jedź do garażu."))
 
+    def test_mixed_case_junk_before_line_is_cut(self):
+        # sesja 16:30: warianty śmieci syntezowały się na zapas i zabierały czas prawdziwej kwestii
+        self.assertEqual(strip_lead_junk("pĘL Odpalamy te gablote."), "Odpalamy te gablote.")
+        self.assertEqual(strip_lead_junk("TRici• Odpalamy te gablote."), "Odpalamy te gablote.")
+        self.assertEqual(strip_lead_junk("OK Dobra, jedziemy."), "OK Dobra, jedziemy.")
+
+    def test_camera_prompts_are_not_read(self):
+        # sesja 16:31, warsztat w GTA: lektor czytał „Pierwsza osoba El ZOOM L RUSZAJ KAMERĄ”
+        self.assertEqual(strip_hud_prompts("Pierwsza osoba El ZOOM L RUSZAJ KAMERĄ"), "")
+        self.assertEqual(strip_hud_prompts("Dobra. Jak nówka. ZOOM L Pierwsza osoba ElE RUSZAJ KAMERĄ"), "Dobra. Jak nówka.")
+        self.assertEqual(strip_hud_prompts("Zaokrąglisz trochę lasencję? Pierwsza osoba ElE"), "Zaokrąglisz trochę lasencję?")
+        self.assertEqual(strip_hud_prompts("Wróć do domu, Franklin."), "Wróć do domu, Franklin.")
+
     def test_catchup_pace_stays_intelligible(self):
         # pace jak przy doganianiu z sesji 13:48 (boost 1,40, tts 0,92, żywy głos)
         speed, stretch = lektor_speed_split(0.53, "Zabierz Franklina blisko jachtu.")
         self.assertLessEqual(speed, LEKTOR_MAX_RATE)
         self.assertLessEqual(stretch, LEKTOR_MAX_STRETCH)
         self.assertLessEqual(speed * stretch, LEKTOR_MAX_RATE + 1e-6)
-        # sesja 15:16: ×1,25 z atempo ×1,12 było niezrozumiałe — lektor filmowy nie szybciej niż ×1,15
-        self.assertLessEqual(speed * stretch, 1.15 + 1e-6)
-        self.assertLessEqual(stretch, 1.05 + 1e-6)
+        # sesja 15:16: bełkot robiło atempo ×1,12 — tempo tylko w modelu, bez rozciągania ffmpeg
+        self.assertLessEqual(speed * stretch, 1.25 + 1e-6)
+        self.assertEqual(stretch, 1.0)
 
 
 if __name__ == "__main__":

@@ -808,7 +808,8 @@ def _plate_context(raw):
 
 _CAPS = "A-ZĄĆĘŁŃÓŚŹŻ"
 _JUNK_TOKEN = re.compile(
-    rf"^(?:[{_CAPS}][{_CAPS}.\-]+|[A-Za-ząćęłńóśźż{_CAPS}]*[a-ząćęłńóśźż][{_CAPS}][A-Za-ząćęłńóśźż{_CAPS}]*)[^\w\s]*$"
+    rf"^(?:[{_CAPS}][{_CAPS}.\-]+|[A-Za-ząćęłńóśźż{_CAPS}]*[a-ząćęłńóśźż][{_CAPS}][A-Za-ząćęłńóśźż{_CAPS}]*"
+    rf"|[{_CAPS}]{{2,}}[a-ząćęłńóśźż]+)[^\w\s]*$"  # „TRici•” — dwie wielkie, potem małe
 )
 # skróty, które padają w dialogach GTA — nie są śmieciem z HUD
 _REAL_CAPS = {"ok", "fbi", "lspd", "noose", "iaa", "cia", "usa", "gta", "nie", "tak", "hej", "stoj", "dea", "lsd", "tv"}
@@ -822,7 +823,7 @@ def strip_lead_junk(text):
     cut = 0
     while cut < min(2, len(words) - 1) and _JUNK_TOKEN.match(words[cut]) and polish_fold(words[cut]) not in _REAL_CAPS:
         cut += 1
-    if not cut or len(polish_fold("".join(words[:cut]))) < 4:
+    if not cut or len(polish_fold("".join(words[:cut]))) < 3:  # „pĘL Odpalamy…” też
         return raw
     if not re.match(rf"[-–„\"]?[{_CAPS}][a-ząćęłńóśźż]", words[cut]):
         return raw
@@ -898,9 +899,25 @@ class RecurringLead:
     Coś ci się…”, „Wiad To mnie…”). Słowo, które stało na początku 2 RÓŻNYCH kwestii bez interpunkcji po
     sobie, to nie dialog — od tej pory jest wycinane (także w wariantach OCR: „Lotniako”, „Miad”)."""
 
-    def __init__(self, keep=40):
+    def __init__(self, keep=40, store=None):
         self.recent = deque(maxlen=keep)
-        self.junk = deque(maxlen=12)
+        self.junk = deque(maxlen=24)
+        # wyuczone etykiety zostają między sesjami — „Lotnisko n …” nie trafia do lektora po restarcie
+        self.store = store
+        if store is not None:
+            try:
+                self.junk.extend(str(t) for t in json.loads(Path(store).read_text(encoding="utf-8"))[-24:])
+            except (OSError, ValueError, TypeError):
+                pass
+
+    def _save(self):
+        if self.store is None:
+            return
+        try:
+            Path(self.store).parent.mkdir(parents=True, exist_ok=True)
+            Path(self.store).write_text(json.dumps(list(self.junk), ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
 
     @staticmethod
     def _lead(words):
@@ -932,6 +949,7 @@ class RecurringLead:
             if (other_token == token and SequenceMatcher(None, rest, other_rest, autojunk=False).ratio() < 0.6
                     and not self._is_junk(token)):
                 self.junk.append(token)
+                self._save()
                 break
         self.recent.append(lead)
 
@@ -1259,12 +1277,11 @@ SUPERTONIC_STEPS = 8
 LEKTOR_SPEED = 1.10
 # najszybsze tempo samego modelu — powyżej Supertonic bełkocze (1,5 → 15 % słów źle rozpoznanych)
 LEKTOR_MAX_SPEED = 1.35
-# spóźniony lektor może tylko lekko przyspieszyć. W sesji z 13:48 doganianie
-# (tempo ×1,40 i atempo ×1,40) dawało 20–24 zn/s i mowa się zlewała; czytelne
-# było ~17 zn/s bez rozciągania ffmpeg. Sesja 15:16: nawet ×1,25 z atempo ×1,12 (17,5 zn/s)
-# brzmiało za szybko jak na lektora filmowego — sufit ×1,15, ffmpeg dociąga najwyżej 5 %.
-LEKTOR_MAX_RATE = 1.15
-LEKTOR_MAX_STRETCH = 1.05
+# spóźniony lektor przyspiesza tylko tempem samego głosu. Bełkot z sesji 13:48 robiło rozciąganie
+# ffmpeg (atempo ×1,12–1,40), nie tempo modelu — atempo wyłączone. Sesja 16:30: przy suficie ×1,15
+# lektor stał na stałym tempie i nie nadążał za napisami (1–1,7 s za nimi) — sufit znów ×1,25.
+LEKTOR_MAX_RATE = 1.25
+LEKTOR_MAX_STRETCH = 1.0
 # gdy w kolejce czeka już następny napis: kolejne fragmenty syntezują się szybciej, bez pauz
 LEKTOR_CATCHUP_RATE = 1.08
 # tempo dopasowane do napisów: lektor ma się zmieścić w czasie, w którym napis wisi na ekranie
@@ -3638,6 +3655,32 @@ _UI_WORDS = {polish_fold(w) for w in POLISH_UI} | {
 _UI_DIALOGUE_WORDS = None
 
 
+# podpowiedzi przycisków GTA (warsztat, kamera, tryb foto) doklejane do dialogu: „Dobra. Jak nówka. ZOOM L
+# Pierwsza osoba ElE RUSZAJ KAMERĄ” — wycinane razem ze skrótami przycisków obok
+# wielowyrazowe podpowiedzi — w każdej wielkości liter; pojedyncze czasowniki tylko WIELKIMI
+# („Wróć do domu, Franklin.” to dialog, „WRÓĆ” to przycisk)
+_HUD_PROMPTS = re.compile(
+    r"(?<!\w)(?:(?i:pierwsza osoba|trzecia osoba|ruszaj kamerą|obróć kamerę|zmień widok|ukryj menu|pokaż menu)"
+    r"|ZOOM|PRZEGLĄDAJ|WRÓĆ|WYBIERZ|KUP|ZAMONTUJ|OBRÓĆ)(?!\w)"
+)
+_SHORT_PL = {
+    "a", "i", "o", "u", "w", "z", "ze", "we", "na", "do", "to", "ta", "te", "ty", "tu", "ja", "mi", "ci", "go",
+    "mu", "nie", "tak", "juz", "sie", "co", "czy", "no", "oj", "ej", "hej", "ale", "bo", "ze", "by", "od", "po",
+    "za", "pod", "nad", "ma", "mam", "ich", "nas", "was", "on", "ona", "ono", "oni", "one", "tez", "raz", "dwa",
+    "jak", "tam", "sam", "kto", "gdy", "bez", "dla", "lub", "ani", "ok", "hm", "ach", "och", "ech",
+}
+
+
+def strip_hud_prompts(text):
+    raw = normalize_text(text)
+    if not _HUD_PROMPTS.search(raw):
+        return raw
+    out = _HUD_PROMPTS.sub(" ", raw)
+    # skróty przycisków i śmieci obok podpowiedzi („L”, „ElE”, „C”, „mil”, „!!”)
+    words = [w for w in out.split() if polish_fold(w) in _SHORT_PL or not re.fullmatch(r"[^\s]{0,3}", w)]
+    return normalize_text(" ".join(words))
+
+
 def looks_like_game_ui(text):
     """Czy odczyt to element interfejsu gry, a nie kwestia postaci (wtedy lektor go pomija)."""
     global _UI_DIALOGUE_WORDS
@@ -4169,7 +4212,13 @@ class Engine:
         self.omni_pack = str(self.cfg.get("omniPack") or (packs[0] if packs else ""))
         # jest voicepack z VoiceStudio — domyślnie on (naturalniejszy); wybór w „Więcej” → Głos
         default = "voicestudio" if packs else "supertonic"
-        self.lektor_engine = self.cfg.get("lektorEngine") if self.cfg.get("lektorEngine") in ("supertonic", "voicestudio") else default
+        # wybór z „Więcej” obowiązuje; stary zapis bez wyboru użytkownika (sprzed voicepacka) — nie
+        self.lektor_engine = (
+            self.cfg.get("lektorEngine")
+            if self.cfg.get("lektorEngineChosen") and self.cfg.get("lektorEngine") in ("supertonic", "voicestudio")
+            else default
+        )
+        self._engine_chosen = bool(self.cfg.get("lektorEngineChosen"))
         self._sync_voice()
         self.translator = ArgosTranslator()
         self.stt = ParakeetSTT()
@@ -4389,6 +4438,7 @@ class Engine:
                 "gta6Added": True,
                 "lektorVoice": self.lektor.voice,
                 "lektorEngine": self.lektor_engine,
+                "lektorEngineChosen": getattr(self, "_engine_chosen", False),
                 "omniPack": self.omni_pack,
             }
         )
@@ -4417,6 +4467,7 @@ class Engine:
             self.lektor_volume = max(0, min(100, int(data["lektorVolume"])))
         if data.get("lektorEngine") in ("supertonic", "voicestudio"):
             self.lektor_engine = data["lektorEngine"]
+            self._engine_chosen = True
             self._cloud_error_shown = ""
             if self.lektor_engine == "voicestudio" and not self.omni_pack and voicepacks():
                 self.omni_pack = voicepacks()[0]
@@ -5483,9 +5534,16 @@ class Engine:
             if not usable_ocr(src) or is_player_ui_text(src):
                 return
         src = trim_ocr_edges(src)
+        unhud = strip_hud_prompts(src)
+        if unhud != normalize_text(src):
+            self._log_junk(src, f"wycinam podpowiedzi przycisków: {src[:70]!r} -> {unhud[:70]!r}")
+            src = trim_ocr_edges(unhud)
+            if not usable_ocr(src) or not re.search(r"[a-ząćęłńóśźż]{2}", src):
+                return
         lead = getattr(self, "_lead_junk", None)
         if lead is None:
-            lead = self._lead_junk = RecurringLead()
+            store = CACHE_DIR / "lead_junk.json" if hasattr(self, "lektor") else None  # testy bez zapisu
+            lead = self._lead_junk = RecurringLead(store=store)
         lead.observe(src)
         unled = lead.strip(src)
         if unled != normalize_text(src):
