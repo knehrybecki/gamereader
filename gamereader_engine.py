@@ -19,9 +19,10 @@ import numpy as np
 from PIL import Image
 
 try:
-    from lektor_brain import LektorBrain, brain_supported
+    from lektor_brain import HEAVY_IMPORT_LOCK, LektorBrain, brain_supported
 except Exception:  # starsza paczka bez modułu — lektor działa na samych regułach
     LektorBrain = None
+    HEAVY_IMPORT_LOCK = threading.RLock()
 
     def brain_supported():
         return False
@@ -2582,6 +2583,12 @@ class ArgosTranslator:
         self._lock = threading.Lock()
 
     def ensure(self):
+        if self._fn is not None:
+            return
+        with HEAVY_IMPORT_LOCK:
+            self._ensure()
+
+    def _ensure(self):
         if self._fn is not None:
             return
         import argostranslate.package as argos_package

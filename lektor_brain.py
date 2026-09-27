@@ -29,6 +29,10 @@ import threading
 import time
 from collections import OrderedDict, deque
 
+# ciężkie biblioteki (torch przez transformers/argostranslate) importowane naraz z dwóch wątków
+# kończą się „deadlock detected by _ModuleLock('torch…')” — ładowanie modeli idzie po kolei
+HEAVY_IMPORT_LOCK = threading.RLock()
+
 BRAIN_MODEL = "mlx-community/Qwen3.5-4B-4bit"
 BRAIN_MIN_RAM_GB = 16
 # zlecenie starsze niż tyle sekund jest już nieaktualne (napis zniknął) — przepada
@@ -204,6 +208,10 @@ class LektorBrain:
             return False
 
     def _load(self):
+        with HEAVY_IMPORT_LOCK:
+            self._load_unlocked()
+
+    def _load_unlocked(self):
         import mlx.core as mx
         from huggingface_hub import snapshot_download
         from mlx_lm import load
