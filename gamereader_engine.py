@@ -685,7 +685,7 @@ PREROLL_SEC = 0.25
 AUDIO_SUBTITLE_MARGIN = 0.5
 AUDIO_MIN_SPEECH_SEC = 0.8
 # radio w grze: śpiew trzyma równe nuty (mowa: 0,00–0,31 wysokości „stałej”, śpiew 0,76–1,00),
-# a DJ i reklamy grają na podkładzie — wypowiedź bez żadnej pauzy aż do limitu długości
+# (dźwięk bez pauzy — muzyka w lokalu — idzie do rozpoznania; DJ i reklamy odsiewa model decyzji)
 AUDIO_SUNG_MAX = 0.55
 BRAIN_RADIO_P = 0.5
 # kwestia NPC bez napisu tłumaczona, gdy ważna dla gracza (policja, ostrzeżenie), nie gadanie przechodniów
@@ -4668,10 +4668,10 @@ class Engine:
             return False
         if voiced_fraction(audio) < AUDIO_MIN_VOICED:
             return False
-        # radio w grze: podkład bez żadnej pauzy (DJ, reklamy) albo śpiew — nie tłumaczymy
+        # dźwięk bez żadnej pauzy (muzyka w lokalu, radio): postać może mówić na tle muzyki (fryzjer,
+        # sklep) — nie odrzucamy na ślepo; tekst piosenki, DJ i reklamy odsiewa potem model decyzji
         if audio.size / float(SAMPLE_RATE) >= MAX_SPEECH_SEC - 0.05:
-            self._log_radio("bez pauzy — podkład radia albo muzyka")
-            return False
+            return True
         sung = sung_fraction(audio)
         if sung >= AUDIO_SUNG_MAX:
             self._log_radio(f"śpiew ({sung:.2f})")
