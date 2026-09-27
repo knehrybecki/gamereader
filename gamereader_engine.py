@@ -680,9 +680,12 @@ def _plate_word(word):
         return True  # sam znak interpunkcji / śmieć OCR
     if _PLATE_CODE.fullmatch(word.strip(".,:;!?")) or re.fullmatch(r"[A-ZĄĆĘŁŃÓŚŹŻËÑ]{2,4}[^\w\s]*\w{0,3}", word):
         return True
-    if fold in ("san", "sen", "sea", "saa") or re.fullmatch(r"\d{2,4}", fold or word):
+    if fold in _SAN_LIKE or re.fullmatch(r"\d{2,4}", fold or word):
         return True
     return len(fold) >= 5 and SequenceMatcher(None, fold, "andreas", autojunk=False).ratio() >= 0.75
+
+
+_SAN_LIKE = ("san", "sen", "sea", "saa", "sn", "sas")
 
 
 def _andreas_like(word):
@@ -696,12 +699,47 @@ def _plate_context(raw):
         return True
     words = raw.split()
     for i, word in enumerate(words):
+        after_san = i > 0 and polish_fold(words[i - 1]) in _SAN_LIKE
+        if after_san and len(polish_fold(word)) >= 4 and SequenceMatcher(
+            None, polish_fold(word), "andreas", autojunk=False
+        ).ratio() >= 0.5:
+            return True  # „San Andirce EIG”: po „San” wystarczy luźne podobieństwo
         if not _andreas_like(word):
             continue
         near = words[max(0, i - 1) : i] + words[i + 1 : i + 2]
         if any(polish_fold(w) in ("san", "sen", "sea", "saa", "sn") or re.fullmatch(r"[A-ZËÑ]{3,4}\W*", w) for w in near):
             return True
     return False
+
+
+_CAPS = "A-ZĄĆĘŁŃÓŚŹŻ"
+_JUNK_TOKEN = re.compile(
+    rf"^(?:[{_CAPS}][{_CAPS}.\-]+|[A-Za-ząćęłńóśźż{_CAPS}]*[a-ząćęłńóśźż][{_CAPS}][A-Za-ząćęłńóśźż{_CAPS}]*)[^\w\s]*$"
+)
+# skróty, które padają w dialogach GTA — nie są śmieciem z HUD
+_REAL_CAPS = {"ok", "fbi", "lspd", "noose", "iaa", "cia", "usa", "gta", "nie", "tak", "hej", "stoj", "dea", "lsd", "tv"}
+
+
+def strip_lead_junk(text):
+    """Śmieć z HUD przed napisem: 1–2 słowa WIELKIMI literami (też z „.”/„-”) albo z wielką literą w środku,
+    a za nimi zwykłe zdanie („PANCE Wątpię, bo…”, „PE BICE Może…”, „tANG Więc…”) — zostaje samo zdanie."""
+    raw = normalize_text(text)
+    words = raw.split()
+    cut = 0
+    while cut < min(2, len(words) - 1) and _JUNK_TOKEN.match(words[cut]) and polish_fold(words[cut]) not in _REAL_CAPS:
+        cut += 1
+    if not cut or len(polish_fold("".join(words[:cut]))) < 4:
+        return raw
+    if not re.match(rf"[-–„\"]?[{_CAPS}][a-ząćęłńóśźż]", words[cut]):
+        return raw
+    out = " ".join(words[cut:])
+    return out if len(polish_fold(out)) >= 4 else raw
+
+
+def lone_hud_word(text):
+    """Sam śmieć z HUD bez napisu: jedno słowo WIELKIMI literami bez interpunkcji („MARNE”, „PANCE”)."""
+    raw = normalize_text(text)
+    return bool(re.fullmatch(rf"[{_CAPS}][{_CAPS}.\-]{{3,8}}", raw)) and polish_fold(raw) not in _REAL_CAPS
 
 
 def strip_plate(text):
@@ -712,7 +750,10 @@ def strip_plate(text):
     if not _plate_context(raw):
         return raw
     start, end = 0, len(words)
-    while start < end and _plate_word(words[start]):
+    while start < end and (
+        _plate_word(words[start])
+        or (start > 0 and polish_fold(words[start - 1]) in _SAN_LIKE and not looks_polish(words[start]))
+    ):
         start += 1
     while end > start and _plate_word(words[end - 1]):
         end -= 1
@@ -774,7 +815,8 @@ class RecurringFragments:
                     continue
                 other = "".join(prev[:j] + prev[j + n :])
                 # początek przekręcony przez OCR („Jebany pedał”/„ebar, perlat”) to ta sama kwestia
-                if len(other) >= 6 and not (head and self._alike(other, head)) and not any(
+                # krótki początek (śmieć z HUD + jedno słowo: „tANG Więc”) nie świadczy o innej kwestii
+                if len(other) >= 12 and not (head and self._alike(other, head)) and not any(
                     self._alike(other, seen) for seen in others
                 ):
                     others.append(other)
@@ -4370,6 +4412,12 @@ class Engine:
             # albo sam koniec (napis znika po kawałku): „dom”, „dornu.” po „Dostań się do domu.”
             if words and len(words) <= 3 and len(words) < len(said) and _tail_like(words, said[-len(words):]):
                 return True
+            # ta sama kwestia z doklejonym z brzegu śmieciem (tablica, HUD): „Sas hadrres Przy bani masz…”
+            extra = len(words) - len(said)
+            if len(said) >= 3 and 0 < extra <= 3 and (
+                _tail_like(words[-len(said):], said) or _tail_like(words[: len(said)], said)
+            ):
+                return True
         return False
 
     def _mark_spoken(self, text):
@@ -4987,6 +5035,13 @@ class Engine:
             self._log_junk(src, f"pomijam — tablica rejestracyjna: {src[:70]!r}")
             self._remember_junk(src)
             return
+        if self._pl_subs_active and lone_hud_word(src):
+            self._log_junk(src, f"pomijam — samo słowo z HUD: {src[:70]!r}")
+            return
+        unjunked = strip_lead_junk(src)
+        if unjunked != normalize_text(src):
+            self._log_junk(src, f"wycinam śmieć przed napisem: {src[:70]!r} -> {unjunked[:70]!r}")
+            src = unjunked
         unplated = strip_plate(src)
         if unplated != normalize_text(src):
             self._log_junk(src, f"wycinam tablicę rejestracyjną: {src[:70]!r} -> {unplated[:70]!r}")
