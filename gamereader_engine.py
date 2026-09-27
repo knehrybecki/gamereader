@@ -139,6 +139,9 @@ def ocr_twins(a, b):
     return True
 
 
+_MIXED_CASE = re.compile(r"[a-ząćęłńóśźż][A-ZĄĆĘŁŃÓŚŹŻ]")
+
+
 def _tail_like(words, tail):
     """Urywek końca kwestii przeczytany przez OCR z literówkami („dornu” = „domu”, „dom” = ucięte „domu”)."""
     for got, want in zip(words, tail):
@@ -819,6 +822,10 @@ CATCH_UP_STALE_SEC = 2.0
 # wypada pierwsza — jak u lektora TV.
 BRAIN_JUNK_P = 0.10
 BRAIN_ODD_WAIT = 0.6
+# cel misji i dłuższy napis wiszą na ekranie po 7–10 s, a OCR czyta je znów po mignięciu — dłuższa
+# kwestia jest pamiętana dłużej niż krótkie „Nie.”/„Co?”, które w rozmowie padają kilka razy
+SPOKEN_LONG_FOLD = 12
+SPOKEN_LONG_HOLD_SEC = 20.0
 # słowa napisów odrzuconych przez model (szyld, nazwa ulicy) — ich warianty z OCR odpadają od razu
 JUNK_MEMORY_SEC = 90.0
 BRAIN_SUSPECT_P = 0.35
@@ -4323,7 +4330,8 @@ class Engine:
         now = time.monotonic()
         if any(now < exp and folds_match(key, fold) for key, exp in self._spoken_folds.items()):
             return True
-        words = _fold_words(text)
+        # słowo z WIELKĄ literą w środku („MaJEZ”, „weiSe”) to śmieć OCR — nie liczy się do porównania
+        words = [w for w in _fold_words(" ".join(t for t in text.split() if not _MIXED_CASE.search(t)))]
         for spoken, exp in getattr(self, "_spoken_texts", {}).items():
             if now >= exp:
                 continue
@@ -4345,7 +4353,10 @@ class Engine:
         if not fold:
             return
         self._prune_spoken()
-        self._spoken_folds[fold] = time.monotonic() + float(self.speak_cooldown or 5.5)
+        hold = float(self.speak_cooldown or 5.5)
+        if len(fold) >= SPOKEN_LONG_FOLD:
+            hold = max(hold, SPOKEN_LONG_HOLD_SEC)
+        self._spoken_folds[fold] = time.monotonic() + hold
         texts = getattr(self, "_spoken_texts", None)
         if texts is None or len(texts) > 32:
             texts = self._spoken_texts = {}
