@@ -737,6 +737,10 @@ class RecurringFragments:
         n = len(run)
         return next((i for i in range(len(seq) - n + 1) if seq[i : i + n] == run), -1)
 
+    @staticmethod
+    def _alike(a, b):
+        return a in b or b in a or SequenceMatcher(None, a, b, autojunk=False).ratio() >= 0.5
+
     def strip(self, text):
         words = normalize_text(text).split()
         toks = [(i, polish_fold(w)) for i, w in enumerate(words)]
@@ -746,14 +750,17 @@ class RecurringFragments:
         for n in range(len(seq), self.MIN_WORDS - 1, -1):
             run = seq[-n:]
             head = "".join(seq[:-n])
-            others = set()
+            others = []
             for prev in self.recent:
                 j = self._find_run(prev, run)
                 if j < 0:
                     continue
                 other = "".join(prev[:j] + prev[j + n :])
-                if len(other) >= 6 and not (head and (other in head or head in other)):
-                    others.add(other)
+                # początek przekręcony przez OCR („Jebany pedał”/„ebar, perlat”) to ta sama kwestia
+                if len(other) >= 6 and not (head and self._alike(other, head)) and not any(
+                    self._alike(other, seen) for seen in others
+                ):
+                    others.append(other)
             if len(others) >= 2:
                 cut = toks[-n][0]
                 break
