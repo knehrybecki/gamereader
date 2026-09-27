@@ -517,6 +517,11 @@ def ocr_reading_rank(text):
         if any(ch in PL_MARK for ch in word):
             score += 2
     score -= 14 * ocr_junk_count(raw)
+    # „Dobrał Idź”, „Kurwal Jebany” — OCR zrobił z „!” literę ł/l; wariant z „!” jest lepszy
+    known = lambda fold: fold in table or fold in _POLISH_BY_FOLD
+    for word, tail in re.findall(r"([A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]{3,})([łl])\.?(?=\s+[A-ZĄĆĘŁŃÓŚŹŻ])", raw):
+        if known(polish_fold(word)) or not known(polish_fold(word + tail)):
+            score -= 4
     return score
 
 
@@ -526,7 +531,8 @@ def ocr_reading_unsettled(text):
     if ocr_junk_count(raw):
         return True
     words = re.findall(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+", raw)
-    if any(len(word) == 1 for word in words):
+    # „O kurwa!”, „A ty?”, „W porządku.” — jednoliterowe polskie słowa to nie zlepek OCR
+    if any(len(word) == 1 and word.lower() not in "aiouwz" for word in words):
         return True
     table = _pl_diacritics()
     long = [polish_fold(word) for word in words if len(word) >= 6]
@@ -811,6 +817,27 @@ def strip_lead_junk(text):
         return raw
     out = " ".join(words[cut:])
     return out if len(polish_fold(out)) >= 4 else raw
+
+
+def strip_known_prefix(text, known):
+    """1–3 słowa śmieci z kadru przed znaną już kwestią („Ubermach Tam! Tam!…”, „są Andrese KRYSTEL
+    Jeśli…”) — zostaje sama kwestia. None, gdy tekst nie jest znaną kwestią z doklejonym przodem."""
+    words = normalize_text(text).split()
+    want = polish_fold(known or "")
+    if len(want) < 8:
+        return None
+    whole = SequenceMatcher(None, polish_fold(text), want, autojunk=False).ratio()
+    for cut in range(1, min(3, len(words) - 1) + 1):
+        if re.search(r"[.!?…,:;]$", words[cut - 1]):
+            break  # „Dasz radę. Jak będzie…” — przód to zdanie kwestii, nie śmieć z kadru
+        tail = " ".join(words[cut:])
+        if not re.match(rf"[-–„\"]?[{_CAPS}]", tail):
+            continue
+        got = polish_fold(tail)
+        ratio = SequenceMatcher(None, got, want, autojunk=False).ratio()
+        if abs(len(got) - len(want)) <= max(3, len(want) // 8) and ratio >= 0.88 and ratio > whole + 0.04:
+            return tail
+    return None
 
 
 def lone_hud_word(text):
@@ -3920,6 +3947,7 @@ class Engine:
         self._spec_item = None
         self._spec_event = threading.Event()
         self._spec_busy = None
+        self._spec_key, self._spec_rank, self._spec_redo = "", -1, 0
         self._spec_done = threading.Condition()
         self._seen_at = {}
         self.line_q = queue.Queue()
@@ -4946,15 +4974,34 @@ class Engine:
     def _speculate_candidate(self, src, fresh):
         """Czekamy na potwierdzenie napisu — w tym czasie lektor syntezuje najlepszy dotąd odczyt.
         Poprawiony odczyt syntezuje się ponownie tylko, gdy jest czysty (bez zlepków i śmieci)."""
+        if fresh:
+            self._spec_redo, self._spec_rank = 0, -1
         key = strip_fillers(src)
         if not key or len(key) < 6 or key == getattr(self, "_spec_key", ""):
             return
+        # zlepek („altanval Jebany silniki”) albo gorsza powtórka właśnie czytanej kwestii („Z blisko!”
+        # po „Za blisko!”) — synteza poszłaby do kosza
+        if ocr_reading_unsettled(src) or self._like_spoken(key):
+            return
         rank = ocr_reading_rank(src)
-        if not fresh and rank <= getattr(self, "_spec_rank", -1):
-            return  # równie dobry wariant („stary” / „stary.”) — zostaje dźwięk, który już się robi
+        if rank < self._spec_rank or self._spec_redo >= 2:
+            return  # gorszy wariant albo już dwie poprawki — CPU zostaje dla gry, lektor syntezuje po zatwierdzeniu
+        if not fresh:
+            self._spec_redo += 1
         self._spec_key, self._spec_rank = key, rank
         self._seen_at.setdefault(key, getattr(self, "_ocr_started", time.monotonic()))
+        if getattr(self, "brain", None) is not None:
+            self.brain.check(key)  # ocena modelu gotowa, zanim lektor zacznie — bez czekania 0,15 s
         self._speculate(key, should_translate(src))
+
+    def _like_spoken(self, text):
+        fold = polish_fold(text)
+        now = time.monotonic()
+        spoken = [t for t, exp in getattr(self, "_spoken_texts", {}).items() if exp > now]
+        spoken.append(getattr(self, "speaking_text", "") or "")
+        return any(
+            t and SequenceMatcher(None, fold, polish_fold(t), autojunk=False).ratio() >= 0.8 for t in spoken
+        )
 
     def _speculate(self, src, translate):
         """Zacznij tłumaczyć i syntezować napis od pierwszego odczytu (najnowszy wygrywa)."""
@@ -5175,6 +5222,7 @@ class Engine:
                 return
         if not usable_ocr(src):
             return
+        src = self._strip_known_prefix(src)
         self._last_subtitle_seen = time.monotonic()
         now = time.monotonic()
         base = self.speaking_full or self.last_full
@@ -5235,11 +5283,10 @@ class Engine:
                 self._seen_at.setdefault(key, now)
         self._ocr_samples = samples
         if samples:
-            # przy remisie wygrywa wariant, który lektor już syntezuje, potem późniejsza klatka
-            spec_key = getattr(self, "_spec_key", "")
+            # przy remisie wygrywa wariant czytany najczęściej („klama” ×6 nad „klarna” ×2), potem
+            # późniejsza klatka — pierwsza bywa najgorsza
             self._ocr_candidate = max(
-                enumerate(samples),
-                key=lambda item: (ocr_reading_rank(item[1]), strip_fillers(item[1]) == spec_key, item[0]),
+                enumerate(samples), key=lambda item: (ocr_reading_rank(item[1]), samples.count(item[1]), item[0])
             )[1]
         self._ocr_candidate_at = now
         src = self._ocr_candidate
@@ -5277,6 +5324,24 @@ class Engine:
                 )
             self._pl_subs_at = now
         self._offer_line(src, translate)
+
+    def _strip_known_prefix(self, src):
+        """Śmieć z kadru doklejony przed kwestią, którą OCR już widział czysto — wycięty. Gdy to czekający
+        napis miał doklejony przód, a teraz przyszedł czysty odczyt — próbki też tracą ten przód."""
+        now = time.monotonic()
+        known = [self._ocr_candidate, *(getattr(self, "_ocr_samples", None) or []), getattr(self, "speaking_text", "") or ""]
+        known += [text for text, exp in getattr(self, "_spoken_texts", {}).items() if exp > now]
+        for line in known:
+            tail = strip_known_prefix(src, line) if line else None
+            if tail:
+                self._log_junk(src, f"wycinam śmieć przed znaną kwestią: {src[:70]!r} -> {tail[:70]!r}")
+                return tail
+        samples = getattr(self, "_ocr_samples", None) or []
+        cleaned = [strip_known_prefix(sample, src) or sample for sample in samples]
+        if cleaned != samples:
+            self._ocr_samples = cleaned
+            self._ocr_candidate = strip_known_prefix(self._ocr_candidate, src) or self._ocr_candidate
+        return src
 
     def _flush_candidate(self):
         """Czysty napis przeczytany raz, a w następnej klatce już HUD / śmieć / pusto („Zabieraj stąd

@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from gamereader_engine import (
     Engine, RecurringFragments, strip_lead_junk, screen_junk_level, same_utterance, ocr_reading_rank,
     trim_ocr_edges, condense_polish, lektor_speed_split, LEKTOR_MAX_RATE, LEKTOR_MAX_STRETCH,
+    strip_known_prefix, ocr_reading_unsettled, repair_polish_ocr,
 )
 
 
@@ -222,6 +223,31 @@ class SubtitleFiltersTest(unittest.TestCase):
         with patch("gamereader_engine.time.monotonic", return_value=30.60):
             engine._flush_candidate()
         engine._offer_line.assert_not_called()
+
+    def test_frame_junk_before_known_line_is_cut(self):
+        # sesja 15:15–15:17: napis z doklejonym z kadru przodem
+        self.assertEqual(strip_known_prefix("Ubermach Tam! Tam! To moja łódź!", "Tam! Tam! To moja łódź!"),
+                         "Tam! Tam! To moja łódź!")
+        self.assertEqual(
+            strip_known_prefix("są Andrese KRYSTEL Jeśli mam to zrobić, to musisz podjechać bliżej.",
+                               "Jeśli mam to zrobić, to musisz podjechać bliżej."),
+            "Jeśli mam to zrobić, to musisz podjechać bliżej.")
+        # pierwsze zdanie kwestii to nie śmieć, nawet gdy pierwszy odczyt był ucięty
+        self.assertIsNone(strip_known_prefix(
+            "Dasz radę. Jak będzie gorąco, to w schowku jest klamna. Będę cię ostaniał.",
+            "Jasz radę. Jak będzie gorąco, to w schowku jest klama. Będę cię"))
+
+    def test_one_letter_polish_words_are_settled(self):
+        self.assertFalse(ocr_reading_unsettled("O kurwa!"))
+        self.assertFalse(ocr_reading_unsettled("O nie, to ty wybrałeś złą łajbę."))
+
+    def test_exclamation_read_as_l_loses(self):
+        self.assertGreater(ocr_reading_rank("Dobra! Idź, znajdź Jimmy'ego!"), ocr_reading_rank("Dobrał Idź, znajdź Jimmy'ego!"))
+        self.assertGreater(ocr_reading_rank("Tylko nie silnik! Kurwa! Jebany silnik!"),
+                           ocr_reading_rank("Tylko nie silnik! Kurwal Jebany silnik!"))
+
+    def test_scigaj_gets_its_accent(self):
+        self.assertEqual(repair_polish_ocr("Scigaj jacht."), "Ścigaj jacht.")
 
     def test_catchup_pace_stays_intelligible(self):
         # pace jak przy doganianiu z sesji 13:48 (boost 1,40, tts 0,92, żywy głos)
