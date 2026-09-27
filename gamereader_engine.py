@@ -1253,8 +1253,8 @@ _SOFT_WORDS = (
     "przepraszam", "kocham", "tęsknię", "żegnaj", "cicho", "szepnij", "spokojnie", "przykro",
     "nie żyje", "umarł", "umarła", "pogrzeb",
 )
-# 5 kroków dyfuzji: ~30% szybciej niż domyślne 8, wymowa bez zmian
-SUPERTONIC_STEPS = 5
+# 8 kroków dyfuzji: mniej robotycznie niż 5 (sesja 27.09: 12 najlepsze, 8 = kompromis z czasem syntezy ~+55%)
+SUPERTONIC_STEPS = 8
 # tempo lektora (parametr speed Supertonic przy zwykłej kwestii; było 1,05)
 LEKTOR_SPEED = 1.10
 # najszybsze tempo samego modelu — powyżej Supertonic bełkocze (1,5 → 15 % słów źle rozpoznanych)
@@ -2939,7 +2939,7 @@ class MaleLektor:
         # volume 0…1 (suwak 0–100 %); 100 % = 1,3× — limiter i tak nie przepuści przesteru
         gain = 1.3 * max(0.0, min(1.0, float(volume))) * params["gain"] * punct_gain
         cloud = self.cloud
-        voice_tag = f"el1|{cloud.voice}" if cloud is not None and time.monotonic() >= cloud.failed_until else f"st14|{self.voice}"
+        voice_tag = f"el1|{cloud.voice}" if cloud is not None and time.monotonic() >= cloud.failed_until else f"st15|{self.voice}"
         key = f"{voice_tag}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
         path = CACHE_DIR / f"{text_key(key)}.wav"
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -2951,7 +2951,7 @@ class MaleLektor:
         if voice_tag.startswith("el"):
             stretch = self._synth_cloud(cloud, text, raw, pace, pause)
             if stretch is None:
-                path = CACHE_DIR / f"{text_key(key.replace(voice_tag, f'st14|{self.voice}', 1))}.wav"
+                path = CACHE_DIR / f"{text_key(key.replace(voice_tag, f'st15|{self.voice}', 1))}.wav"
                 if path.exists() and path.stat().st_size >= 64:
                     return path
         filt = LEKTOR_CLOUD_FILTER if stretch is not None else LEKTOR_FILTER
