@@ -41,6 +41,9 @@ POLL_MS = 80
 MIN_INTERVAL = 0.10
 DEFAULT_INTERVAL = 0.14
 OCR_CONFIRM_FRAMES = 2
+# Pierwsza klatka długiego napisu w grze bywa najgorsza („spontanfcznego…”).
+# Czekamy chwilę i bierzemy najlepszy odczyt, zanim lektor go zatwierdzi.
+OCR_SETTLE_SEC = 0.65
 
 
 def extends_utterance(prev, nxt):
@@ -494,7 +497,54 @@ _OCR_FOREIGN = re.compile(r"[\u0300-\u036f\u1e00-\u1eff\u0100-\u0103\u0108-\u010
 def ocr_junk_count(text):
     """Ile śmieci OCR w tekście: obce litery i ciągi cudzysłowów („' ' '”) — do wyboru lepszego odczytu."""
     raw = text or ""
-    return len(_OCR_FOREIGN.findall(raw)) + 2 * len(re.findall(rf"{_QUOTE_CLASS}(?:\s*{_QUOTE_CLASS})+", raw))
+    foreign = sum(1 for ch in raw if ch.isalpha() and ch not in PL_MARK and ord(ch) > 127)
+    return foreign + len(_OCR_FOREIGN.findall(raw)) + 2 * len(re.findall(rf"{_QUOTE_CLASS}(?:\s*{_QUOTE_CLASS})+", raw))
+
+
+def ocr_reading_rank(text):
+    """Wyższy wynik = odczyt bliższy prawdziwemu polskiemu napisowi (słownik, bez åøé)."""
+    raw = normalize_text(text)
+    if not raw:
+        return -1
+    table = _pl_diacritics()
+    score = 0
+    for word in re.findall(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+", raw):
+        fold = polish_fold(word)
+        if fold in table or fold in _POLISH_BY_FOLD:
+            score += 12
+        if any(ch in PL_MARK for ch in word):
+            score += 2
+    score -= 14 * ocr_junk_count(raw)
+    return score
+
+
+def ocr_reading_unsettled(text):
+    """Pierwsza klatka długiego napisu jest często najgorsza — warto poczekać na następną."""
+    raw = normalize_text(text)
+    if ocr_junk_count(raw):
+        return True
+    words = [polish_fold(w) for w in re.findall(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+", raw) if len(w) >= 6]
+    if len(words) < 3:
+        return False
+    table = _pl_diacritics()
+    known = sum(1 for fold in words if fold in table or fold in _POLISH_BY_FOLD)
+    return known * 2 < len(words)
+
+
+def ocr_same_flicker(a, b):
+    """Dwa rozmazane odczyty tej samej kwestii, których same_utterance jeszcze nie łączy."""
+    if same_utterance(a, b):
+        return True
+    if not (ocr_reading_unsettled(a) and ocr_reading_unsettled(b)):
+        return False
+    left, right = _fold_words(a), _fold_words(b)
+    if min(len(left), len(right)) < 3:
+        return False
+
+    def stems(words):
+        return {word[:6] for word in words if len(word) >= 6}
+
+    return len(stems(left) & stems(right)) >= 1
 
 
 def strip_ocr_quotes(text):
@@ -4473,7 +4523,12 @@ class Engine:
         """Dodaj kwestię na koniec kolejki. Nic nie przepada, dopóki kolejka się nie przepełni."""
         src = item[0]
         with self.pending_lock:
-            if any(same_utterance(src, queued[0]) for queued in self._queue):
+            for index, queued in enumerate(self._queue):
+                if not same_utterance(src, queued[0]):
+                    continue
+                # lektor jeszcze tego nie mówi — podmień na czystszy odczyt tej samej kwestii
+                if ocr_reading_rank(src) > ocr_reading_rank(queued[0]):
+                    self._queue[index] = (src, queued[1], src)
                 return
             last = self._queue[-1] if self._queue else None
             if last and (extends_utterance(last[0], src) or (last[2] != last[0] and extends_utterance(last[2], item[2]))):
@@ -5105,6 +5160,7 @@ class Engine:
             self.subtitle_until = now + 2.5
             self._ocr_candidate = ""
             self._ocr_candidate_n = 0
+            self._ocr_samples = []
             return
         # czekaj, aż napis przestanie się zmieniać (pisanie literka po literce, druga linia)
         need = max(1, int(getattr(self, "confirm_frames", OCR_CONFIRM_FRAMES)))
@@ -5115,12 +5171,22 @@ class Engine:
             # dostać wysoką ocenę modelu. Wymagaj drugiego odczytu (~150 ms),
             # zamiast czytać pojedynczą błędną klatkę.
             need = max(2, need)
+        samples = getattr(self, "_ocr_samples", None) or []
+        started = getattr(self, "_ocr_started", 0.0)
         if (self._ocr_candidate and now - getattr(self, "_ocr_candidate_at", -1e9) < 0.6
                 and same_utterance(src, self._ocr_candidate) and not extends_utterance(self._ocr_candidate, src)):
             self._ocr_candidate_n += 1
+            samples.append(src)
+        elif (samples and now - started < OCR_SETTLE_SEC and ocr_same_flicker(src, self._ocr_candidate)
+                and not extends_utterance(self._ocr_candidate, src)):
+            # „z mógł kantować…” i „Wtedy będziesz mógł kantować…” to nadal ta sama klatka
+            self._ocr_candidate_n += 1
+            samples.append(src)
         else:
+            samples = [src]
             self._ocr_candidate = src
             self._ocr_candidate_n = 1
+            self._ocr_started = now
             key = strip_fillers(src)
             if key:
                 if len(self._seen_at) > 32:
@@ -5129,12 +5195,20 @@ class Engine:
                 # zanim OCR potwierdzi napis, lektor już go tłumaczy i syntezuje
                 if need > 1 and len(key) >= 6:
                     self._speculate(key, should_translate(src))
+        self._ocr_samples = samples
+        if samples:
+            self._ocr_candidate = max(samples, key=ocr_reading_rank)
         self._ocr_candidate_at = now
         if self._ocr_candidate_n < need:
             return
         src = self._ocr_candidate
+        # długa rozmazana kwestia: nie zatwierdzaj pierwszej klatki, poczekaj na czystszą
+        if (self._source_kind() != "chrome" and len(src) >= 24 and ocr_reading_unsettled(src)
+                and now - getattr(self, "_ocr_started", now) < OCR_SETTLE_SEC):
+            return
         self._ocr_candidate = ""
         self._ocr_candidate_n = 0
+        self._ocr_samples = []
         self.last_subtitle = src
         self.last_key = text_key(src)
         self.subtitle_until = now + 2.5

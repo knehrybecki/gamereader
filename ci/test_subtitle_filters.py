@@ -5,7 +5,9 @@ from unittest.mock import Mock, patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from gamereader_engine import Engine, RecurringFragments, strip_lead_junk, screen_junk_level, same_utterance
+from gamereader_engine import (
+    Engine, RecurringFragments, strip_lead_junk, screen_junk_level, same_utterance, ocr_reading_rank,
+)
 
 
 class SubtitleFiltersTest(unittest.TestCase):
@@ -74,6 +76,65 @@ class SubtitleFiltersTest(unittest.TestCase):
 
     def test_menu_from_live_log_is_rejected(self):
         self.assertEqual(screen_junk_level("PRZEGLĄDAJ L R UKRYJ MENU"), "junk")
+
+    def _engine(self):
+        engine = Engine.__new__(Engine)
+        engine.mode = "ocr"
+        engine._pl_subs_at = None
+        engine._source_kind = lambda: "ps"
+        engine._recurring = RecurringFragments()
+        engine.speaking_full = engine.last_full = engine._ocr_candidate = ""
+        engine._ocr_candidate_n = 0
+        engine._ocr_samples = []
+        engine._seen_at = {}
+        engine._sub_prev = None
+        engine.confirm_frames = 1
+        engine._grown_from_recent = lambda *_: None
+        engine._recently_spoken = lambda *_: False
+        engine._speculate = Mock()
+        engine._offer_line = Mock()
+        engine.emit = Mock()
+        return engine
+
+    def test_clean_line_is_read_immediately(self):
+        engine = self._engine()
+        with patch("gamereader_engine.time.monotonic", return_value=10.0):
+            engine._on_subtitle("To się nazywa kapitalizm.")
+        engine._offer_line.assert_called_once_with("To się nazywa kapitalizm.", False)
+
+    def test_blurred_first_frame_waits_for_a_cleaner_reading(self):
+        engine = self._engine()
+        frames = [
+            (10.00, "spontanfcznego ożywienia zwłok, które zaczęły straszyåwezyalich wøköt, takø"),
+            (10.18, "spontanfcznego ozywienia zwłok, które zaczęły straszydwezjafichwkól, taką"),
+            (10.51, "spontanicznego ożywienia zwłok, które zaczęły straszyć wezykich wekö, tak?"),
+        ]
+        for stamp, text in frames:
+            with patch("gamereader_engine.time.monotonic", return_value=stamp):
+                engine._on_subtitle(text)
+        engine._offer_line.assert_not_called()
+        better = "spontanicznego ożywienia zwłok, które zaczęły straszyć wezystich woket, tak?"
+        self.assertGreater(ocr_reading_rank(better), ocr_reading_rank(frames[0][1]))
+        with patch("gamereader_engine.time.monotonic", return_value=10.70):
+            engine._on_subtitle(better)
+        spoken = engine._offer_line.call_args[0][0]
+        self.assertIn("spontanicznego", spoken)
+        self.assertNotIn("spontanf", spoken)
+
+    def test_flickering_variants_are_not_joined_into_one_line(self):
+        engine = self._engine()
+        frames = [
+            (20.00, "z mógł kantować ludzli na tymzarablać. tAredy bedkles"),
+            (20.16, "Wtedy będklesz mógł kantować ludili na tymzarablać."),
+            (20.70, "Wtedy będziesz mógł kantować ludzi i na tym zarabiać."),
+        ]
+        for stamp, text in frames:
+            with patch("gamereader_engine.time.monotonic", return_value=stamp):
+                engine._on_subtitle(text)
+        engine._offer_line.assert_called_once()
+        spoken = engine._offer_line.call_args[0][0]
+        self.assertIn("będziesz", spoken)
+        self.assertNotIn("bedkles", spoken)
 
 
 if __name__ == "__main__":
