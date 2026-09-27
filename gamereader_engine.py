@@ -4035,6 +4035,23 @@ class AppleVisionOcr:
         return score
 
     @staticmethod
+    def _local_min_max(lum, r):
+        """Minimum i maksimum jasności w kwadracie (2r+1)² wokół każdego piksela."""
+        h, w = lum.shape
+        pad = np.pad(lum, r, mode="edge")
+        lo_rows = pad[:, 0:w].copy()
+        hi_rows = lo_rows.copy()
+        for dx in range(1, 2 * r + 1):
+            np.minimum(lo_rows, pad[:, dx : dx + w], out=lo_rows)
+            np.maximum(hi_rows, pad[:, dx : dx + w], out=hi_rows)
+        lo = lo_rows[0:h].copy()
+        hi = hi_rows[0:h].copy()
+        for dy in range(1, 2 * r + 1):
+            np.minimum(lo, lo_rows[dy : dy + h], out=lo)
+            np.maximum(hi, hi_rows[dy : dy + h], out=hi)
+        return lo, hi
+
+    @staticmethod
     def subtitle_mask(frame):
         """Białe/szare litery przy czarnej obwódce lub tle → czarny tekst na białym tle.
         Kolorowe litery i jasne tło bez ciemnego sąsiedztwa nie trafiają do OCR."""
@@ -4054,11 +4071,19 @@ class AppleVisionOcr:
         near_dark = np.zeros((h, w), dtype=bool)
         for dy in range(-r, r + 1):
             near_dark |= rows[r + dy : r + dy + h, :]
-        text &= near_dark
-        share = float(text.mean())
+        strict = text & near_dark
+        share = float(strict.mean())
         # napis to kilka–kilkanaście % pikseli; więcej = jasna scena/tło strony, nie napis
-        if share < 0.003 or share > 0.35:
-            return None
+        if 0.003 <= share <= 0.35:
+            text = strict
+        else:
+            # RDR2 na śniegu/niebie: miękki cień litery nie schodzi poniżej 80 — litera to lokalny
+            # szczyt jasności z wyraźnie ciemniejszym sąsiedztwem (cień), jasne tło samo w sobie odpada
+            lo, hi = AppleVisionOcr._local_min_max(lum, r)
+            text = text & (lum >= hi - 18) & (lo < lum - 95)
+            share = float(text.mean())
+            if share < 0.003 or share > 0.35:
+                return None
         mask = np.where(text, 0, 255).astype(np.uint8)
         image = Image.fromarray(mask).convert("RGB")
         width, height = image.size

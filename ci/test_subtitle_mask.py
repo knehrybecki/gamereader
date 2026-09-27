@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from gamereader_engine import AppleVisionOcr, WindowsOcr
@@ -27,6 +27,21 @@ class SubtitleMaskTest(unittest.TestCase):
     def test_outline_preserves_white_letters_on_bright_scene(self):
         frame = fixture(background=(150, 185, 210))
         self.assertIsNotNone(AppleVisionOcr.subtitle_mask(frame))
+
+    def test_soft_shadow_subtitle_on_snow_survives(self):
+        # RDR2: biały napis z rozmytym cieniem na śniegu — cień nie schodzi poniżej jasności 80
+        image = Image.new('RGB', (600, 120), (222, 222, 222))
+        font = ImageFont.load_default(size=28)
+        shadow = Image.new('L', image.size, 0)
+        ImageDraw.Draw(shadow).text((52, 42), 'Musimy znaleźć schronienie.', font=font, fill=255)
+        alpha = np.asarray(shadow.filter(ImageFilter.GaussianBlur(2))).astype(np.float32)[:, :, None] / 255 * 0.75
+        image = Image.fromarray((np.asarray(image) * (1 - alpha)).astype(np.uint8))
+        ImageDraw.Draw(image).text((50, 40), 'Musimy znaleźć schronienie.', font=font, fill=(245, 245, 245))
+        frame = np.asarray(image)[:, :, ::-1].copy()
+        self.assertIsNotNone(AppleVisionOcr.subtitle_mask(frame))
+
+    def test_plain_snow_is_not_a_subtitle(self):
+        self.assertIsNone(AppleVisionOcr.subtitle_mask(np.full((120, 600, 3), 222, dtype=np.uint8)))
 
     def test_colored_letters_do_not_reach_ocr_or_unfiltered_fallback(self):
         ocr = AppleVisionOcr()
