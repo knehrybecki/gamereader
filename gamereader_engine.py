@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 from collections import deque
+from difflib import SequenceMatcher
 from pathlib import Path
 
 import numpy as np
@@ -101,6 +102,43 @@ def utterance_tail(prev, nxt):
     return ""
 
 
+# OCR łapie napis w trakcie pojawiania się/znikania: kilka słów przekręconych naraz i śmieć z HUD na
+# brzegu („Parie Kenneth, omawjalismy fihansobanle?”, „Colt Panuje nad sytuacja, Zgamij…”) — to ta
+# sama kwestia. Inna kwestia wymienia całe słowo („do warsztatu”/„do garażu”: 0,53; „mój”/„twój”: 0,57),
+# a słowo przekręcone przez OCR zostaje podobne (≥ 0,62).
+OCR_TWIN_MIN_FOLD = 15
+OCR_TWIN_RATIO = 0.80
+OCR_TWIN_WORD_RATIO = 0.60
+OCR_TWIN_EDGE_JUNK = 5
+
+
+def _fold_words(text):
+    return [w for w in (polish_fold(t) for t in (text or "").split()) if w]
+
+
+def ocr_twins(a, b):
+    """Ten sam napis przeczytany przez OCR dwa razy z literówkami w kilku słowach (nie inna kwestia)."""
+    wa, wb = _fold_words(a), _fold_words(b)
+    ja, jb = "".join(wa), "".join(wb)
+    if min(len(ja), len(jb)) < OCR_TWIN_MIN_FOLD or min(len(ja), len(jb)) / max(len(ja), len(jb)) < 0.75:
+        return False
+    if SequenceMatcher(None, ja, jb, autojunk=False).ratio() < OCR_TWIN_RATIO:
+        return False
+    for tag, i1, i2, j1, j2 in SequenceMatcher(None, wa, wb, autojunk=False).get_opcodes():
+        if tag == "equal":
+            continue
+        left, right = "".join(wa[i1:i2]), "".join(wb[j1:j2])
+        if tag == "replace":
+            if SequenceMatcher(None, left, right, autojunk=False).ratio() < OCR_TWIN_WORD_RATIO:
+                return False
+            continue
+        # dopisane/zgubione słowo: śmieć z HUD na brzegu albo krótkie słówko w środku
+        edge = (i1 == 0 and j1 == 0) or (i2 == len(wa) and j2 == len(wb))
+        if len(left) + len(right) > (OCR_TWIN_EDGE_JUNK if edge else 2):
+            return False
+    return True
+
+
 def folds_match(fold_a, fold_b):
     """Ten sam napis po złożeniu (polish_fold), mimo migania OCR: brak końcówki albo 1–3 literówki
     („więc”/„wiçc”, „żeń-szeń”/„żeń-szeńi”). Wspólne dla kolejki i dla „już przeczytane”."""
@@ -113,7 +151,8 @@ def folds_match(fold_a, fold_b):
     if len(short) >= 8 and short in long and len(short) / len(long) >= 0.72:
         return True
     if abs(len(fold_a) - len(fold_b)) <= 4 and min(len(fold_a), len(fold_b)) >= 8:
-        return _lev(fold_a, fold_b) <= 3
+        if _lev(fold_a, fold_b) <= 3:
+            return True
     return False
 
 
@@ -122,7 +161,7 @@ def same_utterance(a, b):
     right = normalize_text(b or "").lower()
     if not left or not right:
         return False
-    return left == right or folds_match(polish_fold(left), polish_fold(right))
+    return left == right or folds_match(polish_fold(left), polish_fold(right)) or ocr_twins(left, right)
 
 
 def is_black_frame(frame):
@@ -4205,7 +4244,11 @@ class Engine:
             return False
         self._prune_spoken()
         now = time.monotonic()
-        return any(now < exp and folds_match(key, fold) for key, exp in self._spoken_folds.items())
+        if any(now < exp and folds_match(key, fold) for key, exp in self._spoken_folds.items()):
+            return True
+        return any(
+            now < exp and ocr_twins(spoken, text) for spoken, exp in getattr(self, "_spoken_texts", {}).items()
+        )
 
     def _mark_spoken(self, text):
         fold = polish_fold(text or "")
@@ -4213,6 +4256,13 @@ class Engine:
             return
         self._prune_spoken()
         self._spoken_folds[fold] = time.monotonic() + float(self.speak_cooldown or 5.5)
+        texts = getattr(self, "_spoken_texts", None)
+        if texts is None or len(texts) > 32:
+            texts = self._spoken_texts = {}
+        now = time.monotonic()
+        for key in [k for k, exp in texts.items() if exp <= now]:
+            del texts[key]
+        texts[text] = self._spoken_folds[fold]
         recent = getattr(self, "_spoken_recent", None)
         if recent is not None:
             recent.append((time.monotonic(), text))
