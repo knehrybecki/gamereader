@@ -44,6 +44,8 @@ OCR_CONFIRM_FRAMES = 2
 # Pierwsza klatka długiego napisu w grze bywa najgorsza („spontanfcznego…”).
 # Czekamy chwilę i bierzemy najlepszy odczyt, zanim lektor go zatwierdzi.
 OCR_SETTLE_SEC = 0.65
+# W grze druga klatka (~150 ms) jest zwykle czystsza niż pierwsza. Tyle czekamy zawsze.
+OCR_HOLD_SEC = 0.40
 
 
 def extends_utterance(prev, nxt):
@@ -519,16 +521,19 @@ def ocr_reading_rank(text):
 
 
 def ocr_reading_unsettled(text):
-    """Pierwsza klatka długiego napisu jest często najgorsza — warto poczekać na następną."""
+    """Długa klatka z obcymi literami albo zlepkami („spontanfcznego…”) — czekaj dłużej niż jedną klatkę."""
     raw = normalize_text(text)
     if ocr_junk_count(raw):
         return True
-    words = [polish_fold(w) for w in re.findall(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+", raw) if len(w) >= 6]
-    if len(words) < 3:
-        return False
+    words = re.findall(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+", raw)
+    if any(len(word) == 1 for word in words):
+        return True
     table = _pl_diacritics()
-    known = sum(1 for fold in words if fold in table or fold in _POLISH_BY_FOLD)
-    return known * 2 < len(words)
+    long = [polish_fold(word) for word in words if len(word) >= 6]
+    if len(long) < 3:
+        return False
+    unknown = sum(1 for fold in long if fold not in table and fold not in _POLISH_BY_FOLD)
+    return unknown * 2 > len(long)
 
 
 def ocr_same_flicker(a, b):
@@ -537,14 +542,10 @@ def ocr_same_flicker(a, b):
         return True
     if not (ocr_reading_unsettled(a) and ocr_reading_unsettled(b)):
         return False
-    left, right = _fold_words(a), _fold_words(b)
-    if min(len(left), len(right)) < 3:
+    left, right = polish_fold(a), polish_fold(b)
+    if min(len(left), len(right)) < 12:
         return False
-
-    def stems(words):
-        return {word[:6] for word in words if len(word) >= 6}
-
-    return len(stems(left) & stems(right)) >= 1
+    return SequenceMatcher(None, left, right, autojunk=False).ratio() >= 0.72
 
 
 def strip_ocr_quotes(text):
@@ -717,9 +718,9 @@ def strip_subtitle_tags(text, lowercase_only=False):
 def trim_ocr_edges(text):
     """Śmieci OCR na brzegach napisu: kropka listy, myślnik dialogowy, „statku. -”, „alejkę. r”."""
     raw = normalize_text(text)
-    raw = re.sub(r"^[•·∙◦]+\s*", "", raw)
+    raw = re.sub(r"^[¡¿•·∙◦|/\\*]+\s*", "", raw)
     raw = re.sub(r"^[-–—]+\s+", "", raw)
-    raw = re.sub(r"(?:\s+[-–—•·,;]+)+$", "", raw)
+    raw = re.sub(r"(?:\s+[¡¿•·∙◦|/\\*\-–—,;]+)+$", "", raw)
     return re.sub(r"([.!?…])\s+[A-Za-z•·]$", r"\1", raw)
 
 
@@ -2273,7 +2274,7 @@ _CONDENSE_FILLERS = (
     "okej", "ok", "hej", "joł", "ej ty",
 )
 _FILLER_ALT = "|".join(re.escape(f) for f in sorted(_CONDENSE_FILLERS, key=len, reverse=True))
-_CLAUSE_WORD = r"(?:że|żeby|co|kto|kogo|komu|gdzie|jak|czy|ile|dlaczego|kiedy|który|która|które)\b"
+_CLAUSE_WORD = r"(?:że|żeby|co|kto|kogo|komu|gdzie|jak|czy|ile|dlaczego|kiedy|który|która|które|to)\b"
 # wtrącenie na początku — ale nie „Wiesz, że…”, „Słuchaj, co…” (wtedy to czasownik i zdanie się sypie)
 _FILLER_START = re.compile(rf"^(?:(?:{_FILLER_ALT})\b[,!.]?\s+(?!{_CLAUSE_WORD}))+", re.IGNORECASE)
 _FILLER_MID = re.compile(rf",\s*(?:{_FILLER_ALT})\s*(?=,)", re.IGNORECASE)
@@ -4451,6 +4452,22 @@ class Engine:
         now = time.monotonic()
         self._spoken_folds = {k: exp for k, exp in self._spoken_folds.items() if exp > now}
 
+    def _worse_reread(self, text):
+        """„Wsiądź do metodhet artha” po „Wsiądź do samochodu Amandy.” — ten sam napis, gorszy odczyt."""
+        if not ocr_reading_unsettled(text):
+            return False
+        fold = polish_fold(text)
+        rank = ocr_reading_rank(text)
+        now = time.monotonic()
+        for spoken, exp in getattr(self, "_spoken_texts", {}).items():
+            if now >= exp:
+                continue
+            if SequenceMatcher(None, fold, polish_fold(spoken), autojunk=False).ratio() < 0.55:
+                continue
+            if rank < ocr_reading_rank(spoken):
+                return True
+        return False
+
     def _recently_spoken(self, text):
         fold = polish_fold(text or "")
         if not fold:
@@ -5103,6 +5120,14 @@ class Engine:
             if not usable_ocr(src) or is_player_ui_text(src):
                 return
         src = trim_ocr_edges(src)
+        if self._worse_reread(src):
+            self._log_junk(src, f"pomijam — zła powtórka przeczytanej kwestii: {src[:70]!r}")
+            return
+        # „Thy co wedy atak eles.” — zła klatka właśnie przeczytanego napisu, bez ani jednego polskiego słowa
+        if (not should_translate(src) and ocr_reading_rank(src) <= 0
+                and len(re.findall(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+", src)) >= 3):
+            self._log_junk(src, f"pomijam — odczyt bez polskich słów: {src[:70]!r}")
+            return
         if screen_junk_level(src) == "junk":
             self._log_junk(src, f"pomijam — to nie dialog (reguła): {src[:70]!r}")
             return
@@ -5197,14 +5222,17 @@ class Engine:
                     self._speculate(key, should_translate(src))
         self._ocr_samples = samples
         if samples:
-            self._ocr_candidate = max(samples, key=ocr_reading_rank)
+            # przy remisie zostaje późniejsza klatka — pierwsza bywa najgorsza
+            self._ocr_candidate = max(enumerate(samples), key=lambda item: (ocr_reading_rank(item[1]), item[0]))[1]
         self._ocr_candidate_at = now
         if self._ocr_candidate_n < need:
             return
         src = self._ocr_candidate
-        # długa rozmazana kwestia: nie zatwierdzaj pierwszej klatki, poczekaj na czystszą
+        age = now - getattr(self, "_ocr_started", now)
+        if self._source_kind() != "chrome" and len(src.split()) >= 2 and age < OCR_HOLD_SEC:
+            return
         if (self._source_kind() != "chrome" and len(src) >= 24 and ocr_reading_unsettled(src)
-                and now - getattr(self, "_ocr_started", now) < OCR_SETTLE_SEC):
+                and age < OCR_SETTLE_SEC):
             return
         self._ocr_candidate = ""
         self._ocr_candidate_n = 0

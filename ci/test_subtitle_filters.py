@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from gamereader_engine import (
     Engine, RecurringFragments, strip_lead_junk, screen_junk_level, same_utterance, ocr_reading_rank,
+    trim_ocr_edges, condense_polish,
 )
 
 
@@ -39,6 +40,9 @@ class SubtitleFiltersTest(unittest.TestCase):
         engine._offer_line.reset_mock()
         engine._sub_prev = None
         with patch("gamereader_engine.time.monotonic", return_value=13.0):
+            engine._on_subtitle("To tutaj.")
+        engine._offer_line.assert_not_called()
+        with patch("gamereader_engine.time.monotonic", return_value=13.45):
             engine._on_subtitle("To tutaj.")
         engine._offer_line.assert_called_once_with("To tutaj.", False)
 
@@ -94,11 +98,16 @@ class SubtitleFiltersTest(unittest.TestCase):
         engine._speculate = Mock()
         engine._offer_line = Mock()
         engine.emit = Mock()
+        engine._junk_logged = ""
+        engine._timing = Mock()
         return engine
 
     def test_clean_line_is_read_immediately(self):
         engine = self._engine()
         with patch("gamereader_engine.time.monotonic", return_value=10.0):
+            engine._on_subtitle("To się nazywa kapitalizm.")
+        engine._offer_line.assert_not_called()
+        with patch("gamereader_engine.time.monotonic", return_value=10.45):
             engine._on_subtitle("To się nazywa kapitalizm.")
         engine._offer_line.assert_called_once_with("To się nazywa kapitalizm.", False)
 
@@ -121,12 +130,54 @@ class SubtitleFiltersTest(unittest.TestCase):
         self.assertIn("spontanicznego", spoken)
         self.assertNotIn("spontanf", spoken)
 
+    def test_first_misspelled_frame_yields_to_the_next(self):
+        engine = self._engine()
+        frames = [
+            (40.00, "Bobra, Idziemy."),
+            (40.16, "Dobra, idziemy."),
+            (40.70, "Dobra, idziemy."),
+        ]
+        for stamp, text in frames:
+            with patch("gamereader_engine.time.monotonic", return_value=stamp):
+                engine._on_subtitle(text)
+        spoken = [call.args[0] for call in engine._offer_line.call_args_list]
+        self.assertTrue(spoken)
+        self.assertTrue(all(text == "Dobra, idziemy." for text in spoken))
+
+    def test_garbled_car_line_is_replaced_by_the_clear_one(self):
+        engine = self._engine()
+        frames = [
+            (50.00, "Weżmy aaro Amtindy."),
+            (50.15, "Weźmy auto Amandy."),
+            (50.70, "Weźmy auto Amandy."),
+        ]
+        for stamp, text in frames:
+            with patch("gamereader_engine.time.monotonic", return_value=stamp):
+                engine._on_subtitle(text)
+        spoken = [call.args[0] for call in engine._offer_line.call_args_list]
+        self.assertTrue(spoken)
+        self.assertTrue(all("auto Amandy" in text and "Amtindy" not in text for text in spoken))
+
+    def test_garbled_reread_without_polish_words_is_skipped(self):
+        engine = self._engine()
+        with patch("gamereader_engine.time.monotonic", return_value=30.0):
+            engine._on_subtitle("Thy co wedy atak eles.")
+        engine._offer_line.assert_not_called()
+
+    def test_leading_ocr_mark_is_removed(self):
+        self.assertEqual(trim_ocr_edges("¡To dlatego siedzisz w Vinewood?"), "To dlatego siedzisz w Vinewood?")
+
+    def test_no_to_is_not_condensed_away(self):
+        text = "No to morałem dzisiejszej lekcji niech będzie pokora."
+        self.assertTrue(condense_polish(text, level=1).lower().startswith("no to"))
+
     def test_flickering_variants_are_not_joined_into_one_line(self):
         engine = self._engine()
         frames = [
             (20.00, "z mógł kantować ludzli na tymzarablać. tAredy bedkles"),
             (20.16, "Wtedy będklesz mógł kantować ludili na tymzarablać."),
             (20.70, "Wtedy będziesz mógł kantować ludzi i na tym zarabiać."),
+            (20.90, "Wtedy będziesz mógł kantować ludzi i na tym zarabiać."),
         ]
         for stamp, text in frames:
             with patch("gamereader_engine.time.monotonic", return_value=stamp):
