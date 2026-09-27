@@ -641,12 +641,61 @@ def looks_like_plate(text):
         return True
     if looks_polish(raw):
         return False
-    return any(SequenceMatcher(None, w, "andreas", autojunk=False).ratio() >= 0.75 for w in _fold_words(raw) if len(w) >= 5)
+    return _plate_context(raw)
+
+
+def _plate_word(word):
+    fold = polish_fold(word)
+    if not fold:
+        return True  # sam znak interpunkcji / śmieć OCR
+    if _PLATE_CODE.fullmatch(word.strip(".,:;!?")) or re.fullmatch(r"[A-ZĄĆĘŁŃÓŚŹŻËÑ]{2,4}[^\w\s]*\w{0,3}", word):
+        return True
+    if fold in ("san", "sen", "sea", "saa") or re.fullmatch(r"\d{2,4}", fold or word):
+        return True
+    return len(fold) >= 5 and SequenceMatcher(None, fold, "andreas", autojunk=False).ratio() >= 0.75
+
+
+def _andreas_like(word):
+    fold = polish_fold(word)
+    return len(fold) >= 5 and SequenceMatcher(None, fold, "andreas", autojunk=False).ratio() >= 0.75
+
+
+def _plate_context(raw):
+    """Obok „Andreas” jest coś z tablicy: „San”, kod albo skrót WIELKIMI literami — samo „Andrés!” to imię."""
+    if _PLATE_CODE.search(raw):
+        return True
+    words = raw.split()
+    for i, word in enumerate(words):
+        if not _andreas_like(word):
+            continue
+        near = words[max(0, i - 1) : i] + words[i + 1 : i + 2]
+        if any(polish_fold(w) in ("san", "sen", "sea", "saa", "sn") or re.fullmatch(r"[A-ZËÑ]{3,4}\W*", w) for w in near):
+            return True
+    return False
+
+
+def strip_plate(text):
+    """Tablica rejestracyjna doklejona z brzegu do napisu („San Andreas BNR Dostań się do domu.”) —
+    wycięta; zostaje sam napis (albo nic, gdy to była tylko tablica)."""
+    raw = normalize_text(text)
+    words = raw.split()
+    if not _plate_context(raw):
+        return raw
+    start, end = 0, len(words)
+    while start < end and _plate_word(words[start]):
+        start += 1
+    while end > start and _plate_word(words[end - 1]):
+        end -= 1
+    return " ".join(words[start:end])
 
 
 def screen_junk_level(text):
     raw = normalize_text(text)
     if _UI_HARD.search(raw):
+        return "junk"
+    # podpowiedzi przycisków: dwa znaki interfejsu naraz („UKRYJ MENU (, PRZEGLĄDAJ L R”) — pewny
+    # śmieć także przed wczytaniem modelu decyzji
+    if len(_UI_SOFT.findall(raw)) >= 2:
         return "junk"
     letters = [ch for ch in raw if ch.isalpha()]
     caps = sum(ch.isupper() for ch in letters) / max(1, len(letters))
@@ -4889,6 +4938,12 @@ class Engine:
             self._log_junk(src, f"pomijam — tablica rejestracyjna: {src[:70]!r}")
             self._remember_junk(src)
             return
+        unplated = strip_plate(src)
+        if unplated != normalize_text(src):
+            self._log_junk(src, f"wycinam tablicę rejestracyjną: {src[:70]!r} -> {unplated[:70]!r}")
+            src = unplated
+            if not usable_ocr(src):
+                return
         stripped = self._recurring.strip(src)
         if stripped != src:
             if stripped:
@@ -4896,6 +4951,8 @@ class Engine:
             else:
                 self._log_junk(src, f"pomijam — to nie dialog (znak wodny): {src[:70]!r}")
             src = stripped
+            if looks_like_plate(src):
+                return
         if not usable_ocr(src):
             return
         self._last_subtitle_seen = time.monotonic()
