@@ -47,6 +47,12 @@ INFO_QUESTION = (
     "Czy z tej kwestii widz dowie się czegoś nowego (fakt, plan, pytanie, polecenie, kto co zrobił)?",
     ["nie — to tylko okrzyk, reakcja albo potwierdzenie", "tak — jest w niej informacja"],
 )
+# mowa rozpoznana z dźwięku gry (bez napisu): rozmowa postaci czy radio w grze — piosenki, DJ, reklamy
+# dostały p ≥ 0,89, dialogi z GTA p ≤ 0,02
+RADIO_QUESTION = (
+    "Tekst rozpoznany z dźwięku gry. Czy to rozmowa postaci w grze, czy piosenka albo audycja radiowa (DJ, reklama, wiadomości)?",
+    ["piosenka albo radio", "rozmowa postaci"],
+)
 # o informację pytamy tylko, gdy to (chyba) dialog — śmieci kosztują jeden przebieg
 INFO_MIN_DIALOGUE = 0.10
 
@@ -71,7 +77,7 @@ def brain_supported():
 
 
 class LektorBrain:
-    """Pytania do modelu w tle; wyniki w pamięci podręcznej: tekst → {"dialog": p, "info": p | None}.
+    """Pytania do modelu w tle; wyniki w pamięci podręcznej: (rodzaj, tekst) → rozkłady odpowiedzi.
 
     MLX trzyma obliczenia per wątek, więc wczytanie i wszystkie pytania idą przez jeden stały wątek."""
 
@@ -95,29 +101,32 @@ class LektorBrain:
                 self._thread.start()
 
     # --- API dla silnika -----------------------------------------------------------------
-    def check(self, text):
-        """Zleć ocenę napisu (od razu wraca). Wynik odbierz przez verdict()."""
+    def check(self, text, kind="subtitle"):
+        """Zleć ocenę (od razu wraca): kind="subtitle" — napis, "heard" — mowa z dźwięku. Wynik: verdict()."""
         if not text or self.failed:
             return
+        key = (kind, text)
         with self._cond:
-            if text in self._results or text in self._pending:
+            if key in self._results or key in self._pending:
                 return
-            self._pending.add(text)
-            self._jobs.append((time.monotonic(), text))
+            self._pending.add(key)
+            self._jobs.append((time.monotonic(), key))
             while len(self._jobs) > BRAIN_QUEUE_MAX:
                 _t, old = self._jobs.popleft()
                 self._pending.discard(old)
             self._cond.notify_all()
 
-    def verdict(self, text, wait=0.0):
-        """{"dialog": p, "info": p | None} albo None, gdy modelu nie ma albo wynik nie zdążył w `wait` s."""
+    def verdict(self, text, wait=0.0, kind="subtitle"):
+        """Napis: {"dialog": p, "info": p | None}; mowa: {"radio": p}. None, gdy modelu nie ma albo wynik
+        nie zdążył w `wait` s."""
+        key = (kind, text)
         deadline = time.monotonic() + max(0.0, wait)
         with self._cond:
             while True:
-                if text in self._results:
-                    return self._results[text]
+                if key in self._results:
+                    return self._results[key]
                 left = deadline - time.monotonic()
-                if left <= 0 or text not in self._pending or not self.ready:
+                if left <= 0 or key not in self._pending or not self.ready:
                     return None
                 self._cond.wait(left)
 
@@ -138,10 +147,11 @@ class LektorBrain:
                     idle = not self._cond.wait(BRAIN_IDLE_UNLOAD_SEC)
                     if idle and not self._jobs and self.model is not None:
                         self._unload()
-                queued_at, text = self._jobs.popleft()
+                queued_at, key = self._jobs.popleft()
+            kind, text = key
             if time.monotonic() - queued_at > BRAIN_JOB_TTL:
                 with self._cond:
-                    self._pending.discard(text)
+                    self._pending.discard(key)
                     self._cond.notify_all()
                 continue
             if self.model is None and not self._load_logged():
@@ -149,18 +159,21 @@ class LektorBrain:
             result = None
             try:
                 t0 = time.monotonic()
-                result = {"dialog": self._ask(text, *DIALOGUE_QUESTION)[0], "info": None}
-                if result["dialog"] >= INFO_MIN_DIALOGUE:
-                    result["info"] = self._ask(text, *INFO_QUESTION)[1]
+                if kind == "heard":
+                    result = {"radio": self._ask(text, *RADIO_QUESTION)[0]}
+                else:
+                    result = {"dialog": self._ask(text, *DIALOGUE_QUESTION)[0], "info": None}
+                    if result["dialog"] >= INFO_MIN_DIALOGUE:
+                        result["info"] = self._ask(text, *INFO_QUESTION)[1]
                 ms = (time.monotonic() - t0) * 1000
                 if ms > 400:
                     self._log(f"model decyzji wolny: {ms:.0f} ms")
             except Exception as exc:
                 self._log(f"model decyzji: błąd {exc}")
             with self._cond:
-                self._pending.discard(text)
+                self._pending.discard(key)
                 if result is not None:
-                    self._results[text] = result
+                    self._results[key] = result
                     while len(self._results) > 512:
                         self._results.popitem(last=False)
                 self._cond.notify_all()

@@ -679,8 +679,16 @@ SILENCE_SEC = 0.35
 MIN_SPEECH_SEC = 0.35
 MAX_SPEECH_SEC = 8.0
 PREROLL_SEC = 0.25
-# po ostatnim napisie przez tyle sekund dźwięk nie jest tłumaczony (napisy = główne dialogi)
-SUBTITLE_PRIORITY_SEC = 30.0
+# „Napisy + dźwięk”: z dźwięku tłumaczymy wypowiedź postaci, której gra nie podpisała (NPC, bohater
+# w trakcie jazdy) — tylko gdy w trakcie wypowiedzi nie było napisu (z zapasem), głos był wyraźny
+# (nie tło), okresowy jak głos (nie muzyka ani wybuch), trwał jak zdanie, a rozpoznany tekst to pełne zdanie.
+AUDIO_SUBTITLE_MARGIN = 0.5
+AUDIO_MIN_SPEECH_SEC = 0.8
+# radio w grze: śpiew trzyma równe nuty (mowa: 0,00–0,31 wysokości „stałej”, śpiew 0,76–1,00),
+# a DJ i reklamy grają na podkładzie — wypowiedź bez żadnej pauzy aż do limitu długości
+AUDIO_SUNG_MAX = 0.55
+BRAIN_RADIO_P = 0.5
+AUDIO_MIN_VOICED = 0.10  # mowa: 0,17 pod szumem 6 dB … 0,35 czysta; szum i wybuchy: 0,00
 # kwestia czekająca w kolejce dłużej niż tyle sekund (a jest już nowsza) — przepada, lektor leci dalej
 CATCH_UP_STALE_SEC = 2.0
 # model decyzji (lektor_brain): poniżej tego p(dialog) napis to nie kwestia postaci; napis „podejrzany”
@@ -2820,6 +2828,73 @@ class ProsodyMeter:
         return max(-1.0, min(1.0, score / 1.2))
 
 
+def _periodic_frame(frame, threshold=0.35):
+    """Ramka okresowa w paśmie głosu (55–400 Hz) — głos tak, szum i wybuchy nie."""
+    n = frame.size
+    x = frame.astype(np.float64) - float(frame.mean())
+    spec = np.fft.rfft(x, 2 * n)
+    ac = np.fft.irfft(spec * np.conj(spec))[:n]
+    if ac[0] <= 0:
+        return False
+    lo, hi = SAMPLE_RATE // 400, min(n - 1, SAMPLE_RATE // 55)
+    return float(np.max(ac[lo:hi])) >= threshold * float(ac[0])
+
+
+def voiced_fraction(audio, frame=512):
+    """Jaka część głośnych ramek wypowiedzi brzmi jak głos (a nie muzyka, szum czy wybuch)."""
+    audio = np.asarray(audio, dtype=np.float32)
+    n = audio.size // frame
+    if n < 4:
+        return 0.0
+    frames = audio[: n * frame].reshape(n, frame)
+    rms = np.sqrt(np.mean(frames.astype(np.float64) ** 2, axis=1))
+    loud = rms > max(SPEECH_RMS, float(np.percentile(rms, 30)))
+    if not loud.any():
+        return 0.0
+    return sum(_periodic_frame(f) for f in frames[loud]) / float(n)
+
+
+def sung_fraction(audio, frame=512, run=6, tol=0.6):
+    """Jaka część głosu leży w długich (≥ ~190 ms) nutach o stałej wysokości — śpiew tak, mowa nie."""
+    audio = np.asarray(audio, dtype=np.float32)
+    lo, hi = SAMPLE_RATE // 400, SAMPLE_RATE // 70
+    semis = []
+    for i in range(audio.size // frame):
+        x = audio[i * frame : (i + 1) * frame].astype(np.float64)
+        x -= x.mean()
+        if np.sqrt(np.mean(x**2)) < SPEECH_RMS:
+            semis.append(None)
+            continue
+        spec = np.fft.rfft(x, 2 * frame)
+        ac = np.fft.irfft(spec * np.conj(spec))[:frame]
+        k = lo + int(np.argmax(ac[lo:hi]))
+        semis.append(12.0 * np.log2(SAMPLE_RATE / k / 100.0) if ac[0] > 0 and ac[k] >= 0.35 * ac[0] else None)
+    voiced = sum(v is not None for v in semis)
+    if voiced < 8:
+        return 0.0
+    stable = i = 0
+    while i < len(semis):
+        if semis[i] is None:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(semis) and semis[j + 1] is not None and abs(semis[j + 1] - float(np.median(semis[i : j + 2]))) <= tol:
+            j += 1
+        if j - i + 1 >= run:
+            stable += j - i + 1
+        i = j + 1
+    return stable / voiced
+
+
+def is_full_sentence(text):
+    """Rozpoznana mowa to pełne zdanie (co najmniej 4 słowa bez wtrąceń i koniec zdania albo 6+ słów)."""
+    raw = normalize_text(text)
+    words = [w for w in re.findall(r"[A-Za-z']+", raw) if not _is_filler_word(w)]
+    if len(words) < 4 or raw.lower().strip(" .!?") in JUNK_HEARD:
+        return False
+    return bool(re.search(r"[.!?]\W*$", raw)) or len(words) >= 6
+
+
 class VoiceActivity:
     """Czy postać teraz mówi (dźwięk gry) — żeby lektor wchodził jak w filmie, chwilę po oryginale.
 
@@ -2844,13 +2919,7 @@ class VoiceActivity:
         self._confirmed = False
 
     def _periodic(self, frame):
-        x = frame.astype(np.float64) - float(frame.mean())
-        spec = np.fft.rfft(x, 2 * self.FRAME)
-        ac = np.fft.irfft(spec * np.conj(spec))[: self.FRAME]
-        if ac[0] <= 0:
-            return False
-        lo, hi = SAMPLE_RATE // 400, SAMPLE_RATE // 55
-        return float(np.max(ac[lo:hi])) >= 0.35 * float(ac[0])
+        return _periodic_frame(frame)
 
     def feed(self, mono, now=None):
         if mono is None or mono.size == 0:
@@ -4539,11 +4608,16 @@ class Engine:
         # jak postać to powiedziała — liczone zawsze, żeby miernik uczył się mowy w tej grze
         quiet = audio is not None and self.prosody.is_quiet(audio)
         arousal = self.prosody.analyze(audio) if audio is not None else None
-        # gra ma napisy: dialogi czytamy z napisów, a dźwięk bez napisu to gadanie w tle
-        if self.mode != "audio" and time.monotonic() - self._last_subtitle_seen < SUBTITLE_PRIORITY_SEC:
+        # „Napisy + dźwięk”: wypowiedź bez napisu (sprawdzone w pętli dźwięku) — tylko pełne zdania
+        if self.mode != "audio" and not is_full_sentence(heard):
             return
-        if self._pl_subs_active:
-            return
+        if self.mode != "audio" and self.brain is not None:
+            # tekst piosenki, DJ albo reklama z radia w grze — model decyzji odróżnia je od rozmowy postaci
+            self.brain.check(heard, kind="heard")
+            verdict = self.brain.verdict(heard, wait=0.4, kind="heard")
+            if verdict and verdict["radio"] >= BRAIN_RADIO_P:
+                self._timing(f"pomijam dźwięk — radio/piosenka (model {verdict['radio']:.2f}): {heard[:70]!r}")
+                return
         # ciche mruczenie pod nosem i tłum w tle — pomijamy
         if quiet:
             return
@@ -4557,6 +4631,35 @@ class Engine:
         if text_key(heard) == self.last_key or self._recently_spoken(heard):
             return
         self._offer_line(heard, True)
+
+    def _unsubtitled_speech(self, audio, start, end):
+        """Czy tę wypowiedź z dźwięku gry tłumaczyć: w trybie „Dźwięk” zawsze; w „Napisy + dźwięk” tylko
+        wyraźną, z głosem, długą jak zdanie i taką, w trakcie której na ekranie nie było napisu."""
+        if self.mode == "audio":
+            return True
+        if self.mode != "auto":
+            return False
+        if self._last_subtitle_seen >= start - AUDIO_SUBTITLE_MARGIN:
+            return False  # napis był w trakcie — dialog czyta się z napisu
+        if (end - start) < AUDIO_MIN_SPEECH_SEC or self.prosody.is_quiet(audio):
+            return False
+        if voiced_fraction(audio) < AUDIO_MIN_VOICED:
+            return False
+        # radio w grze: podkład bez żadnej pauzy (DJ, reklamy) albo śpiew — nie tłumaczymy
+        if audio.size / float(SAMPLE_RATE) >= MAX_SPEECH_SEC - 0.05:
+            self._log_radio("bez pauzy — podkład radia albo muzyka")
+            return False
+        sung = sung_fraction(audio)
+        if sung >= AUDIO_SUNG_MAX:
+            self._log_radio(f"śpiew ({sung:.2f})")
+            return False
+        return True
+
+    def _log_radio(self, why):
+        now = time.monotonic()
+        if now - getattr(self, "_radio_logged_at", 0.0) > 20.0:
+            self._radio_logged_at = now
+            self._timing(f"pomijam dźwięk — {why}")
 
     def _flush_line_q(self):
         try:
@@ -4680,7 +4783,8 @@ class Engine:
         if not translate:
             if not self._pl_subs_active:
                 self.emit(
-                    {"event": "status", "text": "Polskie napisy — czytam je, angielski dźwięk tylko do emocji i ściszania."}
+                    {"event": "status", "text": "Polskie napisy — czytam je; z dźwięku tłumaczę tylko pełne zdania bez napisu."
+                     if self.mode == "auto" else "Polskie napisy — czytam je, angielski dźwięk tylko do emocji i ściszania."}
                 )
             self._pl_subs_at = now
         self._offer_line(src, translate)
@@ -4831,13 +4935,14 @@ class Engine:
                     continue
                 audio = state.feed(chunk)
                 if audio is not None:
-                    if self._pl_subs_active:
-                        # polskie napisy: angielskiej mowy nie rozpoznajemy (GPU zostaje dla lektora),
-                        # tylko uczymy miernik emocji, jak mówią postacie w tej grze
-                        if not self.prosody.is_quiet(audio):
-                            self.prosody.analyze(audio)
-                        continue
-                    live.submit(audio)
+                    # koniec wypowiedzi = przed chwilą ciszy, która ją zamknęła; początek — minus jej długość
+                    end = time.monotonic() - SILENCE_SEC
+                    start = end - audio.size / float(SAMPLE_RATE) + PREROLL_SEC
+                    if self._unsubtitled_speech(audio, start, end):
+                        live.submit(audio)
+                    elif not self.prosody.is_quiet(audio):
+                        # dialog z napisem: nie rozpoznajemy (GPU dla lektora), tylko miernik emocji się uczy
+                        self.prosody.analyze(audio)
         except PermissionError as exc:
             self.emit({"event": "perm", "text": str(exc)})
             if transcribe:
