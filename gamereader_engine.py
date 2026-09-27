@@ -2754,10 +2754,14 @@ class OmniVoiceLocal:
             return
         with self.lock:
             try:
+                # silnik LiveDub działa z PYTHONHOME/PYTHONPATH swojego Pythona — VoiceStudio ma własny venv
+                # i z tymi zmiennymi pada od razu (sesja 16:33: „brak odpowiedzi” po 0,07 s)
+                env = {k: v for k, v in os.environ.items()
+                       if k not in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV", "PYTHONPYCACHEPREFIX")}
                 self.proc = subprocess.Popen(
                     [str(py), str(script), str(VOICESTUDIO_ROOT), str(VOICEPACK_DIR / self.pack), str(OMNI_STEPS)],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                    cwd=str(VOICESTUDIO_ROOT), bufsize=0,
+                    cwd=str(VOICESTUDIO_ROOT), bufsize=0, env=env,
                 )
                 hello = json.loads(self.proc.stdout.readline() or b"{}")
             except Exception as exc:

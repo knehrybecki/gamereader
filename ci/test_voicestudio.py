@@ -66,6 +66,7 @@ class VoiceStudioTest(unittest.TestCase):
             patch.object(ge, "VOICESTUDIO_ROOT", root),
             patch.object(ge, "VOICEPACK_DIR", packs),
             patch.object(ge, "CACHE_DIR", Path(self.tmp.name) / "cache"),
+            patch.object(ge, "log_timing", lambda *_: None),  # nie do prawdziwego logu lektora
         ]
         for p in self.patches:
             p.start()
