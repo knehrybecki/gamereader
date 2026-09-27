@@ -694,6 +694,9 @@ BRAIN_IMPORTANT_P = 0.5
 # zdanie z dźwięku słyszane już w tym oknie czasu nie jest czytane drugi raz
 HEARD_REPEAT_SEC = 900.0
 HEARD_REPEAT_MIN_FOLD = 10
+# ciąg dalszy rozmowy, którą lektor już zaczął czytać z dźwięku — czytany do końca, nawet gdy model
+# uzna samą odpowiedź za mało ważną (inaczej rozmowa urywa się w połowie)
+HEARD_CONVO_SEC = 15.0
 AUDIO_MIN_VOICED = 0.10  # mowa: 0,17 pod szumem 6 dB … 0,35 czysta; szum i wybuchy: 0,00
 # kwestia czekająca w kolejce dłużej niż tyle sekund (a jest już nowsza) — przepada, lektor leci dalej
 CATCH_UP_STALE_SEC = 2.0
@@ -3576,6 +3579,7 @@ class Engine:
         self._ocr_candidate_n = 0
         self._spoken_folds = {}
         self._heard_seen = {}
+        self._heard_offered_at = 0.0
         self.confirm_frames = OCR_CONFIRM_FRAMES
         self.speak_cooldown = 5.5
         self.no_barge_in = True
@@ -4636,6 +4640,7 @@ class Engine:
         # „Napisy + dźwięk”: wypowiedź bez napisu (sprawdzone w pętli dźwięku) — tylko pełne zdania
         if self.mode != "audio" and not is_full_sentence(heard):
             return
+        convo_only = False
         if self.mode != "audio" and self.brain is not None:
             # tekst piosenki, DJ albo reklama z radia w grze — model decyzji odróżnia je od rozmowy postaci
             self.brain.check(heard, kind="heard")
@@ -4643,7 +4648,9 @@ class Engine:
             if verdict and verdict["radio"] >= BRAIN_RADIO_P:
                 self._timing(f"pomijam dźwięk — radio/piosenka (model {verdict['radio']:.2f}): {heard[:70]!r}")
                 return
-            if verdict and verdict.get("important") is not None and verdict["important"] < BRAIN_IMPORTANT_P:
+            unimportant = verdict and verdict.get("important") is not None and verdict["important"] < BRAIN_IMPORTANT_P
+            convo_only = bool(unimportant) and time.monotonic() - self._heard_offered_at < HEARD_CONVO_SEC
+            if unimportant and not convo_only:
                 self._timing(f"pomijam dźwięk — gadanie w tle, nieważne (model {verdict['important']:.2f}): {heard[:70]!r}")
                 return
         # ciche mruczenie pod nosem i tłum w tle — pomijamy
@@ -4661,6 +4668,8 @@ class Engine:
             return
         if text_key(heard) == self.last_key or self._recently_spoken(heard):
             return
+        if not convo_only:
+            self._heard_offered_at = time.monotonic()
         self._offer_line(heard, True)
 
     def _drop_repeated_heard(self, heard):
