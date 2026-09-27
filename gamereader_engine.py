@@ -4748,6 +4748,34 @@ class Engine:
         image.save(path, "PNG")
         self.emit({"event": "preview", "file": str(path), "w": image.width, "h": image.height})
 
+    def _probe_auto_band(self):
+        """Ręczny pasek długo nic nie widzi (sesja RDR2 17:09: zapisany za wysoko, napisy były niżej) —
+        zajrzyj w automatyczny pas u dołu okna; są tam polskie/angielskie zdania → przełącz się na niego."""
+        win = self.ps_window
+        if not win or self._source_kind() == "chrome":
+            return False
+        band = window_subtitle_band(win, self._band_profile())
+        if self.region and self._region_overlap(self.region, band) > 0.85:
+            return False  # to już praktycznie ten sam pas
+        saved, self.region = self.region, band
+        try:
+            text = self.ocr.read(self._capture_region()) or ""
+        except Exception:
+            text = ""
+        finally:
+            self.region = saved
+        text = trim_ocr_edges(strip_hud_prompts(strip_subtitle_tags(text)))
+        if not usable_ocr(text) or looks_like_game_ui(text) or len(text.split()) < 2 \
+                or not re.search(r"[.!?…,]", text):
+            return False
+        self.region = band
+        self.lock_region = False
+        self.game_regions.pop(self._region_key(), None)
+        self.persist()
+        self.emit({"event": "status", "text": "Ręczny pasek nie widział napisów — przełączam na automatyczny dół okna."})
+        self.emit({"event": "state", **self.snapshot()})
+        return True
+
     def _capture_region(self):
         if self.region is None:
             raise RuntimeError("Brak obszaru.")
@@ -5811,6 +5839,11 @@ class Engine:
                         if empty_streak >= 18 and not self.speaking_text:
                             self.last_subtitle = ""
                             self.last_full = ""
+                        # zapisany pasek gry: co ~3 s pustki zajrzyj w automatyczny pas u dołu okna
+                        if empty_streak >= 20 and empty_streak % 20 == 0 and self.lock_region \
+                                and self._region_key() in self.game_regions and self._probe_auto_band():
+                            empty_streak = 0
+                            last_hash = ""
                         if empty_streak >= 40 and self.lock_region and self._region_key() not in self.game_regions:
                             self.lock_region = False
                             self.persist()

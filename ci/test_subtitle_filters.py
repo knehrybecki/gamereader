@@ -302,6 +302,33 @@ class SubtitleFiltersTest(unittest.TestCase):
         self.assertEqual(strip_hud_prompts("Zaokrąglisz trochę lasencję? Pierwsza osoba ElE"), "Zaokrąglisz trochę lasencję?")
         self.assertEqual(strip_hud_prompts("Wróć do domu, Franklin."), "Wróć do domu, Franklin.")
 
+    def test_saved_band_that_sees_nothing_switches_to_auto(self):
+        # sesja RDR2 17:09: ręczny pasek zapisany za wysoko — napisy były w automatycznym pasie niżej
+        engine = Engine.__new__(Engine)
+        engine.ps_window = (0, 33, 1512, 882)
+        engine.region = (341, 588, 794, 226)
+        engine.lock_region = True
+        engine.game_regions = {"rdr2": {"region": [341, 588, 794, 226]}}
+        engine._region_key = lambda: "rdr2"
+        engine._source_kind = lambda: "ps"
+        engine._band_profile = lambda: {"band": 0.18, "gap": 0.03, "inset": 0.10}
+        engine._capture_region = lambda: engine.region
+        engine.persist = Mock()
+        engine.emit = Mock()
+        engine.snapshot = lambda: {}
+        engine.ocr = Mock()
+        engine.ocr.read = lambda region: "Nie za ostro, bracie." if region[1] > 700 else ""
+        self.assertTrue(engine._probe_auto_band())
+        self.assertFalse(engine.lock_region)
+        self.assertGreater(engine.region[1], 700)
+        self.assertNotIn("rdr2", engine.game_regions)
+        # w automatycznym pasie tylko menu — zostaje ręczny pasek
+        engine.region, engine.lock_region = (341, 588, 794, 226), True
+        engine.game_regions = {"rdr2": {"region": [341, 588, 794, 226]}}
+        engine.ocr.read = lambda region: "Tryb fotograficzny WYBIERZ X WSTECZ" if region[1] > 700 else ""
+        self.assertFalse(engine._probe_auto_band())
+        self.assertTrue(engine.lock_region)
+
     def test_catchup_pace_stays_intelligible(self):
         # pace jak przy doganianiu z sesji 13:48 (boost 1,40, tts 0,92, żywy głos)
         speed, stretch = lektor_speed_split(0.53, "Zabierz Franklina blisko jachtu.")
