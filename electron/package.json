@@ -38,6 +38,10 @@
         "to": "engine/lektor_brain.py"
       },
       {
+        "from": "../omnivoice_sidecar.py",
+        "to": "engine/omnivoice_sidecar.py"
+      },
+      {
         "from": "../requirements.txt",
         "to": "engine/requirements.txt"
       },

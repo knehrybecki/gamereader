@@ -67,12 +67,15 @@
         <label class="toggle"><input id="autoStart" type="checkbox" checked /> Startuj sam, gdy wykryję grę</label>
 
         <div class="row">
-          <label class="muted" for="elevenKey" title="Klucz API z elevenlabs.io (Profil → API Keys). Puste = lokalny głos Supertonic.">ElevenLabs</label>
-          <input id="elevenKey" class="text" type="password" autocomplete="off" spellcheck="false" placeholder="klucz API (puste = Supertonic)" />
+          <label class="muted" for="lektorEngine" title="Supertonic: szybki, na procesorze. VoiceStudio: naturalniejszy głos z voicepacka, na GPU Maca.">Głos</label>
+          <select id="lektorEngine">
+            <option value="supertonic">Supertonic (szybki)</option>
+            <option value="voicestudio">VoiceStudio (voicepack)</option>
+          </select>
         </div>
-        <div id="elevenVoiceRow" class="row hidden">
-          <label class="muted" for="elevenVoice">Głos</label>
-          <select id="elevenVoice"></select>
+        <div id="omniPackRow" class="row hidden">
+          <label class="muted" for="omniPack">Voicepack</label>
+          <select id="omniPack"></select>
         </div>
 
         <div class="row">

@@ -114,34 +114,25 @@ function applyState(msg) {
     document.getElementById("srcChrome").classList.toggle("primary", msg.source === "chrome");
   }
   if (typeof msg.autoStart === "boolean") document.getElementById("autoStart").checked = msg.autoStart;
-  if (typeof msg.elevenKeySet === "boolean") {
-    const key = document.getElementById("elevenKey");
-    if (document.activeElement !== key) {
-      key.value = "";
-      key.placeholder = msg.elevenKeySet ? "klucz zapisany ✓ (wpisz nowy albo usuń)" : "klucz API (puste = Supertonic)";
-    }
-    state.elevenKeySet = msg.elevenKeySet;
-  }
-  if (Array.isArray(msg.elevenVoices)) {
-    const sel = document.getElementById("elevenVoice");
-    const row = document.getElementById("elevenVoiceRow");
-    row.classList.toggle("hidden", !msg.elevenVoices.length);
+  if (Array.isArray(msg.omniPacks)) {
+    const engine = document.getElementById("lektorEngine");
+    const studio = engine.querySelector('option[value="voicestudio"]');
+    studio.disabled = !msg.omniPacks.length;
+    studio.textContent = msg.omniPacks.length ? "VoiceStudio (voicepack)" : "VoiceStudio (brak voicepacka)";
+    const sel = document.getElementById("omniPack");
     sel.innerHTML = "";
-    const groups = new Map();
-    for (const voice of msg.elevenVoices) {
-      const label = voice.group || "Głosy";
-      if (!groups.has(label)) {
-        const group = document.createElement("optgroup");
-        group.label = label;
-        groups.set(label, group);
-        sel.appendChild(group);
-      }
+    for (const pack of msg.omniPacks) {
       const opt = document.createElement("option");
-      opt.value = voice.id;
-      opt.textContent = voice.name;
-      groups.get(label).appendChild(opt);
+      opt.value = pack;
+      opt.textContent = pack;
+      sel.appendChild(opt);
     }
-    if (msg.elevenVoice) sel.value = msg.elevenVoice;
+    if (msg.omniPack) sel.value = msg.omniPack;
+  }
+  if (msg.lektorEngine) {
+    document.getElementById("lektorEngine").value = msg.lektorEngine;
+    const packs = document.getElementById("omniPack").options.length;
+    document.getElementById("omniPackRow").classList.toggle("hidden", msg.lektorEngine !== "voicestudio" || packs < 2);
   }
   if (typeof msg.running === "boolean") {
     state.running = msg.running;
@@ -226,27 +217,8 @@ document.getElementById("autoStart").onchange = (e) => {
   window.gr.releaseFocus();
 };
 document.getElementById("game").onchange = (e) => send({ cmd: "config", game: e.target.value });
-{
-  const key = document.getElementById("elevenKey");
-  const submit = () => {
-    const value = key.value.trim();
-    // puste pole przy zapisanym kluczu = bez zmian; „-” albo Backspace na pustym = usuń klucz
-    if (!value && !key.dataset.clear) return;
-    send({ cmd: "config", elevenKey: value === "-" ? "" : value });
-    delete key.dataset.clear;
-    key.value = "";
-    key.blur();
-  };
-  key.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") submit();
-    if (e.key === "Backspace" && !key.value && state.elevenKeySet) {
-      key.dataset.clear = "1";
-      submit();
-    }
-  });
-  key.addEventListener("change", submit);
-}
-document.getElementById("elevenVoice").onchange = (e) => send({ cmd: "config", elevenVoice: e.target.value });
+document.getElementById("lektorEngine").onchange = (e) => send({ cmd: "config", lektorEngine: e.target.value });
+document.getElementById("omniPack").onchange = (e) => send({ cmd: "config", omniPack: e.target.value });
 fillGames(GAMES, "gta6");
 
 window.gr.onEvent((msg) => {

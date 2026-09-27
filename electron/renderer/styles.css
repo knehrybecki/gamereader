@@ -106,16 +106,6 @@ select {
   padding: 6px 8px;
   font: inherit;
 }
-input.text {
-  flex: 1;
-  min-width: 0;
-  background: var(--surface2);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 6px 8px;
-  font: inherit;
-}
 select, input, button, label, summary, .pill { -webkit-app-region: no-drag; }
 .muted { color: var(--muted); font-size: 11px; min-width: 52px; }
 .sliders input[type="range"] { accent-color: var(--accent); flex: 1; min-width: 0; }

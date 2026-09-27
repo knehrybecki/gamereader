@@ -79,7 +79,7 @@ LEKTOR_FILTER = (
     "equalizer=f=3200:t=q:w=1.2:g=3,"
     "acompressor=threshold=-22dB:ratio=3:attack=5:release=90:makeup=2"
 )
-# ElevenLabs przychodzi już czysty i zmasterowany — tylko lekkie wyrównanie, bez kompresji Supertonic
+# VoiceStudio przychodzi już czysty — tylko lekkie wyrównanie, bez kompresji Supertonic
 LEKTOR_CLOUD_FILTER = "highpass=f=60,acompressor=threshold=-18dB:ratio=2:attack=10:release=150:makeup=1"
 LEKTOR_LIMITER = "alimiter=limit=0.89:attack=4:release=60:level=disabled"
 LEKTOR_TARGET_RMS = 0.1
@@ -1039,7 +1039,7 @@ def save_config(data):
     CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
     if not IS_WIN:
         try:
-            os.chmod(CONFIG_PATH, 0o600)  # w pliku bywa klucz ElevenLabs — tylko dla właściciela
+            os.chmod(CONFIG_PATH, 0o600)  # ustawienia tylko dla właściciela
         except OSError:
             pass
 
@@ -2681,149 +2681,128 @@ def log_timing(line):
         pass
 
 
-# ElevenLabs (klucz API użytkownika): naturalny głos lektora; Flash v2.5 = najniższe opóźnienie, zna polski.
-# Bez sieci, po wyczerpaniu limitu albo przy złym kluczu lektor wraca do Supertonic.
-ELEVEN_HOST = "api.elevenlabs.io"
-ELEVEN_MODEL = "eleven_flash_v2_5"
-ELEVEN_RATE = 24000
-# lektor filmowy: równy, spokojny głos — wysoka stabilność, bez „aktorskiego” stylu
-ELEVEN_SETTINGS = {"stability": 0.6, "similarity_boost": 0.8, "style": 0.0, "use_speaker_boost": True}
+# VoiceStudio (OmniVoice) na tym Macu: lektor z „voicepacka” — wzorcowego głosu wygenerowanego z opisu.
+# Model działa w osobnym procesie Pythonem z VoiceStudio (torch na GPU Maca), ładuje się raz.
+VOICESTUDIO_ROOT = Path(os.environ.get("VOICESTUDIO_ROOT") or Path.home() / "voice-studio-projekty/VoiceStudio")
+VOICEPACK_DIR = CONFIG_PATH.parent / "voicepacks"
+OMNI_STEPS = 12  # 8 kroków nie jest szybsze (narzut GPU), 12 brzmi czyściej
+OMNI_TIMEOUT = 8.0
 
 
-class ElevenLabsTTS:
-    def __init__(self, key, voice):
-        self.key = (key or "").strip()
-        self.voice = re.sub(r"[^A-Za-z0-9]", "", voice or "")
-        self.lock = threading.Lock()
-        self.conn = None
+def voicepacks():
+    try:
+        return sorted(p.name for p in VOICEPACK_DIR.iterdir() if (p / "voice.wav").is_file() and (p / "voice.txt").is_file())
+    except OSError:
+        return []
+
+
+def voicestudio_python():
+    py = VOICESTUDIO_ROOT / ".venv/bin/python"
+    return py if not IS_WIN and py.exists() else None
+
+
+class OmniVoiceLocal:
+    rate = 24000
+
+    def __init__(self, pack):
+        self.pack = re.sub(r"[^\w\-]", "", pack or "")
+        self.voice = self.pack
+        # „pogrubienie” z voice.json: ton i barwa w dół (0,92 = -8 %), długość bez zmian
+        try:
+            meta = json.loads((VOICEPACK_DIR / self.pack / "voice.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            meta = {}
+        deepen = max(0.8, min(1.0, float(meta.get("deepen") or 1.0)))
+        self.pre_filter = (
+            f"asetrate={self.rate * deepen:.0f},aresample={self.rate},atempo={1 / deepen:.4f}" if deepen < 0.999 else ""
+        )
+        self.tag = f"ov1|{self.pack}|{OMNI_STEPS}|{deepen:.2f}"
         self.error = ""
         self.failed_until = 0.0
+        self.ready = False
+        self.proc = None
+        self.lock = threading.Lock()
+        self._n = 0
+        self.on_ready = None
+        threading.Thread(target=self._start, daemon=True).start()
 
-    def _request(self, method, path, body=None, timeout=8.0):
-        import http.client
-
-        headers = {"xi-api-key": self.key, "Accept": "*/*"}
-        data = None
-        if body is not None:
-            headers["Content-Type"] = "application/json"
-            data = json.dumps(body).encode("utf-8")
+    def _start(self):
+        py = voicestudio_python()
+        script = Path(__file__).resolve().with_name("omnivoice_sidecar.py")
+        if py is None or not script.exists() or self.pack not in voicepacks():
+            self.error = "VoiceStudio: brak VoiceStudio albo voicepacka — czytam Supertonic."
+            self.failed_until = float("inf")
+            return
         with self.lock:
-            for attempt in (0, 1):
-                try:
-                    # jedno połączenie na stałe — bez nowego TLS przy każdej kwestii
-                    if self.conn is None:
-                        self.conn = http.client.HTTPSConnection(ELEVEN_HOST, timeout=timeout)
-                    self.conn.request(method, path, body=data, headers=headers)
-                    resp = self.conn.getresponse()
-                    return resp.status, resp.read()
-                except (OSError, http.client.HTTPException):
-                    try:
-                        self.conn.close()
-                    except Exception:
-                        pass
-                    self.conn = None
-                    if attempt:
-                        raise
-
-    @staticmethod
-    def _detail(payload):
-        try:
-            detail = json.loads(payload.decode("utf-8", "replace")).get("detail")
-            if isinstance(detail, dict):
-                return str(detail.get("message") or detail.get("status") or detail)
-            return str(detail or "")
-        except Exception:
-            return ""
-
-    def voices(self):
-        """[{id, name}] z konta (własne, z biblioteki i gotowe) albo [] przy błędzie."""
-        try:
-            status, payload = self._request("GET", "/v1/voices")
-        except Exception as exc:
-            self.error = f"ElevenLabs: brak połączenia ({exc})."
-            return []
-        if status != 200:
-            self.error = f"ElevenLabs: {self._detail(payload) or f'błąd {status}'}"
-            return []
-        self.error = ""
-        voices = json.loads(payload.decode("utf-8")).get("voices") or []
-        def polish(v):
-            labels = v.get("labels") or {}
-            return "pl" in {str(labels.get("language", "")).lower(), str(v.get("fine_tuning", {}).get("language", "")).lower()} \
-                or "polish" in str(labels.get("accent", "")).lower()
-
-        return [
-            {"id": v["voice_id"], "name": v.get("name") or v["voice_id"],
-             "group": "Twoje polskie" if polish(v) else "Twoje konto (akcent angielski)"}
-            for v in sorted(voices, key=lambda v: not polish(v)) if v.get("voice_id")
-        ]
-
-    def library(self):
-        """Polskie męskie głosy z biblioteki ElevenLabs (najczęściej używane), jeszcze nie dodane do konta."""
-        from urllib.parse import urlencode
-
-        query = urlencode({
-            "language": "pl", "gender": "male", "page_size": 40,
-            "sort": "usage_character_count_1y", "include_custom_rates": "false",
-        })
-        try:
-            status, payload = self._request("GET", f"/v1/shared-voices?{query}")
-        except Exception:
-            return []
-        if status != 200:
-            return []
-        out = []
-        for v in json.loads(payload.decode("utf-8")).get("voices") or []:
-            if v.get("is_added_by_user") or not v.get("public_owner_id") or not v.get("voice_id"):
-                continue
-            note = v.get("descriptive") or v.get("use_case") or ""
-            out.append({
-                "id": f"lib:{v['public_owner_id']}:{v['voice_id']}",
-                "name": f"{v.get('name') or v['voice_id']}" + (f" — {note}" if note else ""),
-                "group": "Polskie z biblioteki (dodam do konta)",
-            })
-        return out
-
-    def add_shared(self, owner, voice, name):
-        """Dodaj głos z biblioteki do konta; zwraca jego voice_id albo None (np. darmowy plan)."""
-        owner = re.sub(r"[^A-Za-z0-9]", "", owner)
-        voice = re.sub(r"[^A-Za-z0-9]", "", voice)
-        try:
-            status, payload = self._request("POST", f"/v1/voices/add/{owner}/{voice}", {"new_name": name[:60]})
-        except Exception as exc:
-            self.error = f"ElevenLabs: brak połączenia ({exc})."
-            return None
-        if status != 200:
-            self.error = f"ElevenLabs: nie dodam głosu — {self._detail(payload) or f'błąd {status}'}"
-            return None
-        return json.loads(payload.decode("utf-8")).get("voice_id")
+            try:
+                self.proc = subprocess.Popen(
+                    [str(py), str(script), str(VOICESTUDIO_ROOT), str(VOICEPACK_DIR / self.pack), str(OMNI_STEPS)],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    cwd=str(VOICESTUDIO_ROOT), bufsize=0,
+                )
+                hello = json.loads(self.proc.stdout.readline() or b"{}")
+            except Exception as exc:
+                hello = {"error": str(exc)}
+        if hello.get("ready"):
+            self.rate = int(hello.get("rate") or self.rate)
+            self.ready = True
+            log_timing(f"VoiceStudio gotowy ({self.pack}, {hello.get('device')})")
+        else:
+            self.error = f"VoiceStudio nie wstaje: {hello.get('error') or 'brak odpowiedzi'} — czytam Supertonic."
+            self.failed_until = float("inf")
+            self.close()
+        if self.on_ready:
+            self.on_ready(self)
 
     def synth(self, text, speed=1.0, previous=""):
-        """Mono float32 (ELEVEN_RATE) albo None — wtedy lektor czyta Supertonic."""
-        if not self.key or not self.voice or time.monotonic() < self.failed_until:
+        """Mono float32 albo None (model jeszcze się ładuje / padł) — wtedy lektor czyta Supertonic."""
+        import select
+
+        if not self.ready or time.monotonic() < self.failed_until:
             return None
-        body = {
-            "text": text, "model_id": ELEVEN_MODEL, "language_code": "pl",
-            "voice_settings": {**ELEVEN_SETTINGS, "speed": round(max(0.8, min(1.2, speed)), 2)},
-        }
-        if previous:
-            body["previous_text"] = previous  # intonacja płynie dalej, jak u jednego lektora
+        with self.lock:
+            proc = self.proc
+            if proc is None or proc.poll() is not None:
+                self.ready = False
+                self.error = "VoiceStudio: proces lektora padł — czytam Supertonic."
+                self.failed_until = float("inf")
+                return None
+            self._n += 1
+            out = CACHE_DIR / f"ov_job_{os.getpid()}_{self._n % 4}.wav"
+            job = {"id": self._n, "text": text, "speed": round(max(0.8, min(1.3, speed)), 2), "out": str(out)}
+            try:
+                proc.stdin.write((json.dumps(job, ensure_ascii=False) + "\n").encode("utf-8"))
+                proc.stdin.flush()
+                ready, _w, _x = select.select([proc.stdout], [], [], OMNI_TIMEOUT)
+                answer = json.loads(proc.stdout.readline() or b"{}") if ready else {"error": "za długo"}
+            except Exception as exc:
+                answer = {"error": str(exc)}
+            if not answer.get("ok"):
+                self.error = f"VoiceStudio: {answer.get('error') or 'błąd'} — ta kwestia Supertonic."
+                if not ready:
+                    self.close()  # zawieszony model: zabij, żeby nie trzymał GPU
+                    self.failed_until = float("inf")
+                return None
         try:
-            status, payload = self._request(
-                "POST", f"/v1/text-to-speech/{self.voice}?output_format=pcm_{ELEVEN_RATE}", body
-            )
-        except Exception as exc:
-            self.error = f"ElevenLabs: brak połączenia ({exc}) — czytam Supertonic."
-            self.failed_until = time.monotonic() + 30.0
-            return None
-        if status != 200 or len(payload) < 64:
-            detail = self._detail(payload) or f"błąd {status}"
-            self.error = f"ElevenLabs: {detail} — czytam Supertonic."
-            # zły klucz / brak znaków: nie pytaj co kwestię
-            self.failed_until = time.monotonic() + (300.0 if status in (401, 402, 403) else 20.0)
+            with wave.open(str(out), "rb") as handle:
+                pcm = handle.readframes(handle.getnframes())
+        except Exception:
             return None
         self.error = ""
-        return np.frombuffer(payload[: len(payload) // 2 * 2], dtype="<i2").astype(np.float32) / 32768.0
+        return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
+
+    def close(self):
+        proc, self.proc = self.proc, None
+        self.ready = False
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=2)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
 
 class MaleLektor:
@@ -2844,12 +2823,15 @@ class MaleLektor:
         self.cps1 = LEKTOR_CPS_PRIOR
         self.out = PlayerProcess()
         self.ffmpeg = which_bin("ffmpeg") or bundled_ffmpeg()
-        self.cloud = None  # ElevenLabsTTS, gdy użytkownik podał klucz
+        self.cloud = None  # OmniVoiceLocal, gdy wybrany lektor z VoiceStudio
         self._cloud_prev = ("", 0.0)
         self.on_cloud_error = None
 
-    def set_cloud(self, key, voice):
-        self.cloud = ElevenLabsTTS(key, voice) if key and voice else None
+    def set_backend(self, backend):
+        """OmniVoiceLocal albo None (Supertonic). Poprzedni lokalny model zwalnia GPU."""
+        old, self.cloud = self.cloud, backend
+        if old is not None and old is not backend and hasattr(old, "close"):
+            old.close()
 
     @property
     def backend(self):
@@ -2988,7 +2970,7 @@ class MaleLektor:
         # volume 0…1 (suwak 0–100 %); 100 % = 1,3× — limiter i tak nie przepuści przesteru
         gain = 1.3 * max(0.0, min(1.0, float(volume))) * params["gain"] * punct_gain
         cloud = self.cloud
-        voice_tag = f"el1|{cloud.voice}" if cloud is not None and time.monotonic() >= cloud.failed_until else f"st15|{self.voice}"
+        voice_tag = cloud.tag if cloud is not None and time.monotonic() >= cloud.failed_until else f"st15|{self.voice}"
         key = f"{voice_tag}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
         path = CACHE_DIR / f"{text_key(key)}.wav"
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -2997,13 +2979,16 @@ class MaleLektor:
         raw = Path(str(path) + ".raw.wav")
         t0 = time.monotonic()
         stretch = None
-        if voice_tag.startswith("el"):
+        if not voice_tag.startswith("st"):
             stretch = self._synth_cloud(cloud, text, raw, pace, pause)
             if stretch is None:
                 path = CACHE_DIR / f"{text_key(key.replace(voice_tag, f'st15|{self.voice}', 1))}.wav"
                 if path.exists() and path.stat().st_size >= 64:
                     return path
-        filt = LEKTOR_CLOUD_FILTER if stretch is not None else LEKTOR_FILTER
+        filt = LEKTOR_FILTER
+        if stretch is not None:
+            pre = getattr(cloud, "pre_filter", "")
+            filt = f"{pre},{LEKTOR_CLOUD_FILTER}" if pre else LEKTOR_CLOUD_FILTER
         if stretch is None:
             stretch = self._synth(text, raw, pace, self._style(params["blend"]), pause)
         t1 = time.monotonic()
@@ -3039,7 +3024,7 @@ class MaleLektor:
         return stretch
 
     def _synth_cloud(self, cloud, text, path, pace, pause):
-        """ElevenLabs; None = nie wyszło (lektor czyta Supertonic). Tempo w całości po stronie głosu."""
+        """Lektor z VoiceStudio; None = nie wyszło (lektor czyta Supertonic). Tempo w całości po stronie głosu."""
         speed, stretch = lektor_speed_split(pace, text)
         rate = speed * stretch / LEKTOR_SPEED  # 1,0 = zwykłe tempo lektora
         prev, at = self._cloud_prev
@@ -3049,7 +3034,7 @@ class MaleLektor:
                 self.on_cloud_error(cloud.error)
             return None
         self._cloud_prev = (text, time.monotonic())
-        self._write_voice(audio, ELEVEN_RATE, text, max(0.5, rate * LEKTOR_SPEED), path, pause)
+        self._write_voice(audio, cloud.rate, text, max(0.5, rate * LEKTOR_SPEED), path, pause)
         return 1.0
 
     def _write_voice(self, audio, sr, text, speed, path, pause):
@@ -4174,15 +4159,12 @@ class Engine:
         voice = str(self.cfg.get("lektorVoice") or DEFAULT_SUPERTONIC_VOICE).strip().upper()
         if voice in SUPERTONIC_VOICES:
             self.lektor.voice = voice
-        # ElevenLabs: klucz i głos z ustawień; lista głosów z konta dociąga się w tle
-        self.eleven_key = str(self.cfg.get("elevenKey") or "").strip()
-        self.eleven_voice = str(self.cfg.get("elevenVoice") or "").strip()
-        self.eleven_voices = []
         self._cloud_error_shown = ""
         self.lektor.on_cloud_error = self._on_cloud_error
-        self.lektor.set_cloud(self.eleven_key, self.eleven_voice)
-        if self.eleven_key:
-            threading.Thread(target=self._load_eleven_voices, daemon=True).start()
+        # silnik lektora: supertonic (lokalnie, CPU) albo voicestudio (voicepack, GPU)
+        self.omni_pack = str(self.cfg.get("omniPack") or "")
+        self.lektor_engine = self.cfg.get("lektorEngine") if self.cfg.get("lektorEngine") in ("supertonic", "voicestudio") else "supertonic"
+        self._sync_voice()
         self.translator = ArgosTranslator()
         self.stt = ParakeetSTT()
         self.prosody = ProsodyMeter()
@@ -4350,49 +4332,34 @@ class Engine:
             "source": self.source,
             "sourceKind": self._source_kind(),
             "sourceLabel": self._source_label() if self.source_info else None,
-            # klucz nie wraca do okna — tylko informacja, że jest
-            "elevenKeySet": bool(getattr(self, "eleven_key", "")),
-            "elevenVoice": getattr(self, "eleven_voice", ""),
-            "elevenVoices": getattr(self, "eleven_voices", []),
+            "lektorEngine": getattr(self, "lektor_engine", "supertonic"),
+            "omniPack": getattr(self, "omni_pack", ""),
+            "omniPacks": voicepacks() if voicestudio_python() else [],
         }
+
+    def _sync_voice(self):
+        """Ustaw silnik lektora według ustawień; lokalny model VoiceStudio startuje tylko, gdy wybrany."""
+        engine = self.lektor_engine
+        cur = self.lektor.cloud
+        if engine == "voicestudio" and self.omni_pack:
+            if isinstance(cur, OmniVoiceLocal) and cur.pack == self.omni_pack:
+                return
+            backend = OmniVoiceLocal(self.omni_pack)
+            self.emit({"event": "status", "text": f"Ładuję lektora VoiceStudio ({self.omni_pack})…"})
+
+            def ready(b):
+                if self.lektor.cloud is b:
+                    self._on_cloud_error(b.error if b.error else f"Lektor: VoiceStudio — {b.pack}.")
+
+            backend.on_ready = ready
+            self.lektor.set_backend(backend)
+        else:
+            self.lektor.set_backend(None)
 
     def _on_cloud_error(self, text):
         if text != self._cloud_error_shown:
             self._cloud_error_shown = text
             self.emit({"event": "status", "text": text})
-
-    def _load_eleven_voices(self):
-        client = ElevenLabsTTS(self.eleven_key, "")
-        voices = client.voices()
-        if client.error:
-            self._on_cloud_error(client.error)
-        library = client.library() if voices else []
-        self.eleven_voices = voices + library
-        if voices and self.eleven_voice not in {v["id"] for v in voices}:
-            self.eleven_voice = voices[0]["id"]  # pierwszy głos z konta — zmienisz w „Więcej”
-            self.persist()
-        self.lektor.set_cloud(self.eleven_key, self.eleven_voice)
-        if voices:
-            name = next((v["name"] for v in voices if v["id"] == self.eleven_voice), self.eleven_voice)
-            self.emit({"event": "status", "text": f"Lektor: ElevenLabs — {name}."})
-        self.emit({"event": "state", **self.snapshot()})
-
-    def _add_library_voice(self, choice):
-        """Głos z biblioteki: dodaj do konta, ustaw jako lektora, odśwież listę."""
-        _lib, owner, voice = (choice.split(":") + ["", ""])[:3]
-        name = next((v["name"].split(" — ")[0] for v in self.eleven_voices if v["id"] == choice), voice)
-        self.emit({"event": "status", "text": f"Dodaję głos {name} do konta ElevenLabs…"})
-        client = ElevenLabsTTS(self.eleven_key, "")
-        new_id = client.add_shared(owner, voice, name)
-        if not new_id:
-            self._on_cloud_error(client.error or "ElevenLabs: nie udało się dodać głosu.")
-            self.emit({"event": "state", **self.snapshot()})
-            return
-        self.eleven_voice = new_id
-        self._cloud_error_shown = ""
-        self.lektor.set_cloud(self.eleven_key, self.eleven_voice)
-        self.persist()
-        self._load_eleven_voices()
 
     def persist(self):
         save_config(
@@ -4415,8 +4382,8 @@ class Engine:
                 "source": self.source,
                 "gta6Added": True,
                 "lektorVoice": self.lektor.voice,
-                "elevenKey": self.eleven_key,
-                "elevenVoice": self.eleven_voice,
+                "lektorEngine": self.lektor_engine,
+                "omniPack": self.omni_pack,
             }
         )
 
@@ -4442,23 +4409,17 @@ class Engine:
             self.overlay = bool(data["overlay"])
         if "lektorVolume" in data:
             self.lektor_volume = max(0, min(100, int(data["lektorVolume"])))
-        if "elevenKey" in data:
-            self.eleven_key = str(data["elevenKey"] or "").strip()
-            self.eleven_voices = []
+        if data.get("lektorEngine") in ("supertonic", "voicestudio"):
+            self.lektor_engine = data["lektorEngine"]
             self._cloud_error_shown = ""
-            self.lektor.set_cloud(self.eleven_key, self.eleven_voice)
-            if self.eleven_key:
-                threading.Thread(target=self._load_eleven_voices, daemon=True).start()
-            else:
-                self.emit({"event": "status", "text": "Lektor: Supertonic (bez ElevenLabs)."})
-        if "elevenVoice" in data:
-            choice = str(data["elevenVoice"] or "")
-            if choice.startswith("lib:"):
-                threading.Thread(target=self._add_library_voice, args=(choice,), daemon=True).start()
-            else:
-                self.eleven_voice = re.sub(r"[^A-Za-z0-9]", "", choice)
-                self._cloud_error_shown = ""
-                self.lektor.set_cloud(self.eleven_key, self.eleven_voice)
+            if self.lektor_engine == "voicestudio" and not self.omni_pack and voicepacks():
+                self.omni_pack = voicepacks()[0]
+            self._sync_voice()
+            if self.lektor_engine == "supertonic":
+                self.emit({"event": "status", "text": "Lektor: Supertonic."})
+        if "omniPack" in data and data["omniPack"] in voicepacks():
+            self.omni_pack = data["omniPack"]
+            self._sync_voice()
         if "game" in data:
             self.apply_game(data["game"], persist=False, announce=True, reset_lock=True)
         if "showRegion" in data:
@@ -5311,9 +5272,7 @@ class Engine:
         if ocr_junk_count(src) or self._like_spoken(key):
             return
         rank = ocr_reading_rank(src)
-        # ElevenLabs liczy znaki — poprawiony odczyt syntezuje się najwyżej raz
-        redo_cap = 1 if getattr(getattr(self, "lektor", None), "cloud", None) is not None else 2
-        if rank < self._spec_rank or self._spec_redo >= redo_cap:
+        if rank < self._spec_rank or self._spec_redo >= 2:
             return  # gorszy wariant albo już dwie poprawki — CPU zostaje dla gry, lektor syntezuje po zatwierdzeniu
         if not fresh:
             self._spec_redo += 1

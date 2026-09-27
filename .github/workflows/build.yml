@@ -27,7 +27,7 @@ jobs:
 
       - name: Składnia silnika i Electrona
         run: |
-          python3 -m py_compile gamereader_engine.py gamereader_worker.py lektor_brain.py gamereader_gui.py gamereader_win.py ci/win_smoke.py
+          python3 -m py_compile gamereader_engine.py gamereader_worker.py lektor_brain.py omnivoice_sidecar.py gamereader_gui.py gamereader_win.py ci/win_smoke.py
           for f in electron/*.js electron/renderer/*.js ci/*.js; do node --check "$f"; done
 
   version:
@@ -95,7 +95,7 @@ jobs:
         run: npm ci
 
       - name: Sprawdź składnię silnika
-        run: python3 -m py_compile gamereader_engine.py gamereader_worker.py lektor_brain.py gamereader_gui.py gamereader_win.py
+        run: python3 -m py_compile gamereader_engine.py gamereader_worker.py lektor_brain.py omnivoice_sidecar.py gamereader_gui.py gamereader_win.py
 
       - name: Stały podpis (certyfikat „LiveDub Release” z sekretów)
         # Bez certyfikatu Apple: własny, zawsze ten sam certyfikat — macOS pamięta zgody (nagrywanie ekranu)
