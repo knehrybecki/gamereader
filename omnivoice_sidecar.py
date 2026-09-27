@@ -45,7 +45,7 @@ def main():
         except json.JSONDecodeError:
             continue
         try:
-            speed = max(0.8, min(1.3, float(job.get("speed") or 1.0)))
+            speed = max(0.7, min(1.3, float(job.get("speed") or 1.0)))
             wav = model.generate(
                 text=job["text"], language="pl", voice_clone_prompt=prompt, num_step=steps, speed=speed
             )[0]

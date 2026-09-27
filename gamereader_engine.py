@@ -2685,8 +2685,10 @@ def log_timing(line):
 # Model działa w osobnym procesie Pythonem z VoiceStudio (torch na GPU Maca), ładuje się raz.
 VOICESTUDIO_ROOT = Path(os.environ.get("VOICESTUDIO_ROOT") or Path.home() / "voice-studio-projekty/VoiceStudio")
 VOICEPACK_DIR = CONFIG_PATH.parent / "voicepacks"
-OMNI_STEPS = 12  # 8 kroków nie jest szybsze (narzut GPU), 12 brzmi czyściej
+OMNI_STEPS = 8  # z krótkim wzorcem (~3 s) 8 kroków = ~0,6–0,8 s na kwestię
 OMNI_TIMEOUT = 8.0
+# OmniVoice z natury czyta ~18 zn/s — lektor filmowy ~15–16 zn/s
+OMNI_SPEED_SCALE = 0.87
 
 
 def voicepacks():
@@ -2716,7 +2718,7 @@ class OmniVoiceLocal:
         self.pre_filter = (
             f"asetrate={self.rate * deepen:.0f},aresample={self.rate},atempo={1 / deepen:.4f}" if deepen < 0.999 else ""
         )
-        self.tag = f"ov1|{self.pack}|{OMNI_STEPS}|{deepen:.2f}"
+        self.tag = f"ov1|{self.pack}|{OMNI_STEPS}|{deepen:.2f}|{OMNI_SPEED_SCALE}"
         self.error = ""
         self.failed_until = 0.0
         self.ready = False
@@ -2769,7 +2771,8 @@ class OmniVoiceLocal:
                 return None
             self._n += 1
             out = CACHE_DIR / f"ov_job_{os.getpid()}_{self._n % 4}.wav"
-            job = {"id": self._n, "text": text, "speed": round(max(0.8, min(1.3, speed)), 2), "out": str(out)}
+            speed = max(0.75, min(1.2, speed * OMNI_SPEED_SCALE))
+            job = {"id": self._n, "text": text, "speed": round(speed, 2), "out": str(out)}
             try:
                 proc.stdin.write((json.dumps(job, ensure_ascii=False) + "\n").encode("utf-8"))
                 proc.stdin.flush()
@@ -4162,8 +4165,11 @@ class Engine:
         self._cloud_error_shown = ""
         self.lektor.on_cloud_error = self._on_cloud_error
         # silnik lektora: supertonic (lokalnie, CPU) albo voicestudio (voicepack, GPU)
-        self.omni_pack = str(self.cfg.get("omniPack") or "")
-        self.lektor_engine = self.cfg.get("lektorEngine") if self.cfg.get("lektorEngine") in ("supertonic", "voicestudio") else "supertonic"
+        packs = voicepacks() if voicestudio_python() else []
+        self.omni_pack = str(self.cfg.get("omniPack") or (packs[0] if packs else ""))
+        # jest voicepack z VoiceStudio — domyślnie on (naturalniejszy); wybór w „Więcej” → Głos
+        default = "voicestudio" if packs else "supertonic"
+        self.lektor_engine = self.cfg.get("lektorEngine") if self.cfg.get("lektorEngine") in ("supertonic", "voicestudio") else default
         self._sync_voice()
         self.translator = ArgosTranslator()
         self.stt = ParakeetSTT()
