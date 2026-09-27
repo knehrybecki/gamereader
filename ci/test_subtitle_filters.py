@@ -187,12 +187,51 @@ class SubtitleFiltersTest(unittest.TestCase):
         self.assertIn("będziesz", spoken)
         self.assertNotIn("bedkles", spoken)
 
+    def test_game_line_is_synthesized_while_ocr_settles(self):
+        # sesja 15:15: bez syntezy na zapas lektor startował 1,3 s po napisie zamiast ~0,4 s
+        engine = self._engine()
+        frames = [
+            (12.14, "Jeśli mam to zrobić, to musisz podjechać olizej."),
+            (12.30, "Jeśli mam to zrobić, to musisz podjechać bliżej."),
+            (12.60, "Jeśli mam to zrobić, to musisz podjechać bliżej."),
+        ]
+        for stamp, text in frames:
+            with patch("gamereader_engine.time.monotonic", return_value=stamp):
+                engine._on_subtitle(text)
+        spoken = engine._offer_line.call_args[0][0]
+        speculated = [call.args[0] for call in engine._speculate.call_args_list]
+        self.assertEqual(speculated[-1], spoken)
+        self.assertEqual(len(speculated), len(set(speculated)))
+
+    def test_clean_line_read_once_before_hud_frames_is_not_lost(self):
+        # sesja 15:17: „Zabieraj stąd swoje dupsko.” raz, potem „Mitun”, „lin” — lektor milczał
+        engine = self._engine()
+        with patch("gamereader_engine.time.monotonic", return_value=38.00):
+            engine._on_subtitle("Zabieraj stąd swoje dupsko.")
+            engine._flush_candidate()
+        engine._offer_line.assert_not_called()
+        with patch("gamereader_engine.time.monotonic", return_value=38.45):
+            engine._on_subtitle("Mitun")
+            engine._flush_candidate()
+        engine._offer_line.assert_called_once_with("Zabieraj stąd swoje dupsko.", False)
+
+    def test_unpunctuated_single_glimpse_is_not_flushed(self):
+        engine = self._engine()
+        with patch("gamereader_engine.time.monotonic", return_value=30.00):
+            engine._on_subtitle("Hey pie chcę ff")
+        with patch("gamereader_engine.time.monotonic", return_value=30.60):
+            engine._flush_candidate()
+        engine._offer_line.assert_not_called()
+
     def test_catchup_pace_stays_intelligible(self):
         # pace jak przy doganianiu z sesji 13:48 (boost 1,40, tts 0,92, żywy głos)
         speed, stretch = lektor_speed_split(0.53, "Zabierz Franklina blisko jachtu.")
         self.assertLessEqual(speed, LEKTOR_MAX_RATE)
         self.assertLessEqual(stretch, LEKTOR_MAX_STRETCH)
         self.assertLessEqual(speed * stretch, LEKTOR_MAX_RATE + 1e-6)
+        # sesja 15:16: ×1,25 z atempo ×1,12 było niezrozumiałe — lektor filmowy nie szybciej niż ×1,15
+        self.assertLessEqual(speed * stretch, 1.15 + 1e-6)
+        self.assertLessEqual(stretch, 1.05 + 1e-6)
 
 
 if __name__ == "__main__":

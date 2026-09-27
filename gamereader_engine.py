@@ -1155,9 +1155,10 @@ LEKTOR_SPEED = 1.10
 LEKTOR_MAX_SPEED = 1.35
 # spóźniony lektor może tylko lekko przyspieszyć. W sesji z 13:48 doganianie
 # (tempo ×1,40 i atempo ×1,40) dawało 20–24 zn/s i mowa się zlewała; czytelne
-# było ~17 zn/s bez rozciągania ffmpeg. 1,25 to sufit łącznego tempa względem speed=1.
-LEKTOR_MAX_RATE = 1.25
-LEKTOR_MAX_STRETCH = 1.12
+# było ~17 zn/s bez rozciągania ffmpeg. Sesja 15:16: nawet ×1,25 z atempo ×1,12 (17,5 zn/s)
+# brzmiało za szybko jak na lektora filmowego — sufit ×1,15, ffmpeg dociąga najwyżej 5 %.
+LEKTOR_MAX_RATE = 1.15
+LEKTOR_MAX_STRETCH = 1.05
 # gdy w kolejce czeka już następny napis: kolejne fragmenty syntezują się szybciej, bez pauz
 LEKTOR_CATCHUP_RATE = 1.08
 # tempo dopasowane do napisów: lektor ma się zmieścić w czasie, w którym napis wisi na ekranie
@@ -4942,6 +4943,19 @@ class Engine:
                 self._ready.clear()
             self._ready[src] = item
 
+    def _speculate_candidate(self, src, fresh):
+        """Czekamy na potwierdzenie napisu — w tym czasie lektor syntezuje najlepszy dotąd odczyt.
+        Poprawiony odczyt syntezuje się ponownie tylko, gdy jest czysty (bez zlepków i śmieci)."""
+        key = strip_fillers(src)
+        if not key or len(key) < 6 or key == getattr(self, "_spec_key", ""):
+            return
+        rank = ocr_reading_rank(src)
+        if not fresh and rank <= getattr(self, "_spec_rank", -1):
+            return  # równie dobry wariant („stary” / „stary.”) — zostaje dźwięk, który już się robi
+        self._spec_key, self._spec_rank = key, rank
+        self._seen_at.setdefault(key, getattr(self, "_ocr_started", time.monotonic()))
+        self._speculate(key, should_translate(src))
+
     def _speculate(self, src, translate):
         """Zacznij tłumaczyć i syntezować napis od pierwszego odczytu (najnowszy wygrywa)."""
         self._spec_item = (src, translate)
@@ -5219,22 +5233,21 @@ class Engine:
                 if len(self._seen_at) > 32:
                     self._seen_at.clear()
                 self._seen_at.setdefault(key, now)
-                # zanim OCR potwierdzi napis, lektor już go tłumaczy i syntezuje
-                if need > 1 and len(key) >= 6:
-                    self._speculate(key, should_translate(src))
         self._ocr_samples = samples
         if samples:
-            # przy remisie zostaje późniejsza klatka — pierwsza bywa najgorsza
-            self._ocr_candidate = max(enumerate(samples), key=lambda item: (ocr_reading_rank(item[1]), item[0]))[1]
+            # przy remisie wygrywa wariant, który lektor już syntezuje, potem późniejsza klatka
+            spec_key = getattr(self, "_spec_key", "")
+            self._ocr_candidate = max(
+                enumerate(samples),
+                key=lambda item: (ocr_reading_rank(item[1]), strip_fillers(item[1]) == spec_key, item[0]),
+            )[1]
         self._ocr_candidate_at = now
-        if self._ocr_candidate_n < need:
-            return
         src = self._ocr_candidate
         age = now - getattr(self, "_ocr_started", now)
-        if self._source_kind() != "chrome" and len(src.split()) >= 2 and age < OCR_HOLD_SEC:
-            return
-        if (self._source_kind() != "chrome" and len(src) >= 24 and ocr_reading_unsettled(src)
-                and age < OCR_SETTLE_SEC):
+        game = self._source_kind() != "chrome"
+        if (self._ocr_candidate_n < need or (game and len(src.split()) >= 2 and age < OCR_HOLD_SEC)
+                or (game and len(src) >= 24 and ocr_reading_unsettled(src) and age < OCR_SETTLE_SEC)):
+            self._speculate_candidate(src, fresh=len(samples) == 1)
             return
         self._ocr_candidate = ""
         self._ocr_candidate_n = 0
@@ -5264,6 +5277,23 @@ class Engine:
                 )
             self._pl_subs_at = now
         self._offer_line(src, translate)
+
+    def _flush_candidate(self):
+        """Czysty napis przeczytany raz, a w następnej klatce już HUD / śmieć / pusto („Zabieraj stąd
+        swoje dupsko.” → „Mitun”) — po czasie zatrzymania lektor i tak go czyta, zamiast zgubić."""
+        src = self._ocr_candidate
+        if not src or self._source_kind() == "chrome":
+            return
+        now = time.monotonic()
+        if now - getattr(self, "_ocr_candidate_at", now) < 0.05:
+            return  # ta klatka właśnie go dotknęła — decyzja już zapadła w _on_subtitle
+        age = now - getattr(self, "_ocr_started", now)
+        if not OCR_HOLD_SEC <= age < 2.0:
+            return
+        if not re.search(r"[.!?…]$", src) or not looks_polish(src) or ocr_reading_unsettled(src):
+            return
+        self._ocr_candidate_at = now  # liczy się jak kolejny odczyt tej samej klatki
+        self._on_subtitle(src)
 
     def _ocr_scan_thread(self):
         try:
@@ -5332,7 +5362,9 @@ class Engine:
                     if src:
                         empty_streak = 0
                         self._on_subtitle(src)
+                        self._flush_candidate()
                     else:
+                        self._flush_candidate()
                         empty_streak += 1
                         # nie czyść last_subtitle zbyt szybko — inaczej ta sama kwestia leci w kółko
                         if empty_streak >= 18 and not self.speaking_text:
