@@ -120,9 +120,14 @@ class LektorBrain:
             if key in self._results or key in self._pending:
                 return
             self._pending.add(key)
-            self._jobs.append((time.monotonic(), key))
+            # napis z ekranu przed mową z dźwięku: lektor czeka na jego ocenę tuż przed czytaniem, a
+            # gadanie przechodniów na ulicy potrafi zapchać kolejkę
+            if kind == "subtitle":
+                self._jobs.appendleft((time.monotonic(), key))
+            else:
+                self._jobs.append((time.monotonic(), key))
             while len(self._jobs) > BRAIN_QUEUE_MAX:
-                _t, old = self._jobs.popleft()
+                _t, old = self._jobs.pop() if self._jobs[-1][1][0] != "subtitle" else self._jobs.popleft()
                 self._pending.discard(old)
             self._cond.notify_all()
 

@@ -744,6 +744,7 @@ CATCH_UP_STALE_SEC = 2.0
 # wg reguł (menu, przyciski) odpada już przy wyższym progu. Kwestia bez informacji (p < próg) w zrywie
 # wypada pierwsza — jak u lektora TV.
 BRAIN_JUNK_P = 0.10
+BRAIN_ODD_WAIT = 0.6
 BRAIN_SUSPECT_P = 0.35
 BRAIN_SKIP_INFO_P = 0.2
 # krótkie wtrącenie (do 2 słów, nie pytanie z treścią) wypada, dopóki model nie jest pewny informacji
@@ -4477,7 +4478,9 @@ class Engine:
                         hurry=self._queue_waiting(src), boost=boost,
                     )
                 # nowy napis: model liczył w czasie syntezy — ostatnie słowo przed odtworzeniem
-                if len(parts) == 1 and self._brain_junk(parts[0], wait=0.15):
+                # przy polskich napisach niepolski skrawek (nazwa ulicy z HUD) czeka na model dłużej
+                odd = self._pl_subs_active and not looks_polish(parts[0])
+                if len(parts) == 1 and self._brain_junk(parts[0], wait=BRAIN_ODD_WAIT if odd else 0.15):
                     self._mark_spoken(parts[0])
                     continue
                 with self.pending_lock:
