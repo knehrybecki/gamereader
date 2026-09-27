@@ -54,7 +54,8 @@ def extends_utterance(prev, nxt):
     right = polish_fold(nxt or "")
     if not left or not right or len(right) <= len(left) + 1:
         return False
-    return right.startswith(left) or (left in right and len(right) >= int(len(left) * 1.2))
+    # „Tata?” w „Nie nazywaj mnie tata, …” to nie rozwinięcie — środek pasuje tylko do dłuższego napisu
+    return right.startswith(left) or (len(left) >= 12 and left in right and len(right) >= int(len(left) * 1.2))
 BLACK_MEAN = 8.0
 PREVIEW_W = 780
 PREVIEW_H = 110
@@ -514,8 +515,8 @@ def ocr_reading_rank(text):
         fold = polish_fold(word)
         if fold in table or fold in _POLISH_BY_FOLD:
             score += 12
-        if any(ch in PL_MARK for ch in word):
-            score += 2
+        # bez premii za ogonki: „moją łódź znika”, „Fłanklin” wygrywały z poprawnymi — o ogonkach
+        # decyduje dopiero remis, po tym, który wariant OCR czytał najczęściej
     score -= 14 * ocr_junk_count(raw)
     # „Dobrał Idź”, „Kurwal Jebany” — OCR zrobił z „!” literę ł/l; wariant z „!” jest lepszy
     known = lambda fold: fold in table or fold in _POLISH_BY_FOLD
@@ -727,7 +728,15 @@ def trim_ocr_edges(text):
     raw = re.sub(r"^[¡¿•·∙◦|/\\*]+\s*", "", raw)
     raw = re.sub(r"^[-–—]+\s+", "", raw)
     raw = re.sub(r"(?:\s+[¡¿•·∙◦|/\\*\-–—,;]+)+$", "", raw)
-    return re.sub(r"([.!?…])\s+[A-Za-z•·]$", r"\1", raw)
+    raw = re.sub(r"([.!?…])\s+[A-Za-z•·]$", r"\1", raw)
+    # HUD za napisem: „…rodzicielskie. ołzz”, „…wykończy! Wiad”, „…brzmi. p r ]” — napis kończy się
+    # interpunkcją, więc 1–3 krótkie słowa bez niej po końcu zdania to nie dialog
+    def hud_tail(match):
+        words = [polish_fold(w) for w in match.group(0).split()]
+        known = [w for w in words if len(w) >= 3 and (w in _pl_diacritics() or w in _POLISH_BY_FOLD)]
+        return match.group(0) if known else ""  # „Czas odbić łódź” bez kropki to nadal zdanie
+
+    return re.sub(r"(?<=[.!?…])(?:\s+[^\s.!?…,]{1,6}){1,3}(?:\s+[\]\[.|])?$", hud_tail, raw)
 
 
 # Tekst z ekranu, który nie jest dialogiem: powiadomienia z pulpitu (GitHub, terminal), ścieżki,
@@ -880,6 +889,69 @@ def screen_junk_level(text):
     if _UI_SOFT.search(raw) or (len(letters) >= 6 and caps > 0.7):
         return "suspect"
     return "ok"
+
+
+class RecurringLead:
+    """Nazwa strefy / etykieta z mapy doklejana PRZED różnymi kwestiami („Lotnisko n Tato!…”, „Lotnisko n
+    Coś ci się…”, „Wiad To mnie…”). Słowo, które stało na początku 2 RÓŻNYCH kwestii bez interpunkcji po
+    sobie, to nie dialog — od tej pory jest wycinane (także w wariantach OCR: „Lotniako”, „Miad”)."""
+
+    def __init__(self, keep=40):
+        self.recent = deque(maxlen=keep)
+        self.junk = deque(maxlen=12)
+
+    @staticmethod
+    def _lead(words):
+        """(pierwsze słowo przodu, reszta) albo None: 1–2 słowa bez interpunkcji, potem zdanie z wielkiej litery."""
+        for cut in (1, 2):
+            if len(words) < cut + 2:
+                return None
+            head = words[:cut]
+            if any(re.search(r"[.,!?…:;]$", w) and len(polish_fold(w)) > 2 for w in head):
+                return None
+            if re.match(rf"[-–„\"]?[{_CAPS}][a-ząćęłńóśźż]", words[cut]):
+                token = max(head, key=lambda w: len(polish_fold(w)))
+                if len(polish_fold(token)) >= 3:
+                    return polish_fold(token), polish_fold(" ".join(words[cut:]))
+        return None
+
+    def _is_junk(self, fold):
+        return any(
+            abs(len(fold) - len(j)) <= 2 and SequenceMatcher(None, fold, j, autojunk=False).ratio() >= 0.7
+            for j in self.junk
+        )
+
+    def observe(self, text):
+        lead = self._lead(normalize_text(text).split())
+        if not lead:
+            return
+        token, rest = lead
+        for other_token, other_rest in self.recent:
+            if (other_token == token and SequenceMatcher(None, rest, other_rest, autojunk=False).ratio() < 0.6
+                    and not self._is_junk(token)):
+                self.junk.append(token)
+                break
+        self.recent.append(lead)
+
+    def strip(self, text):
+        words = normalize_text(text).split()
+        if not self.junk:
+            return normalize_text(text)
+        folds = [polish_fold(w) for w in words]
+        if folds and all(self._is_junk(f) or len(f) <= 2 for f in folds) and any(len(f) >= 3 for f in folds):
+            return ""  # sama etykieta z mapy („Lotnisko.”)
+        for cut in (3, 2, 1):
+            if len(words) < cut + 1:
+                continue
+            head = [polish_fold(w) for w in words[:cut]]
+            # przód = nauczone słowo + najwyżej krótkie śmieci obok („n”, „n!”, „z”, „u *”)
+            if any(self._is_junk(h) for h in head if len(h) >= 3) and all(
+                self._is_junk(h) or len(h) <= 2 for h in head
+            ):
+                # „Lotnisko jest blisko.” to zdanie; „Lotnisku u * więć…” — śmieć z krótkim ogonem
+                if re.match(rf"[-–„\"]?[{_CAPS}]", words[cut]) or any(len(h) <= 2 for h in head):
+                    return " ".join(words[cut:])
+        return normalize_text(text)
 
 
 class RecurringFragments:
@@ -2700,7 +2772,8 @@ class MaleLektor:
         """Ile razy za szybko musiałby czytać lektor, żeby zmieścić się w `seconds` (>1 = nie zdąży)."""
         if not seconds or seconds <= 0:
             return 0.0
-        return len(text or "") / (self.cps1 * max(0.6, seconds * 0.92)) / LEKTOR_MAX_SPEED
+        # sufit łącznego tempa lektora (nie samego modelu) — przy ×1,15 skrót wchodzi, zanim narośnie spóźnienie
+        return len(text or "") / (self.cps1 * max(0.6, seconds * 0.92)) / LEKTOR_MAX_RATE
 
     def line_boost(self, text, seconds):
         """Przyspieszenie CAŁEJ kwestii (jedno dla wszystkich jej fragmentów).
@@ -4981,13 +5054,19 @@ class Engine:
             return
         # zlepek („altanval Jebany silniki”) albo gorsza powtórka właśnie czytanej kwestii („Z blisko!”
         # po „Za blisko!”) — synteza poszłaby do kosza
-        if ocr_reading_unsettled(src) or self._like_spoken(key):
+        if ocr_junk_count(src) or self._like_spoken(key):
             return
         rank = ocr_reading_rank(src)
         if rank < self._spec_rank or self._spec_redo >= 2:
             return  # gorszy wariant albo już dwie poprawki — CPU zostaje dla gry, lektor syntezuje po zatwierdzeniu
         if not fresh:
             self._spec_redo += 1
+        now = time.monotonic()
+        prev_key, prev_at = getattr(self, "_spec_last", ("", -1e9))
+        if fresh and now - prev_at < 0.35 and SequenceMatcher(
+                None, polish_fold(key), polish_fold(prev_key), autojunk=False).ratio() >= 0.7:
+            return  # migający wariant tej samej kwestii — dźwięk już się robi
+        self._spec_last = (key, now)
         self._spec_key, self._spec_rank = key, rank
         self._seen_at.setdefault(key, getattr(self, "_ocr_started", time.monotonic()))
         if getattr(self, "brain", None) is not None:
@@ -5183,6 +5262,16 @@ class Engine:
             if not usable_ocr(src) or is_player_ui_text(src):
                 return
         src = trim_ocr_edges(src)
+        lead = getattr(self, "_lead_junk", None)
+        if lead is None:
+            lead = self._lead_junk = RecurringLead()
+        lead.observe(src)
+        unled = lead.strip(src)
+        if unled != normalize_text(src):
+            self._log_junk(src, f"wycinam etykietę z mapy: {src[:70]!r} -> {unled[:70]!r}")
+            src = unled
+            if not usable_ocr(src):
+                return
         if self._worse_reread(src):
             self._log_junk(src, f"pomijam — zła powtórka przeczytanej kwestii: {src[:70]!r}")
             return
@@ -5286,7 +5375,11 @@ class Engine:
             # przy remisie wygrywa wariant czytany najczęściej („klama” ×6 nad „klarna” ×2), potem
             # późniejsza klatka — pierwsza bywa najgorsza
             self._ocr_candidate = max(
-                enumerate(samples), key=lambda item: (ocr_reading_rank(item[1]), samples.count(item[1]), item[0])
+                enumerate(samples),
+                key=lambda item: (
+                    ocr_reading_rank(item[1]), samples.count(item[1]),
+                    sum(ch in PL_MARK for ch in item[1]), item[0],
+                ),
             )[1]
         self._ocr_candidate_at = now
         src = self._ocr_candidate

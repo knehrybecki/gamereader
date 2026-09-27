@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from gamereader_engine import (
     Engine, RecurringFragments, strip_lead_junk, screen_junk_level, same_utterance, ocr_reading_rank,
     trim_ocr_edges, condense_polish, lektor_speed_split, LEKTOR_MAX_RATE, LEKTOR_MAX_STRETCH,
-    strip_known_prefix, ocr_reading_unsettled, repair_polish_ocr,
+    strip_known_prefix, ocr_reading_unsettled, repair_polish_ocr, RecurringLead, extends_utterance,
 )
 
 
@@ -248,6 +248,37 @@ class SubtitleFiltersTest(unittest.TestCase):
 
     def test_scigaj_gets_its_accent(self):
         self.assertEqual(repair_polish_ocr("Scigaj jacht."), "Ścigaj jacht.")
+
+    def test_map_label_before_different_lines_is_learned(self):
+        # sesja 15:33–15:36: „Lotnisko n …” (strefa z mapy) przed kolejnymi kwestiami — lektor to czytał
+        lead = RecurringLead()
+        seen = []
+        for text in ("Lotnisko n Tato! Jezu! Pomocy!", "Lotnisko n Coś ci się popierdoliło, mały?",
+                     "Lotnisko n Dobra. Dzięki.", "Lotniako i! Już nie.", "Lotnisko jest blisko."):
+            lead.observe(text)
+            seen.append(lead.strip(text))
+        self.assertEqual(seen[2:], ["Dobra. Dzięki.", "Już nie.", "Lotnisko jest blisko."])
+        self.assertEqual(lead.strip("Lotnisko n Patrzeć?"), "Patrzeć?")
+        self.assertEqual(lead.strip("Lotnisko."), "")
+        # imię przed zdaniem bez przecinka raz się zdarza — nie jest śmieciem
+        names = RecurringLead()
+        names.observe("Franklin Chodź tu.")
+        self.assertEqual(names.strip("Franklin Chodź tu."), "Franklin Chodź tu.")
+
+    def test_hud_word_after_line_end_is_cut(self):
+        self.assertEqual(trim_ocr_edges("Przypomnij mi, żebym nie przychodził do ciebie po porady rodzicielskie. ołzz"),
+                         "Przypomnij mi, żebym nie przychodził do ciebie po porady rodzicielskie.")
+        self.assertEqual(trim_ocr_edges("To mnie wykończy! Wiad"), "To mnie wykończy!")
+        self.assertEqual(trim_ocr_edges("Idź. Już!"), "Idź. Już!")
+        self.assertEqual(trim_ocr_edges("To już wszyscy? Dobra. Czas odbić łódź."), "To już wszyscy? Dobra. Czas odbić łódź.")
+        self.assertEqual(trim_ocr_edges("Dość tego. Jasne? Dość."), "Dość tego. Jasne? Dość.")
+        self.assertEqual(trim_ocr_edges("Kiepsko to brzmi. F ."), "Kiepsko to brzmi.")
+        self.assertEqual(trim_ocr_edges("To już wszyscy? Dobra. Czas odbić łódź"), "To już wszyscy? Dobra. Czas odbić łódź")
+
+    def test_short_word_inside_new_line_is_not_its_growth(self):
+        # „Tata?”, potem „Nie nazywaj mnie tata, …” — lektor czytał tylko „małe ścierwo!…”
+        self.assertFalse(extends_utterance("Tata?", "Nie nazywaj mnie tata, małe ścierwo! Lepiej, żeby nadal pływała."))
+        self.assertTrue(extends_utterance("Złap Franklina", "Złap Franklina i jedź do garażu."))
 
     def test_catchup_pace_stays_intelligible(self):
         # pace jak przy doganianiu z sesji 13:48 (boost 1,40, tts 0,92, żywy głos)
