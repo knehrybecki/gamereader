@@ -690,6 +690,10 @@ AUDIO_SUNG_MAX = 0.55
 BRAIN_RADIO_P = 0.5
 # kwestia NPC bez napisu tłumaczona, gdy ważna dla gracza (policja, ostrzeżenie), nie gadanie przechodniów
 BRAIN_IMPORTANT_P = 0.5
+# komunikat w pętli (głośnik w sklepie: „Surveillance cameras are posted”) i powtarzane odzywki NPC —
+# zdanie z dźwięku słyszane już w tym oknie czasu nie jest czytane drugi raz
+HEARD_REPEAT_SEC = 900.0
+HEARD_REPEAT_MIN_FOLD = 10
 AUDIO_MIN_VOICED = 0.10  # mowa: 0,17 pod szumem 6 dB … 0,35 czysta; szum i wybuchy: 0,00
 # kwestia czekająca w kolejce dłużej niż tyle sekund (a jest już nowsza) — przepada, lektor leci dalej
 CATCH_UP_STALE_SEC = 2.0
@@ -3571,6 +3575,7 @@ class Engine:
         self._ocr_candidate = ""
         self._ocr_candidate_n = 0
         self._spoken_folds = {}
+        self._heard_seen = {}
         self.confirm_frames = OCR_CONFIRM_FRAMES
         self.speak_cooldown = 5.5
         self.no_barge_in = True
@@ -4644,6 +4649,9 @@ class Engine:
         # ciche mruczenie pod nosem i tłum w tle — pomijamy
         if quiet:
             return
+        heard = self._drop_repeated_heard(heard)
+        if not heard:
+            return
         self.emit({"event": "heard", "text": heard})
         if arousal is not None:
             if len(self._heard_arousal) > 64:
@@ -4654,6 +4662,27 @@ class Engine:
         if text_key(heard) == self.last_key or self._recently_spoken(heard):
             return
         self._offer_line(heard, True)
+
+    def _drop_repeated_heard(self, heard):
+        """Wypowiedź bez zdań słyszanych niedawno (pętla komunikatu, ta sama odzywka NPC); "" = nic nowego."""
+        now = time.monotonic()
+        self._heard_seen = {k: at for k, at in self._heard_seen.items() if now - at < HEARD_REPEAT_SEC}
+        kept, dropped = [], []
+        for sentence in re.split(r"(?<=[.!?])\s+", heard.strip()):
+            fold = polish_fold(sentence)
+            if len(fold) < HEARD_REPEAT_MIN_FOLD:
+                kept.append(sentence)
+                continue
+            if any(folds_match(fold, seen) for seen in self._heard_seen):
+                dropped.append(sentence)
+            else:
+                kept.append(sentence)
+            self._heard_seen[fold] = now
+        if dropped:
+            self._timing(f"pomijam dźwięk — powtórka (pętla/odzywka): {' '.join(dropped)[:70]!r}")
+        if not any(len(polish_fold(s)) >= HEARD_REPEAT_MIN_FOLD for s in kept):
+            return "" if dropped else heard
+        return " ".join(kept)
 
     def _unsubtitled_speech(self, audio, start, end):
         """Czy tę wypowiedź z dźwięku gry tłumaczyć: w trybie „Dźwięk” zawsze; w „Napisy + dźwięk” tylko
