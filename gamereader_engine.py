@@ -116,9 +116,26 @@ def _fold_words(text):
     return [w for w in (polish_fold(t) for t in (text or "").split()) if w]
 
 
+def _same_words_any_order(wa, wb):
+    """Dwulinijkowy napis, którego linijki OCR złożył w innej kolejności („Suką! Jimmy nazwał mnie” /
+    „Jimmry nazwał mnie sukaln”): te same słowa (z literówkami), inny porządek."""
+    if min(len(wa), len(wb)) < 3 or len(wa) != len(wb):
+        return False
+    rest = list(wb)
+    hits = 0
+    for word in wa:
+        best = max(rest, key=lambda w: SequenceMatcher(None, word, w, autojunk=False).ratio(), default=None)
+        if best is not None and SequenceMatcher(None, word, best, autojunk=False).ratio() >= OCR_TWIN_WORD_RATIO:
+            rest.remove(best)
+            hits += 1
+    return hits == len(wa)
+
+
 def ocr_twins(a, b):
     """Ten sam napis przeczytany przez OCR dwa razy z literówkami w kilku słowach (nie inna kwestia)."""
     wa, wb = _fold_words(a), _fold_words(b)
+    if _same_words_any_order(wa, wb):
+        return True
     ja, jb = "".join(wa), "".join(wb)
     if min(len(ja), len(jb)) < OCR_TWIN_MIN_FOLD or min(len(ja), len(jb)) / max(len(ja), len(jb)) < 0.75:
         return False
