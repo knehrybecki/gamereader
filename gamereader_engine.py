@@ -761,6 +761,11 @@ GAME_PROFILES = {
         # w trybie źródła „Auto” najpierw szukaj Netflixa w Chrome
         "prefer": "chrome",
     },
+    "gta5": {
+        **_GAME_BASE,
+        "label": "GTA V",
+        "hint": "PS Remote Play (PS5) — włącz w grze napisy; te same ustawienia co w każdej grze.",
+    },
     "rdr2": {
         **_GAME_BASE,
         "label": "Red Dead Redemption 2",
@@ -1771,6 +1776,16 @@ ENGLISH_NAMES = {
     "Drequan": "Drikłan", "Dimez": "Dajmz", "Roxy": "Roksi", "Heder": "Heder", "Bautista": "Bautista",
     "Bayside": "Bejsajd", "Starfish Island": "Starfisz Ajlend", "Ocean Beach": "Ołszen Bicz",
     "Little Haiti": "Litl Hejti", "Brickell": "Brikel", "Hialeah": "Hajalija", "Everglades": "Ewerglejds",
+    # GTA V — postaci i miejsca
+    "Los Santos": "Los Santos", "Blaine County": "Blejn Kaunti", "Sandy Shores": "Sendi Szors",
+    "Paleto Bay": "Paleto Bej", "Mount Chiliad": "Maunt Czilijad", "Alamo Sea": "Alamo Si", "Grapeseed": "Grejpsid",
+    "Del Perro": "Del Perro", "Rockford Hills": "Rokford Hils", "Mirror Park": "Miror Park", "Chumash": "Czumasz",
+    "Davis": "Dejwis", "Humane Labs": "Hjumejn Labs", "Merryweather": "Meriłeder", "Lifeinvader": "Lajfinwejder",
+    "FIB": "Ef Aj Bi", "IAA": "Aj Ej Ej", "Weston": "Łeston", "Simeon": "Simeon", "Yetarian": "Jetarian",
+    "Madrazo": "Madraso", "Tanisha": "Tanisza", "Denise": "Deniz", "Stretch": "Strecz", "Solomon": "Solomon",
+    "Richards": "Riczards", "Maude": "Mod", "Nigel": "Najdżel", "Barry": "Beri", "Cris": "Kris", "Formage": "Formaż",
+    "Lazlow": "Lazlo", "Friedlander": "Fridlender", "Tonya": "Tonja", "Beverly": "Bewerli", "Epsilon": "Epsilon",
+    "Cheng": "Czeng", "Wei": "Łej", "Tao": "Tał", "Hao": "Hał", "Mary-Ann": "Meri En", "Ammu-Nation": "Amju Nejszyn",
     "Leonida": "Leonida", "Gellhorn": "Gelhorn", "Ambrosia": "Ambrozja", "Grassrivers": "Grasriwers",
     "Kalaga": "Kalaga", "Leonida Keys": "Leonida Kiz", "Vice Beach": "Wajs Bicz", "Port Gellhorn": "Port Gelhorn",
     # Red Dead Redemption 2 — postaci
@@ -1841,6 +1856,7 @@ def _spanish_word(match):
     out = word.lower()
     for pattern, repl in _SPANISH_RULES:
         out = re.sub(pattern, repl, out)
+    out = hard_s(out)  # „policía” → „polis'ia”, nie „poliśia”
     return out[:1].upper() + out[1:] if word[:1].isupper() else out
 
 
@@ -1862,9 +1878,6 @@ def spanish_spoken(word):
     # po polsku „si” to „ś” — hiszpańskie brzmi jak „sj” przed samogłoską, „sy” przed spółgłoską
     out = re.sub(r"si(?=[aeiou])", "sj", out)
     out = re.sub(r"si(?![aeiouj\x02])", "sy", out)
-    # akcentowane „sí” + samogłoska (García, Lucía, Rocío): apostrof trzyma twarde „s” — bez niego lektor
-    # mówi „Garśija” (zmierzone: szum „s” ~5,4 kHz jak w „Lusa”, a bez apostrofu ~3,5 kHz jak w „Luśija”)
-    out = re.sub(r"si(?=\x02)", "s'i", out)
     out = re.sub(r"ni(?=[aeiou])", "nj", out)
     out = out.replace("\x02", "j")
     return out[:1].upper() + out[1:]
@@ -1898,6 +1911,18 @@ for _name in SPANISH_NAMES:
     for _form in {_name, _name.translate(_ACCENT_FOLD)}:
         if _form not in ENGLISH_NAMES:
             ENGLISH_NAMES[_form] = spanish_spoken(_name)
+
+# Po polsku „si” brzmi jak „ś” (Trejsi → „Trejśi”, Wajs Siti → „Wajs Śiti”, Lusija → „Luśija”), a w imionach
+# angielskich i hiszpańskich „s” jest twarde. Apostrof rozdziela głoski bez pauzy — zmierzone na lektorze:
+# szum głoski ~5–5,6 kHz jak w „Kasa” zamiast ~3,5–3,9 kHz jak w „Kaśi”.
+
+
+def hard_s(spoken):
+    return re.sub(r"([sS])i", r"\1'i", spoken.replace("s'i", "si").replace("S'i", "Si"))
+
+
+for _name, _spoken in list(ENGLISH_NAMES.items()):
+    ENGLISH_NAMES[_name] = hard_s(_spoken)
 
 
 # polskie końcówki odmiany doklejane do imienia (także po apostrofie: Mike'a, Tony'ego)
@@ -2413,7 +2438,7 @@ class MaleLektor:
         # suwak Głośność = głośność lektora; przejęcie i interpunkcja ją modulują
         # volume 0…1 (suwak 0–100 %); 100 % = 1,3× — limiter i tak nie przepuści przesteru
         gain = 1.3 * max(0.0, min(1.0, float(volume))) * params["gain"] * punct_gain
-        key = f"st13|{self.voice}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
+        key = f"st14|{self.voice}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
         path = CACHE_DIR / f"{text_key(key)}.wav"
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         if path.exists() and path.stat().st_size >= 64:

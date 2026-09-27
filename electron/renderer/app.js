@@ -1,5 +1,6 @@
 const GAMES = [
   { id: "gta6", label: "GTA VI" },
+  { id: "gta5", label: "GTA V" },
   { id: "rdr2", label: "Red Dead Redemption 2" },
   { id: "generic", label: "Inna gra" },
 ];
