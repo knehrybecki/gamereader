@@ -4448,15 +4448,15 @@ class Engine:
         """Stały napis z ekranu (nazwa ulicy, szyld), który model już odrzucił, a OCR czyta go za każdym
         razem inaczej („San Andreas BNR” → „Aodreas BNR”, „Medres? BNR”) — bez czekania na model."""
         junk = getattr(self, "_junk_words", None)
-        if not junk or looks_polish(text):
-            return False
         words = _fold_words(text)
-        if not words or len(words) > 4:
+        if not junk or not words or len(words) > 4:
             return False
         now = time.monotonic()
         caps = {"!" + polish_fold(t) for t in re.findall(r"[A-ZĄĆĘŁŃÓŚŹŻ]{3,}", normalize_text(text))}
         if any(now - junk.get(tag, -1e9) < JUNK_MEMORY_SEC for tag in caps):
             return True
+        if looks_polish(text):
+            return False
         return any(
             now - at < JUNK_MEMORY_SEC and SequenceMatcher(None, word, bad, autojunk=False).ratio() >= 0.7
             for word in words if len(word) >= 4
