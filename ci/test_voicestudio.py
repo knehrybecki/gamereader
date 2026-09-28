@@ -138,16 +138,18 @@ class MemoryCapTest(unittest.TestCase):
         opts = types.SimpleNamespace(enable_cpu_mem_arena=True, enable_mem_pattern=True)
         created = {}
 
-        def session(path, sess_options=None, providers=None, **kwargs):
-            created["opts"] = sess_options
-            created["providers"] = providers
-            return "session"
+        class Session:
+            def __init__(self, path, sess_options=None, providers=None, **kwargs):
+                created["opts"] = sess_options
+                created["providers"] = providers
 
         loader = types.SimpleNamespace(
-            ort=types.SimpleNamespace(InferenceSession=session, SessionOptions=lambda: opts)
+            ort=types.SimpleNamespace(InferenceSession=Session, SessionOptions=lambda: opts)
         )
         ge._cap_onnx_arena(loader)
-        loader.ort.InferenceSession("model.onnx", sess_options=opts, providers=["CPUExecutionProvider"])
+        made = loader.ort.InferenceSession("model.onnx", sess_options=opts, providers=["CPUExecutionProvider"])
+        # Supertonic odrzuca sesję, która nie przechodzi isinstance(…, ort.InferenceSession)
+        self.assertIsInstance(made, loader.ort.InferenceSession)
         self.assertFalse(opts.enable_cpu_mem_arena)
         self.assertFalse(opts.enable_mem_pattern)
 

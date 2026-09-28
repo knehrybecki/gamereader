@@ -366,17 +366,21 @@ class SubtitleFiltersTest(unittest.TestCase):
             enable_cpu_mem_arena = True
             enable_mem_pattern = True
 
+        class Session:
+            def __init__(self, path, sess_options=None, providers=None, **kwargs):
+                seen["opts"] = sess_options
+
         class Ort:
+            InferenceSession = Session
+
             def SessionOptions(self):
                 return Opts()
 
-            def InferenceSession(self, path, sess_options=None, providers=None, **kwargs):
-                seen["opts"] = sess_options
-                return path
-
         loader = type("Loader", (), {"ort": Ort()})()
         _cap_onnx_arena(loader)
-        loader.ort.InferenceSession("m.onnx", sess_options=Opts(), providers=["CPU"])
+        made = loader.ort.InferenceSession("m.onnx", sess_options=Opts(), providers=["CPU"])
+        self.assertIsInstance(made, loader.ort.InferenceSession)
+        self.assertIsInstance(made, Session)
         self.assertFalse(seen["opts"].enable_cpu_mem_arena)
         self.assertFalse(seen["opts"].enable_mem_pattern)
 

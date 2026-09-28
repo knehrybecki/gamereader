@@ -2838,14 +2838,17 @@ def _cap_onnx_arena(st_loader):
     if real is None or getattr(real, "_livedub_capped", False):
         return
 
-    def session(path, sess_options=None, providers=None, **kwargs):
-        opts = sess_options if sess_options is not None else st_loader.ort.SessionOptions()
-        opts.enable_cpu_mem_arena = False
-        opts.enable_mem_pattern = False
-        return real(path, sess_options=opts, providers=providers, **kwargs)
+    # podklasa, nie funkcja: Supertonic sprawdza isinstance(sesja, ort.InferenceSession)
+    class CappedSession(real):
+        _livedub_capped = True
 
-    session._livedub_capped = True
-    st_loader.ort.InferenceSession = session
+        def __init__(self, path, sess_options=None, providers=None, **kwargs):
+            opts = sess_options if sess_options is not None else st_loader.ort.SessionOptions()
+            opts.enable_cpu_mem_arena = False
+            opts.enable_mem_pattern = False
+            super().__init__(path, sess_options=opts, providers=providers, **kwargs)
+
+    st_loader.ort.InferenceSession = CappedSession
 
 
 class MaleLektor:
