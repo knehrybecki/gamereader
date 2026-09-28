@@ -103,5 +103,54 @@ class VoiceStudioTest(unittest.TestCase):
         self.assertIsNone(backend.synth("Hej."))
 
 
+class MemoryCapTest(unittest.TestCase):
+    def test_mlx_cache_is_capped_before_models_grow(self):
+        import types
+        import lektor_brain
+
+        seen = {}
+
+        def set_memory_limit(n):
+            seen["memory"] = n
+            return 0
+
+        def set_cache_limit(n):
+            seen["cache"] = n
+            return 0
+
+        def clear_cache():
+            seen["cleared"] = True
+
+        mx = types.SimpleNamespace(
+            set_memory_limit=set_memory_limit,
+            set_cache_limit=set_cache_limit,
+            clear_cache=clear_cache,
+        )
+        with patch.dict(sys.modules, {"mlx": types.SimpleNamespace(core=mx), "mlx.core": mx}):
+            lektor_brain.cap_mlx_cache()
+        self.assertEqual(seen["cache"], lektor_brain.BRAIN_MLX_CACHE_BYTES)
+        self.assertLessEqual(seen["memory"], 12 * 1024**3)
+        self.assertTrue(seen["cleared"])
+
+    def test_onnx_sessions_do_not_keep_a_growing_arena(self):
+        import types
+
+        opts = types.SimpleNamespace(enable_cpu_mem_arena=True, enable_mem_pattern=True)
+        created = {}
+
+        def session(path, sess_options=None, providers=None, **kwargs):
+            created["opts"] = sess_options
+            created["providers"] = providers
+            return "session"
+
+        loader = types.SimpleNamespace(
+            ort=types.SimpleNamespace(InferenceSession=session, SessionOptions=lambda: opts)
+        )
+        ge._cap_onnx_arena(loader)
+        loader.ort.InferenceSession("model.onnx", sess_options=opts, providers=["CPUExecutionProvider"])
+        self.assertFalse(opts.enable_cpu_mem_arena)
+        self.assertFalse(opts.enable_mem_pattern)
+
+
 if __name__ == "__main__":
     unittest.main()

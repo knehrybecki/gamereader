@@ -339,6 +339,47 @@ class SubtitleFiltersTest(unittest.TestCase):
         self.assertLessEqual(speed * stretch, 1.25 + 1e-6)
         self.assertEqual(stretch, 1.0)
 
+    def test_stt_queue_drops_stale_audio_but_keeps_stop(self):
+        from gamereader_engine import LiveTranscriber
+
+        live = LiveTranscriber(None, lambda *_a: None)
+        for i in range(8):
+            live.submit(i)
+        live.stop()
+        live.submit(9)
+        queued = []
+        while True:
+            try:
+                queued.append(live.jobs.get_nowait())
+            except Exception:
+                break
+        self.assertLessEqual(sum(item is not None for item in queued), 3)
+        self.assertEqual(queued[-1], None)
+        self.assertEqual(queued[-2], 9)
+
+    def test_onnx_sessions_do_not_keep_an_arena(self):
+        from gamereader_engine import _cap_onnx_arena
+
+        seen = {}
+
+        class Opts:
+            enable_cpu_mem_arena = True
+            enable_mem_pattern = True
+
+        class Ort:
+            def SessionOptions(self):
+                return Opts()
+
+            def InferenceSession(self, path, sess_options=None, providers=None, **kwargs):
+                seen["opts"] = sess_options
+                return path
+
+        loader = type("Loader", (), {"ort": Ort()})()
+        _cap_onnx_arena(loader)
+        loader.ort.InferenceSession("m.onnx", sess_options=Opts(), providers=["CPU"])
+        self.assertFalse(seen["opts"].enable_cpu_mem_arena)
+        self.assertFalse(seen["opts"].enable_mem_pattern)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -40,6 +40,14 @@ class SubtitleMaskTest(unittest.TestCase):
         frame = np.asarray(image)[:, :, ::-1].copy()
         self.assertIsNotNone(AppleVisionOcr.subtitle_mask(frame))
 
+    def test_rdr2_gray_letters_on_dark_bar_survive(self):
+        # RDR2: szare litery (~165) na półprzezroczystym ciemnym pasku, krótka kwestia w szerokim pasie skanu
+        image = Image.new('RGB', (866, 161), (70, 90, 60))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((280, 100, 500, 135), fill=(8, 8, 8))
+        draw.text((295, 104), 'Zabrali ją dokądś.', font=ImageFont.load_default(size=22), fill=(166, 165, 165))
+        self.assertIsNotNone(AppleVisionOcr.subtitle_mask(np.asarray(image)[:, :, ::-1].copy()))
+
     def test_plain_snow_is_not_a_subtitle(self):
         self.assertIsNone(AppleVisionOcr.subtitle_mask(np.full((120, 600, 3), 222, dtype=np.uint8)))
 

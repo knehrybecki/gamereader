@@ -20,13 +20,16 @@ import numpy as np
 from PIL import Image
 
 try:
-    from lektor_brain import HEAVY_IMPORT_LOCK, LektorBrain, brain_supported
+    from lektor_brain import HEAVY_IMPORT_LOCK, LektorBrain, brain_supported, cap_mlx_cache
 except Exception:  # starsza paczka bez modułu — lektor działa na samych regułach
     LektorBrain = None
     HEAVY_IMPORT_LOCK = threading.RLock()
 
     def brain_supported():
         return False
+
+    def cap_mlx_cache():
+        return None
 
 IS_WIN = sys.platform == "win32"
 if IS_WIN:
@@ -2829,6 +2832,22 @@ class OmniVoiceLocal:
                     pass
 
 
+def _cap_onnx_arena(st_loader):
+    """Wyłącz arenę ONNX Runtime — inaczej każdy nowy rozmiar tekstu dokłada blok, którego nikt nie zwalnia."""
+    real = getattr(st_loader.ort, "InferenceSession", None)
+    if real is None or getattr(real, "_livedub_capped", False):
+        return
+
+    def session(path, sess_options=None, providers=None, **kwargs):
+        opts = sess_options if sess_options is not None else st_loader.ort.SessionOptions()
+        opts.enable_cpu_mem_arena = False
+        opts.enable_mem_pattern = False
+        return real(path, sess_options=opts, providers=providers, **kwargs)
+
+    session._livedub_capped = True
+    st_loader.ort.InferenceSession = session
+
+
 class MaleLektor:
     """Lektor filmowy: Supertonic 3 na GPU (CoreML), równy głos, zmasterowany przez ffmpeg."""
 
@@ -2879,6 +2898,9 @@ class MaleLektor:
 
         def load(providers):
             st_loader.DEFAULT_ONNX_PROVIDERS = providers
+            # arena ONNX pamięta każdy rozmiar kwestii i nie oddaje RAM; przy zmiennej długości
+            # napisów potrafi urosnąć do dziesiątek GB
+            _cap_onnx_arena(st_loader)
             tts = TTS(auto_download=True)
             style = tts.get_voice_style(voice_name=self.voice)
             tts.synthesize("Lektor gotowy.", voice_style=style, lang="pl")  # rozgrzewka
@@ -3216,6 +3238,8 @@ class ParakeetSTT:
         return box.get("result")
 
     def _loop(self):
+        # limit zanim Parakeet w ogóle zaalokuje — inaczej cache MLX rośnie do ~55 GB
+        cap_mlx_cache()
         try:
             import mlx.core as mx
 
@@ -3280,9 +3304,12 @@ class ParakeetSTT:
         if audio.size < int(SAMPLE_RATE * 0.2):
             return ""
         results = self.model.generate(get_logmel(mx.array(audio), self.model.preprocessor_config))
-        if not results:
-            return ""
-        return normalize_text(getattr(results[0], "text", None) or "")
+        text = ""
+        if results:
+            text = normalize_text(getattr(results[0], "text", None) or "")
+        del results
+        mx.clear_cache()
+        return text
 
 
 class ProsodyMeter:
@@ -3615,7 +3642,27 @@ class LiveTranscriber:
         self.thread.start()
 
     def submit(self, audio):
+        # STT wolniejszy niż mowa: stare nagrania nie mogą się składać w RAM (każde to setki KB).
+        # Sygnał stop (None) zostaje na końcu kolejki.
+        if self.jobs.qsize() < 3:
+            self.jobs.put(audio)
+            return
+        kept = []
+        stop = False
+        while True:
+            try:
+                old = self.jobs.get_nowait()
+            except queue.Empty:
+                break
+            if old is None:
+                stop = True
+            else:
+                kept.append(old)
+        for old in kept[-2:]:
+            self.jobs.put(old)
         self.jobs.put(audio)
+        if stop:
+            self.jobs.put(None)
 
     def stop(self):
         self.jobs.put(None)
@@ -4077,12 +4124,13 @@ class AppleVisionOcr:
         if 0.003 <= share <= 0.35:
             text = strict
         else:
-            # RDR2 na śniegu/niebie: miękki cień litery nie schodzi poniżej 80 — litera to lokalny
-            # szczyt jasności z wyraźnie ciemniejszym sąsiedztwem (cień), jasne tło samo w sobie odpada
+            # RDR2: szare litery (~165) na ciemnym pasku, a na śniegu miękki cień nie schodzi poniżej 80 —
+            # litera to lokalny szczyt jasności z wyraźnie ciemniejszym sąsiedztwem, jasne tło samo odpada
             lo, hi = AppleVisionOcr._local_min_max(lum, r)
-            text = text & (lum >= hi - 18) & (lo < lum - 95)
+            text = (lum > 130) & (spread < 35) & (lum >= hi - 18) & (lo < lum - 95)
             share = float(text.mean())
-            if share < 0.003 or share > 0.35:
+            # krótka kwestia („Zabrali ją dokądś.”) to ~0,2 % szerokiego paska — liczy się ilość liter, nie udział
+            if int(text.sum()) < 150 or share > 0.35:
                 return None
         mask = np.where(text, 0, 255).astype(np.uint8)
         image = Image.fromarray(mask).convert("RGB")

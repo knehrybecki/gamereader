@@ -40,8 +40,11 @@ BRAIN_JOB_TTL = 6.0
 BRAIN_QUEUE_MAX = 8
 # po tylu sekundach bez nowych napisów model zwalnia pamięć; wraca przy następnym napisie
 BRAIN_IDLE_UNLOAD_SEC = 600.0
-# pamięć podręczna buforów MLX (bez limitu potrafi rosnąć do kilku GB)
+# pamięć podręczna buforów MLX. Domyślny limit MLX to ~1,5× zalecanej pamięci GPU
+# i rośnie aż tam (na tym Macu ~55 GB) — zwolnione tensory ze STT i modelu decyzji zostają w RAM.
 BRAIN_MLX_CACHE_BYTES = 256 * 1024 * 1024
+# sufit aktywnej pamięci MLX: wagi Qwen 4-bit (~3 GB) + Parakeet + aktywacje, z zapasem
+MLX_MEMORY_LIMIT_BYTES = 12 * 1024 * 1024 * 1024
 
 DIALOGUE_QUESTION = (
     "To tekst odczytany przez OCR z ekranu gry albo filmu. Czy to kwestia dialogowa wypowiedziana przez postać?",
@@ -84,6 +87,18 @@ def brain_supported():
     if importlib.util.find_spec("mlx_lm") is None:
         return False
     return _ram_gb() >= BRAIN_MIN_RAM_GB
+
+
+def cap_mlx_cache():
+    """Utnij podręczną pamięć MLX. Bez tego proces lektora zostaje przy dziesiątkach GB."""
+    try:
+        import mlx.core as mx
+
+        mx.set_memory_limit(MLX_MEMORY_LIMIT_BYTES)
+        mx.set_cache_limit(BRAIN_MLX_CACHE_BYTES)
+        mx.clear_cache()
+    except Exception:
+        pass
 
 
 class LektorBrain:
@@ -147,11 +162,11 @@ class LektorBrain:
 
     # --- wątek modelu --------------------------------------------------------------------
     def _run(self):
+        cap_mlx_cache()
         try:
             import mlx.core as mx
 
             mx.set_default_device(mx.gpu)
-            mx.set_cache_limit(BRAIN_MLX_CACHE_BYTES)
         except Exception:
             pass
         if not self._load_logged():
@@ -269,4 +284,7 @@ class LektorBrain:
         ids = mx.array(self.tok.encode(prompt, add_special_tokens=False))[None]
         logits = self.model(ids)[0, -1]
         picked = logits[mx.array([self._letter_id(label) for label in labels])].astype(mx.float32)
-        return [float(p) for p in mx.softmax(picked).tolist()]
+        probs = [float(p) for p in mx.softmax(picked).tolist()]
+        del ids, logits, picked
+        mx.clear_cache()
+        return probs
