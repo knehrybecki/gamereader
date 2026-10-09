@@ -7,7 +7,7 @@ from unittest.mock import Mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 from gamereader_engine import (
-    AppleVisionOcr, Engine, MaleLektor, LEKTOR_MAX_RATE, LEKTOR_SPEED, drop_dim_lines, drop_detached_last, ink_brightness, repair_polish_ocr,
+    AppleVisionOcr, Engine, MaleLektor, LEKTOR_MAX_RATE, LEKTOR_SPEED, drop_dim_lines, drop_detached_last, ink_brightness, repair_polish_ocr, strip_fillers, is_grunt_only,
 )
 
 
@@ -245,6 +245,37 @@ class EnglishPronounTest(unittest.TestCase):
 
     def test_junk_tokens_are_still_dropped_from_polish_text(self):
         self.assertEqual(repair_polish_ocr("Idziemy do domu I l").split(), ["Idziemy", "do", "domu"])
+
+
+class GruntTest(unittest.TestCase):
+    """Odgłosy („Mm-hmm”) lektor nie czyta — także w wersjach przekręconych przez OCR (log 09.10)."""
+
+    GRUNTS = [
+        "Mm-hmm.", "Mim-hmm.", "Min-hmm.", "Mimn-hmm.", "Minn-hmm.", "Mm-himm®", "Mim-hmim.", "Min-himm.",
+        "Mm-hm.", "Mhm.", "Hmm.", "Mm: bm m.", "Uh-huh.", "Uh-uh.", "Woo-hoo!", "Woo!", "Whoa!", "Yee-haw!",
+        "Aww.", "Psst.", "Mm-hmm, mm-hmm.",
+    ]
+    WORDS = ["Him and me.", "Mine.", "Minimum.", "Mom?", "Yeah.", "Nah.", "Mr. Jones.", "Dr. Smith.", "We win.",
+             "Mimi is here.", "Nine."]
+
+    def test_grunts_and_their_ocr_variants_are_removed(self):
+        for grunt in self.GRUNTS:
+            self.assertEqual(strip_fillers(grunt), "", grunt)
+
+    def test_grunt_inside_a_line_is_cut_out_and_the_rest_kept(self):
+        self.assertEqual(strip_fillers("Yeah. I look good in these. Mim-hmm®"), "Yeah. I look good in these.")
+        self.assertEqual(strip_fillers("Woo-hoo! Lookin good!"), "Lookin good!")
+        self.assertEqual(strip_fillers("Whoa, wait!"), "Wait!")
+
+    def test_grunt_only_readings_are_flagged_but_short_real_words_are_not(self):
+        for grunt in self.GRUNTS:
+            self.assertTrue(is_grunt_only(grunt), grunt)
+        for text in ("No.", "Go!", "Yeah.", "Mine.", "Mr. Jones.", "Yeah. Mm-hmm. I do."):
+            self.assertFalse(is_grunt_only(text), text)
+
+    def test_real_words_are_never_removed(self):
+        for text in self.WORDS:
+            self.assertEqual(strip_fillers(text), text, text)
 
 
 if __name__ == "__main__":

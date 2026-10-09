@@ -1249,10 +1249,22 @@ def _speakable(piece):
 # Odgłosy i wtrącenia, których lektor nie czyta (EN z dźwięku i PL z napisów).
 _FILLER_RE = re.compile(
     r"^(?:h+m+|m+h*m+|mhm|u+h+|u+m+|a+h+|e+h+|e+r+m*|o+h+|u+g+h+|a+r+g+h+|o+o+f+|p+h+e+w+|huh|"
-    r"(?:h+a+){2,}|(?:h+e+){2,}|h+e+h+|y{2,}|e{3,}|a{3,}|a+c+h+|o+c+h+|e+c+h+|u+f+|o+j+|u+u+|aha)$",
+    r"(?:h+a+){2,}|(?:h+e+){2,}|h+e+h+|y{2,}|e{3,}|a{3,}|a+c+h+|o+c+h+|e+c+h+|u+f+|o+j+|u+u+|aha|"
+    # „Mm-hmm” po OCR: Mim-hmm, Min-hmm, Mimn-hmm, Minn-hmm, Mm-himm (log GTA VI 09.10) — samo m/i/n wokół „h”
+    r"m[imn]*h[imn]+|"
+    r"(?:u+h+){1,3}|"  # uh-huh, uh-uh
+    r"w+o{2,}(?:h+o+)?|w+h+o+a+|y+e+h*a+w+|a+w{2,}|p+s+t+|a+y{2,})$",  # woo, woo-hoo, whoa, yee-haw, aww, psst, ayy
     re.IGNORECASE,
 )
-_WORD_EDGE = "\"'„”«»()[]*-–—…,.!?;:"
+_WORD_EDGE = "\"'„”«»()[]*-–—…,.!?;:®™©"
+# odczyt złożony z samych krótkich słów bez samogłosek („bm m”) to resztka odgłosu, nie mowa
+_VOWELLESS_KEEP = {"mr", "mrs", "ms", "dr", "st", "jr", "sr", "vs", "tv", "pm", "ft"}
+
+
+def _vowelless_scrap(words):
+    cores = [w.strip(_WORD_EDGE).lower() for w in words]
+    cores = [c for c in cores if c]
+    return bool(cores) and all(len(c) <= 3 and not re.search(r"[aeiouyąęó]", c) and c not in _VOWELLESS_KEEP for c in cores)
 
 
 def _is_filler_word(word):
@@ -1267,6 +1279,8 @@ def strip_fillers(text):
     if words and all(_is_filler_word(w) or w.strip(_WORD_EDGE).lower() in ("ha", "he", "hah", "heh") for w in words):
         return ""
     kept = [w for w in words if not _is_filler_word(w)]
+    if len(kept) != len(words) and _vowelless_scrap(kept):
+        return ""
     if len(kept) != len(words):
         cleaned = normalize_text(" ".join(kept))
         cleaned = re.sub(r"^[,;:—–\-…. ]+", "", cleaned)
@@ -1275,6 +1289,12 @@ def strip_fillers(text):
         cleaned = normalize_text(text or "")
     letters = sum(ch.isalpha() for ch in cleaned)
     return cleaned if letters >= 3 else ""
+
+
+def is_grunt_only(text):
+    """Odczyt to sam odgłos („Mim-hmm.”, „Woo-hoo!”) — nie wchodzi do kolejki, nie jest syntezowany na zapas."""
+    words = normalize_text(text or "").split()
+    return bool(words) and strip_fillers(text) == "" and any(_is_filler_word(w) for w in words)
 
 
 # Delikatne emocje lektora, zdanie po zdaniu.
@@ -5785,6 +5805,9 @@ class Engine:
             src = unled
             if not usable_ocr(src):
                 return
+        if is_grunt_only(src):
+            self._log_junk(src, f"pomijam — odgłos: {src[:70]!r}")
+            return
         if self._worse_reread(src):
             self._log_junk(src, f"pomijam — zła powtórka przeczytanej kwestii: {src[:70]!r}")
             return
