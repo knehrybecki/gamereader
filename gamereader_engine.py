@@ -1055,6 +1055,56 @@ def is_interjection(text):
     return len(words) <= 2
 
 
+# Slang angielski → zwykły angielski PRZED Argos (0 ms). Tylko tam, gdzie Argos tłumaczy dosłownie i psuje sens
+# (sprawdzone na prawdziwym Argos): „roll me a fat one” → „zrobię sobie grubą”, „y'all down” → „jeden z was nie żyje”,
+# „crib” → „łóżeczko”, „whip” → „bicz”, „boost a car” → „podnieść samochód”. Zwroty, które Argos oddaje dobrze
+# (snitch → kapuś, chill → wyluzuj, dawg → ziom, screwed → przerąbane), zostają nietknięte. Słowa dwuznaczne
+# (crib, whip, piece, paper, strapped, lit, heat, clap) tylko w kontekście, który jednoznacznie wskazuje slang.
+_Q = "['’]"  # apostrof z OCR bywa typograficzny
+_SLANG_RULES = (
+    # „…gon roll me a fat one” (także z odczytów OCR: 'im gon, Iim gon)
+    (rf"(?<![\w'’])(?:['’]?[IiUul1|]+['’]?m|['’]m)\.?\s+gon{_Q}?(?=\s)", "I'm going to"),
+    (r"\bgon\b(?!['’]t)", "going to"),
+    (r"\br[aeo]ll\s+me\s+a\s+(?:fat|big|phat)\s+(?:one|ane|ona)\b", "make myself a big joint"),
+    (r"\broll\s+(him|her|them)\s+a\s+(?:fat|big|phat)\s+one\b", r"make \1 a big joint"),
+    (rf"\bone\s+of\s+y{_Q}?all\s+down\b", "is anyone of you in"),
+    (rf"\by{_Q}?all\b", "you guys"),
+    (r"\b(nice|sick|sweet|fresh|clean|fast|new|my|your|his|her|their|our)\s+whip\b", r"\1 car"),
+    (r"\b(my|your|his|her|their|our)\s+crib\b", r"\1 house"),
+    (r"\b(get|got|gets|getting|stack|stacking|make|making|chase|chasing|count|counting)\s+(that|the|my|your|this|some|all)\s+paper\b",
+     r"\1 \2 money"),
+    (r"\bstrapped\b(?!\s+(?:for|in|to|down|into))", "armed"),
+    (r"\b(grab|grabbing|pack|packing|carry|carrying|pull|pulling|drop|dropping|got|get)\s+(a|your|my|his|the)\s+piece\b(?!\s+of)",
+     r"\1 \2 gun"),
+    (r"\bboost(?:ed|ing)?\s+(a|the|that|his|her|my|your)\s+(car|ride|truck|van|bike|vehicle)\b", r"steal \1 \2"),
+    (r"\b(get|got|gets|getting)\s+clapped\b", r"\1 shot"),
+    (r"\bsus\b", "suspicious"),
+    (r"\b(be|so|too|getting|get)\s+salty\b", r"\1 bitter"),
+    (r"\btryna\b", "trying to"),
+    (r"\b(?:a\s+)?(real\s+)?OG\b", r"a \1veteran"),
+    (rf"\bwhat{_Q}?s\s+good\b", "how are you"),
+    (r"\bwent\s+pro\b", "became a professional"),
+    (rf"\b(you|he|she|they|we)(['’]re|\s+are|['’]s|\s+is)\s+trippin{_Q}?", r"\1\2 crazy"),
+    (rf"\b(so|it{_Q}s|that{_Q}s|this\s+(?:place|party|club|city|night|spot)\s+is)\s+lit\b", r"\1 great"),
+    (r"\bno\s+cap\b", "honestly"),
+    (r"\bstay\s+frosty\b", "stay alert"),
+    (r"\b(?:we|i|you|they|he|she)\s+(?:got|have|has|had)\s+heat\s+on\s+(us|me|you|him|her|them)\b",
+     r"the police are after \1"),
+    (r"\bimma\b", "I'm going to"),
+)
+_SLANG = [(re.compile(pattern, re.IGNORECASE), repl) for pattern, repl in _SLANG_RULES]
+
+
+def normalize_slang(text):
+    """Angielski slang → zwykły angielski, żeby Argos nie tłumaczył go dosłownie. Reszta tekstu bez zmian."""
+    out = text or ""
+    for pattern, repl in _SLANG:
+        out = pattern.sub(repl, out)
+    if out and text and text[:1].isupper() and out[:1].islower():
+        out = out[:1].upper() + out[1:]
+    return out
+
+
 def echoed_translation(src, out):
     """Argos kopiuje angielską „sieczkę” z OCR prawie bez zmian: ≥4 różne słowa (3+ litery) z odczytu wracają
     w wyniku i to ≥60 % wszystkich — prawdziwe tłumaczenie dzieli z oryginałem najwyżej imiona i powtórzenia."""
@@ -5467,7 +5517,7 @@ class Engine:
         """Tłumaczenie, podział na zdania i emocja kwestii: (tekst, fragmenty, przejęcie, tempo)."""
         if translate:
             # „Mm-hmm”, „Uh” — przed tłumaczeniem: Argos robi z „Mm-hmm.” czytane „Min-hamm.”, które zajmuje lektora
-            clean = strip_fillers(src)
+            clean = normalize_slang(strip_fillers(src))
             text = self.translator.translate(clean) if clean else ""
             if text and echoed_translation(clean, text):
                 self._timing(f"pomijam — tłumacz oddał angielski bez zmian: {clean[:70]!r}")
