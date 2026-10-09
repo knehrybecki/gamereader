@@ -71,6 +71,47 @@ class LektorShorteningTest(unittest.TestCase):
         text, _segments, _arousal, _boost = engine._plan_line("Hey. Yeah. We go.", True)
         self.assertEqual(text, "Hej. Tak. Idziemy.")
 
+    def test_sentence_just_spoken_is_not_read_again_in_the_next_line(self):
+        # sesja 10:11: „W ósmej klasie. To wszystko przez to gówno.” poszło w dwóch kolejnych kwestiach
+        engine = make_engine(FakeTranslator("W ósmej klasie. To wszystko przez to gówno. To jest Sam."), 8.0)
+        engine._said_sentences = {}
+        engine._remember_sentences("W ósmej klasie. To wszystko przez to gówno.")
+        text, _segments, _arousal, _boost = engine._plan_line("Eighth grade. Shit was all stems. This is Sam.", True)
+        self.assertEqual(text, "To jest Sam.")
+
+    def test_short_exclamations_may_repeat(self):
+        engine = make_engine(FakeTranslator("Nie. Nie. Uciekaj stąd natychmiast."), 8.0)
+        engine._said_sentences = {}
+        engine._remember_sentences("Nie. Nie. Uciekaj stąd natychmiast.")
+        text, _segments, _arousal, _boost = engine._plan_line("No. No. Get out of here right now.", True)
+        self.assertIn("Nie.", text)
+
+    def test_never_drops_the_whole_line_as_a_repeat(self):
+        engine = make_engine(FakeTranslator("To wszystko przez to gówno."), 8.0)
+        engine._said_sentences = {}
+        engine._remember_sentences("To wszystko przez to gówno.")
+        text, _segments, _arousal, _boost = engine._plan_line("Shit was all stems.", True)
+        self.assertEqual(text, "To wszystko przez to gówno.")
+
+    def test_late_lektor_condenses_a_line_that_would_still_fit(self):
+        # spóźnienie ≥ 2 s: wtrącenie („No wiesz,”) wypada, mimo że kwestia mieści się w czasie napisu
+        engine = make_engine(FakeTranslator("No wiesz, musimy ruszyć do magazynu."), 8.0)
+        engine._lag = 2.4
+        text, _segments, _arousal, _boost = engine._plan_line("Well, we gotta move to the warehouse.", True)
+        self.assertEqual(text, "Musimy ruszyć do magazynu.")
+
+    def test_on_time_lektor_keeps_the_line_intact(self):
+        engine = make_engine(FakeTranslator("No wiesz, musimy ruszyć do magazynu."), 8.0)
+        engine._lag = 0.4
+        text, _segments, _arousal, _boost = engine._plan_line("Well, we gotta move to the warehouse.", True)
+        self.assertEqual(text, "No wiesz, musimy ruszyć do magazynu.")
+
+    def test_very_late_lektor_drops_interjection_sentences_even_when_they_fit(self):
+        engine = make_engine(FakeTranslator("Tak. Musimy ruszyć do magazynu."), 8.0)
+        engine._lag = 4.0
+        text, _segments, _arousal, _boost = engine._plan_line("Yeah. We gotta move to the warehouse.", True)
+        self.assertEqual(text, "Musimy ruszyć do magazynu.")
+
 
 if __name__ == "__main__":
     unittest.main()

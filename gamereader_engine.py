@@ -1119,6 +1119,9 @@ SUBTITLE_CPS_DEFAULT = 16.0
 # skracanie tekstu: od tylu sekund spóźnienia lektora za napisem (poziom 1 / poziom 2)
 LAG_CONDENSE = 2.0
 LAG_CONDENSE_STRONG = 3.5
+# zdanie (3+ słowa), które lektor przed chwilą przeczytał, nie wraca w następnej kwestii — napis wjeżdża
+# po kawałku, a OCR czyta nakładające się linie jako różne warianty
+SENTENCE_REPEAT_SEC = 12.0
 # ile kwestii może czekać w kolejce (więcej = najstarsza przepada)
 SPEECH_QUEUE_MAX = 4
 # polskie napisy + angielski dźwięk: przez tyle sekund od ostatniego polskiego napisu dźwięku
@@ -5276,6 +5279,7 @@ class Engine:
                 )
                 self.speaking_text = src
                 self._speaking_parts = list(parts)
+                self._remember_sentences(text)
                 if not translate:
                     self.speaking_full = full
                 self.last_key = text_key(src)
@@ -5375,15 +5379,21 @@ class Engine:
         # Przy spokojnej fabule wszystko się mieści i lektor czyta całość.
         seconds = self._screen_budget(parts or [src])
         before = text
+        text = self._drop_said_sentences(text)
+        # lektor już teraz mówi później niż postać: skracamy nawet kwestię, która „by się zmieściła” —
+        # tempo głosu zostaje, a spóźnienie nie narasta kwestia po kwestii
+        lag = getattr(self, "_lag", 0.0)
+        forced = 2 if lag >= LAG_CONDENSE_STRONG else 1 if lag >= LAG_CONDENSE else 0
         if not translate and parts and len(parts) >= 2 and self.lektor.overload(text, seconds) > 1.0:
             keep = [p for p in parts[:-1] if not self._skippable(p)] + [parts[-1]]
             if len(keep) < len(parts):
                 text = strip_fillers(_join_parts(keep)) if len(keep) > 1 else keep[0]
         for level in (1, 2):
-            if not text or self.lektor.overload(text, seconds) <= 1.0:
+            if not text or (level > forced and self.lektor.overload(text, seconds) <= 1.0):
                 break
             text = condense_polish(text, level=level)
         sentences = re.findall(r"[^.!?…]+(?:[.!?…]+|$)", text or "")
+        total_sentences = len(sentences)
         # całe zdania ze starszych kwestii wypadają przy 2+ zaległych napisach — inaczej ginie kontekst
         min_parts = 2 if getattr(self, "catch_up", False) else 3
         while len(parts or []) >= min_parts and len(sentences) > 1 and self.lektor.overload(" ".join(sentences), seconds) > 1.15:
@@ -5391,18 +5401,49 @@ class Engine:
             sentences.pop(next((i for i, s_ in enumerate(sentences[:-1]) if is_interjection(s_)), 0))
         # jedna kwestia z kilku zdań, która się nie mieści: wtrącenia („Tak.”, „Jadę!”) wypadają przed
         # treścią — inaczej lektor spóźnia się o całe zdanie i nadganianie zjada następny napis
-        while len(sentences) > 1 and self.lektor.overload(" ".join(sentences), seconds) > 1.15:
+        fits = 0.0 if forced >= 2 else 1.15
+        while len(sentences) > 1 and self.lektor.overload(" ".join(sentences), seconds) > fits:
             filler = next((i for i, s_ in enumerate(sentences[:-1]) if is_interjection(s_)), None)
             if filler is None:
                 break
             sentences.pop(filler)
-        if len(sentences) > 1 or (sentences and self.lektor.overload(text, seconds) > 1.0):
+        if (len(sentences) > 1 or len(sentences) < total_sentences
+                or (sentences and self.lektor.overload(text, seconds) > 1.0)):
             text = normalize_text(" ".join(s.strip() for s in sentences))
         if text != before:
             self._timing(f"skrót (na {seconds:.1f}s): {before[:70]!r} -> {text[:70]!r}")
             segments = self.lektor.plan(text)
         boost = self.lektor.line_boost(text, seconds)
         return text, segments, float(arousal or 0.0), boost
+
+    def _said_fold(self, sentence):
+        words = re.findall(r"[\wÀ-ž]+", sentence or "")
+        return polish_fold(" ".join(words)) if len(words) >= 3 else ""
+
+    def _remember_sentences(self, text):
+        """Zdania właśnie czytanej kwestii — przez SENTENCE_REPEAT_SEC nie wracają w następnej."""
+        said = getattr(self, "_said_sentences", None)
+        if said is None:
+            said = self._said_sentences = {}
+        now = time.monotonic()
+        for key in [k for k, exp in said.items() if exp <= now]:
+            del said[key]
+        for sentence in re.findall(r"[^.!?…]+(?:[.!?…]+|$)", text or ""):
+            fold = self._said_fold(sentence)
+            if fold:
+                said[fold] = now + SENTENCE_REPEAT_SEC
+
+    def _drop_said_sentences(self, text):
+        """Wyrzuca zdania, które lektor przed chwilą przeczytał. Cała kwestia nigdy nie wypada."""
+        said = getattr(self, "_said_sentences", None)
+        if not said or not text:
+            return text
+        now = time.monotonic()
+        sentences = [s_.strip() for s_ in re.findall(r"[^.!?…]+(?:[.!?…]+|$)", text) if s_.strip()]
+        fresh = [s_ for s_ in sentences if said.get(self._said_fold(s_), 0.0) <= now]
+        if not fresh or len(fresh) == len(sentences):
+            return text
+        return normalize_text(" ".join(fresh))
 
     def _prefetch_pending(self, current):
         """Gdy lektor czyta ostatni fragment: przetłumacz i zsyntezuj początek następnej kwestii."""
