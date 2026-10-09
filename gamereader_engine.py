@@ -5357,7 +5357,12 @@ class Engine:
 
     def _plan_line(self, src, translate, parts=None):
         """Tłumaczenie, podział na zdania i emocja kwestii: (tekst, fragmenty, przejęcie, tempo)."""
-        text = self.translator.translate(src) if translate else src
+        if translate:
+            # „Mm-hmm”, „Uh” — przed tłumaczeniem: Argos robi z „Mm-hmm.” czytane „Min-hamm.”, które zajmuje lektora
+            clean = strip_fillers(src)
+            text = self.translator.translate(clean) if clean else ""
+        else:
+            text = src
         text = strip_fillers(text)
         segments = self.lektor.plan(text) if text else []
         # dźwięk: cała wypowiedź postaci; napisy: ostatnie ~1,6 s tego, co postać mówi
@@ -5384,6 +5389,13 @@ class Engine:
         while len(parts or []) >= min_parts and len(sentences) > 1 and self.lektor.overload(" ".join(sentences), seconds) > 1.15:
             # najnowsze zdanie zostaje; najpierw wypadają wtrącenia („Dobra.”, „Jadę!”), potem najstarsze
             sentences.pop(next((i for i, s_ in enumerate(sentences[:-1]) if is_interjection(s_)), 0))
+        # jedna kwestia z kilku zdań, która się nie mieści: wtrącenia („Tak.”, „Jadę!”) wypadają przed
+        # treścią — inaczej lektor spóźnia się o całe zdanie i nadganianie zjada następny napis
+        while len(sentences) > 1 and self.lektor.overload(" ".join(sentences), seconds) > 1.15:
+            filler = next((i for i, s_ in enumerate(sentences[:-1]) if is_interjection(s_)), None)
+            if filler is None:
+                break
+            sentences.pop(filler)
         if len(sentences) > 1 or (sentences and self.lektor.overload(text, seconds) > 1.0):
             text = normalize_text(" ".join(s.strip() for s in sentences))
         if text != before:
