@@ -112,6 +112,12 @@ class LektorShorteningTest(unittest.TestCase):
         text, _segments, _arousal, _boost = engine._plan_line("Yeah. We gotta move to the warehouse.", True)
         self.assertEqual(text, "Musimy ruszyć do magazynu.")
 
+    def test_translated_line_does_not_wait_for_the_characters_voice(self):
+        engine = make_engine(FakeTranslator(""), 4.0)
+        engine.voice = Mock()
+        engine.voice.alive.side_effect = AssertionError("tłumaczenie nie pyta o głos postaci")
+        self.assertEqual(engine._film_entry("Hello there.", 10.0, True), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

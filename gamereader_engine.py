@@ -5188,9 +5188,12 @@ class Engine:
             return info < BRAIN_SKIP_INFO_P or (is_interjection(text) and info < BRAIN_SKIP_SHORT_P)
         return is_interjection(text)
 
-    def _film_entry(self, src, seen):
+    def _film_entry(self, src, seen, translate=False):
         """Jak lektor w filmie: gotowy głos wchodzi FILM_DELAY po tym, jak postać zaczyna mówić.
-        Zwraca, ile sekund czekał (0 = od razu, jak dotąd)."""
+        Zwraca, ile sekund czekał (0 = od razu, jak dotąd). Tłumaczenie EN→PL nie czeka na głos postaci:
+        polski lektor i tak jest spóźniony o tłumaczenie i syntezę."""
+        if translate:
+            return 0.0
         vad = self.voice
         t0 = time.monotonic()
         if not vad.alive(t0) or self._lag > FILM_MAX_LAG or self._queue_waiting(src):
@@ -5264,7 +5267,7 @@ class Engine:
                 self._tts_interrupt.clear()
                 seens = [self._seen_at.pop(p, None) for p in parts]
                 seen = min((t for t in seens if t), default=None)
-                waited = self._film_entry(src, seen)
+                waited = self._film_entry(src, seen, translate)
                 if seen:
                     # spóźnienie: szybko rośnie, powoli maleje (fabuła zwalnia = skracanie się wyłącza)
                     lag = time.monotonic() - seen - waited  # celowe wejście z głosem postaci to nie spóźnienie
