@@ -634,7 +634,10 @@ def repair_polish_ocr(text):
             out.append(part)
             continue
         if re.fullmatch(r"[0-9IlJ1S|]+", part) and len(part) <= 2:
-            continue
+            # w angielskim tekście wielkie „I” to zaimek („I want…”, „I'm…”), nie śmieć OCR — bez niego
+            # tłumaczenie gubiło podmiot („Zawsze powtarzał…” zamiast „Zawsze mówiłem…”)
+            if not (part == "I" and not polish_text):
+                continue
         cleaned = re.sub(
             r"(?<=[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż])[0-9]+|[0-9]+(?=[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż])",
             "",
@@ -1046,6 +1049,12 @@ def is_interjection(text):
     if len(words) == 2 and (text or "").rstrip().endswith("?") and words[0].lower() in _INTERROGATIVES:
         return False
     return len(words) <= 2
+
+
+def is_trailing_remark(text):
+    """Krótka uwaga na końcu kwestii (do 4 słów, nie pytanie): „Teraz, to pierwsze wrażenie!”, „Tak to działa.”"""
+    words = re.findall(r"[\wÀ-ž']+", text or "")
+    return 0 < len(words) <= 4 and not (text or "").rstrip().endswith("?")
 
 
 def load_config():
@@ -3890,6 +3899,20 @@ def drop_dim_lines(entries):
     return [text for text, bright, n in entries if n < DIM_LINE_MIN_INK or bright >= top - DIM_LINE_DELTA]
 
 
+# Cel misji / podpowiedź HUD pod napisem (GTA VI: „Beat a member of Billy's crew”) stoi osobno: luka między
+# środkami linii ≥ tyle wysokości linii. Linie jednego napisu stoją ciasno (zmierzone 1,1–1,2×, cel misji 2,25×).
+DETACHED_LINE_GAP = 1.8
+
+
+def drop_detached_last(lines):
+    """lines: [(tekst, (x, y, w, h), …)] od góry do dołu. Ostatnia linia oddzielona luką od reszty to nie napis."""
+    if len(lines) < 2:
+        return lines
+    prev_box, last_box = lines[-2][1], lines[-1][1]
+    gap = (last_box[1] + last_box[3] / 2.0) - (prev_box[1] + prev_box[3] / 2.0)
+    return lines[:-1] if gap >= DETACHED_LINE_GAP * max(prev_box[3], 1) else lines
+
+
 class AppleVisionOcr:
     def __init__(self):
         self.boost = 2.4
@@ -4204,9 +4227,13 @@ class AppleVisionOcr:
                 continue
             if self.skip_yellow_speaker and looks_like_speaker_name(text):
                 continue
+            kept.append((text, box))
+        kept = drop_detached_last(kept)
+        measured = []
+        for text, box in kept:
             bright, n_ink = ink_brightness(lum, ink, box) if lum is not None else (0.0, 0)
-            kept.append((text, bright, n_ink))
-        return normalize_text(" ".join(drop_dim_lines(kept)))
+            measured.append((text, bright, n_ink))
+        return normalize_text(" ".join(drop_dim_lines(measured)))
 
     def read(self, frame):
         if frame is None or frame.size == 0:
@@ -5444,6 +5471,12 @@ class Engine:
             if filler is None:
                 break
             sentences.pop(filler)
+        # lektor spóźniony, a kwestia wciąż długa: końcowa krótka uwaga („Teraz, to pierwsze wrażenie!”) wypada —
+        # jak u lektora w filmie, który pomija dopowiedzenia, żeby zdążyć z treścią
+        for _ in range(forced):
+            if len(sentences) < 2 or not is_trailing_remark(sentences[-1]):
+                break
+            sentences.pop()
         if (len(sentences) > 1 or len(sentences) < total_sentences
                 or (sentences and self.lektor.overload(text, seconds) > 1.0)):
             text = normalize_text(" ".join(s.strip() for s in sentences))

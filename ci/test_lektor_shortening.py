@@ -7,7 +7,7 @@ from unittest.mock import Mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 from gamereader_engine import (
-    AppleVisionOcr, Engine, MaleLektor, LEKTOR_MAX_RATE, LEKTOR_SPEED, drop_dim_lines, ink_brightness,
+    AppleVisionOcr, Engine, MaleLektor, LEKTOR_MAX_RATE, LEKTOR_SPEED, drop_dim_lines, drop_detached_last, ink_brightness, repair_polish_ocr,
 )
 
 
@@ -190,6 +190,61 @@ class DimLinesTest(unittest.TestCase):
         self.assertEqual(ocr._text_on_ink(None, ink, lum), "Hey, Billy!")
         # bez jasności kadru zachowanie jak dotąd: obie linie
         self.assertEqual(ocr._text_on_ink(None, ink), "Hey, Billy! Yo, what's up?")
+
+
+class DetachedLineTest(unittest.TestCase):
+    """Kadr GTA VI z celem misji pod dialogiem (09.10)."""
+
+    def test_mission_objective_below_dialogue_is_dropped(self):
+        # zmierzone: trzy linie dialogu co ~55 px (wys. 44), cel misji 99 px niżej
+        lines = [("I always said if aliens land,", (400, 160, 700, 43)),
+                 ("I want 'em to land in the middle", (200, 215, 1100, 44)),
+                 ("that's a first impression!", (500, 270, 500, 44)),
+                 ("Beat a member of Billy's crew", (480, 369, 600, 58))]
+        self.assertEqual([t for t, _b in drop_detached_last(lines)][-1], "that's a first impression!")
+        self.assertEqual(len(drop_detached_last(lines)), 3)
+
+    def test_tight_two_line_subtitles_are_kept(self):
+        # zmierzone odstępy 1,1–1,2 wysokości linii
+        lines = [("Hey, Billy!", (200, 270, 300, 46)), ("Yo, what's up?", (180, 326, 340, 50))]
+        self.assertEqual(drop_detached_last(lines), lines)
+        lines = [("Alright, good luck.", (185, 88, 770, 58)), ("I never eat shit.", (430, 148, 280, 40))]
+        self.assertEqual(drop_detached_last(lines), lines)
+
+    def test_single_line_is_kept(self):
+        lines = [("Beat a member of Billy's crew", (480, 369, 600, 58))]
+        self.assertEqual(drop_detached_last(lines), lines)
+
+
+class TrailingRemarkTest(unittest.TestCase):
+    def test_late_lektor_drops_a_short_trailing_remark(self):
+        engine = make_engine(FakeTranslator(
+            "Zawsze mówiłem, że jeśli kosmici wylądują, chcę, żeby wylądowali w środku wyścigu TMC. Teraz, to pierwsze wrażenie!"), 9.0)
+        engine._lag = 2.4
+        text, _s, _a, _b = engine._plan_line("I always said if aliens land, I want 'em to land in a TMC race. Now, that's a first impression!", True)
+        self.assertTrue(text.endswith("wyścigu TMC."))
+
+    def test_on_time_lektor_reads_the_remark(self):
+        engine = make_engine(FakeTranslator("Zawsze mówiłem, że wylądują w środku wyścigu TMC. Teraz, to pierwsze wrażenie!"), 9.0)
+        engine._lag = 0.3
+        text, _s, _a, _b = engine._plan_line("I always said they land in a TMC race. Now, that's a first impression!", True)
+        self.assertTrue(text.endswith("pierwsze wrażenie!"))
+
+    def test_a_question_or_long_sentence_is_never_a_remark(self):
+        engine = make_engine(FakeTranslator("Idziemy do magazynu. Czy ktoś ma klucz?"), 9.0)
+        engine._lag = 4.0
+        text, _s, _a, _b = engine._plan_line("We go to the warehouse. Does anyone have a key?", True)
+        self.assertTrue(text.endswith("klucz?"))
+
+
+class EnglishPronounTest(unittest.TestCase):
+    def test_english_pronoun_i_survives_ocr_repair(self):
+        for src in ("Yeah. I look good in these.", "I always said if aliens land,", "I'm gon roll me a fat one.",
+                    "Alright, good luck. I never eat shit."):
+            self.assertEqual(repair_polish_ocr(src), src.replace("'", "'"))
+
+    def test_junk_tokens_are_still_dropped_from_polish_text(self):
+        self.assertEqual(repair_polish_ocr("Idziemy do domu I l").split(), ["Idziemy", "do", "domu"])
 
 
 if __name__ == "__main__":
