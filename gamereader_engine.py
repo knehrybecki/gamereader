@@ -2823,7 +2823,82 @@ class OmniVoiceLocal:
         self.lock = threading.Lock()
         self._n = 0
         self.on_ready = None
+        self.voice_rev = {}  # klucz postaci → numer wersji głosu (zmienia klucz pamięci podręcznej nagrań)
+        self.voice_session = os.urandom(8).hex()  # s1 z kolejnej sesji to inna postać i inne nagranie
         threading.Thread(target=self._start, daemon=True).start()
+
+    def _ask(self, job, timeout):
+        """Jedno zapytanie do procesu OmniVoice (operacje inne niż synteza): odpowiedź albo {} gdy nie wyszło."""
+        with self.lock:
+            return self._exchange(job, timeout)
+
+    def _exchange(self, job, timeout):
+        """Wywoływane pod self.lock; po timeout proces zamykamy, aby późna odpowiedź nie trafiła do następnej kwestii."""
+        import select
+
+        proc = self.proc
+        if not self.ready or proc is None or proc.poll() is not None:
+            return {"ok": False, "error": "proces lektora niedostępny"}
+        self._n += 1
+        job = {**job, "id": self._n}
+        try:
+            proc.stdin.write((json.dumps(job, ensure_ascii=False) + "\n").encode("utf-8"))
+            proc.stdin.flush()
+            readable, _w, _x = select.select([proc.stdout], [], [], timeout)
+            if not readable:
+                raise TimeoutError("za długo")
+            answer = json.loads(proc.stdout.readline() or b"{}")
+            if answer.get("id") != job["id"]:
+                raise RuntimeError("odpowiedź do innego zapytania")
+            return answer
+        except Exception as exc:
+            self.error = f"VoiceStudio: {exc} — czytam Supertonic."
+            self.failed_until = float("inf")
+            self.close()
+            return {"ok": False, "error": str(exc)}
+
+    def _write_wav16(self, audio, name):
+        path = CACHE_DIR / "speakers"
+        path.mkdir(parents=True, exist_ok=True)
+        fd, filename = tempfile.mkstemp(prefix=f"{os.getpid()}_{name}_", suffix=".wav", dir=path)
+        os.close(fd)
+        path = Path(filename)
+        pcm = (np.clip(audio, -1.0, 1.0) * 32767.0).astype("<i2")
+        with wave.open(str(path), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(SAMPLE_RATE)
+            handle.writeframes(pcm.tobytes())
+        return path
+
+    def embed(self, audio):
+        """Wektor mówcy (znormalizowany) z nagrania 16 kHz albo None."""
+        path = self._write_wav16(audio, "embed")
+        try:
+            answer = self._ask({"op": "embed", "wav": str(path)}, 30.0)  # pierwszy raz wczytuje wespeaker
+        finally:
+            path.unlink(missing_ok=True)
+        vec = answer.get("emb") if answer.get("ok") else None
+        return np.asarray(vec, dtype=np.float32) if vec else None
+
+    def forget_voice(self, key):
+        """Zwolnij głos postaci w procesie OmniVoice (pamięć) i wersję w kluczach nagrań."""
+        self.voice_rev.pop(key, None)
+        self._ask({"op": "forget", "key": key}, 3.0)
+
+    def set_voice(self, key, audio, text):
+        """Zapamiętaj głos postaci z próbki; czas przygotowania albo None, gdy się nie udało."""
+        path = self._write_wav16(audio, f"voice_{key}")
+        try:
+            answer = self._ask({"op": "voice", "key": key, "wav": str(path), "text": text}, 12.0)
+        finally:
+            path.unlink(missing_ok=True)
+        if answer.get("ok"):
+            self.voice_rev[key] = self.voice_rev.get(key, 0) + 1
+            while len(self.voice_rev) > SPEAKER_MAX:
+                self.voice_rev.pop(next(iter(self.voice_rev)))
+            return float(answer.get("secs") or 0.0)
+        return None
 
     def _start(self):
         py = voicestudio_python()
@@ -2857,10 +2932,9 @@ class OmniVoiceLocal:
         if self.on_ready:
             self.on_ready(self)
 
-    def synth(self, text, speed=1.0, previous=""):
-        """Mono float32 albo None (model jeszcze się ładuje / padł) — wtedy lektor czyta Supertonic."""
-        import select
-
+    def synth(self, text, speed=1.0, previous="", voice=None):
+        """Mono float32 albo None (model jeszcze się ładuje / padł) — wtedy lektor czyta Supertonic.
+        voice: klucz postaci z set_voice() — czyta jej głosem zamiast lektora z voicepacka."""
         if not self.ready or time.monotonic() < self.failed_until:
             return None
         with self.lock:
@@ -2870,34 +2944,43 @@ class OmniVoiceLocal:
                 self.error = "VoiceStudio: proces lektora padł — czytam Supertonic."
                 self.failed_until = float("inf")
                 return None
-            self._n += 1
-            out = CACHE_DIR / f"ov_job_{os.getpid()}_{self._n % 4}.wav"
+            CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            out = CACHE_DIR / f"ov_job_{os.getpid()}_{self.voice_session}.wav"
             speed = max(0.75, min(1.2, speed * OMNI_SPEED_SCALE))
-            job = {"id": self._n, "text": text, "speed": round(speed, 2), "out": str(out)}
-            try:
-                proc.stdin.write((json.dumps(job, ensure_ascii=False) + "\n").encode("utf-8"))
-                proc.stdin.flush()
-                ready, _w, _x = select.select([proc.stdout], [], [], OMNI_TIMEOUT)
-                answer = json.loads(proc.stdout.readline() or b"{}") if ready else {"error": "za długo"}
-            except Exception as exc:
-                answer = {"error": str(exc)}
+            job = {"text": text, "speed": round(speed, 2), "out": str(out)}
+            if voice:
+                if voice not in self.voice_rev:
+                    self.error = f"VoiceStudio: brak gotowego klonu {voice} — ta kwestia Supertonic."
+                    log_timing(f"postacie: klon {voice} niegotowy; kwestia przechodzi na Supertonic")
+                    return None
+                job["voice"] = voice
+            answer = self._exchange(job, OMNI_TIMEOUT)
             if not answer.get("ok"):
                 self.error = f"VoiceStudio: {answer.get('error') or 'błąd'} — ta kwestia Supertonic."
-                if not ready:
-                    self.close()  # zawieszony model: zabij, żeby nie trzymał GPU
-                    self.failed_until = float("inf")
+                log_timing(f"postacie: OmniVoice nie wygenerował klonu {voice or 'domyślnego'}: {answer.get('error') or 'błąd'}")
                 return None
-        try:
-            with wave.open(str(out), "rb") as handle:
-                pcm = handle.readframes(handle.getnframes())
-        except Exception:
-            return None
+            expected_voice = voice or "default"
+            if answer.get("voice") != expected_voice:
+                self.error = f"VoiceStudio: nie potwierdził głosu {expected_voice} — ta kwestia Supertonic."
+                log_timing(f"postacie: OmniVoice nie potwierdził próbki {expected_voice}")
+                out.unlink(missing_ok=True)
+                return None
+            if voice:
+                log_timing(f"postacie: OmniVoice użył próbki {voice}")
+            try:
+                with wave.open(str(out), "rb") as handle:
+                    pcm = handle.readframes(handle.getnframes())
+            except Exception:
+                return None
+            finally:
+                out.unlink(missing_ok=True)
         self.error = ""
         return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
 
     def close(self):
         proc, self.proc = self.proc, None
         self.ready = False
+        self.voice_rev.clear()
         if proc is not None and proc.poll() is None:
             try:
                 proc.terminate()
@@ -2907,6 +2990,10 @@ class OmniVoiceLocal:
                     proc.kill()
                 except Exception:
                     pass
+        if proc is not None:
+            for stream in (proc.stdin, proc.stdout):
+                if stream is not None:
+                    stream.close()
 
 
 def _cap_onnx_arena(st_loader):
@@ -2926,6 +3013,423 @@ def _cap_onnx_arena(st_loader):
             super().__init__(path, sess_options=opts, providers=providers, **kwargs)
 
     st_loader.ort.InferenceSession = CappedSession
+
+
+# Klonowanie głosów postaci (09.10): lektor mówi po polsku głosem tej postaci, która właśnie mówi w grze.
+# Wypowiedzi z dźwięku gry grupujemy w postacie wektorami mówcy; z kilku sekund czystej mowy postaci powstaje jej głos
+# (OmniVoice). Do czasu, aż próbka jest gotowa — albo gdy mówcy nie da się rozpoznać — czyta zwykły lektor.
+# Próg 0,42: w teście na zwiastunie GTA VI przy 0,35 wyszły 3 wyraźne głosy po ~20 s, przy 0,65+ wszystko zlewało się w 2.
+SPEAKER_NEW_DIST = 0.52
+SPEAKER_MIN_SEC = 1.0  # tyle mowy wystarcza do wstępnego rozpoznania mówcy w trakcie wypowiedzi
+SPEAKER_UTT_SEC = 1.6  # krótkie okrzyki i fragmenty OCR nie tworzą osobnych postaci
+SPEAKER_SAMPLE_SEC = (3.2, 6.5)  # próbka od 3,2 s mowy (do ~6,5 s: dłuższy wzorzec spowalnia syntezę)
+SPEAKER_MAX = 9  # tyle postaci naraz; po komplecie głosów nowe segmenty dopasowują się do najbliższej gotowej
+SPEAKER_READY_ENOUGH = 5  # od tylu gotowych głosów nie zakładamy już nowych postaci, tylko dopasowujemy do istniejących
+SPEAKER_LOOSE_DIST = 0.62  # luźniejszy próg dopasowania do GOTOWEGO głosu (zamiast zakładać kolejną postać)
+# Jakość próbki: do klona idzie tylko mowa (nie „Mm-hmm”, „Come on.”), jednego mówcy, z wyraźnym głosem.
+SPEAKER_SAMPLE_MIN_WORDS = 6  # słów z rozpoznanego tekstu próbki, po odjęciu odgłosów
+SPEAKER_SAMPLE_MIN_VOICED = 0.45  # udział ramek z głosem w próbce
+SPEAKER_CLIP_MIN_SIM = 0.55  # kawałek bardziej niepodobny do środka postaci nie wchodzi do jej próbki (to ktoś inny)
+SPEAKER_SAMPLE_TRIES = 5  # po tylu odrzuconych próbkach postać nie dostaje głosu
+SPEAKER_MERGE_DIST = 0.30  # dwa gotowe głosy bliżej siebie niż to = ta sama postać; zostaje lepszy
+SPEAKER_KEEP = 6  # tyle gotowych głosów naraz; nadmiar (najrzadziej używane) jest zapominany
+SPEAKER_WAIT_SEC = 2.2  # poczekaj na stabilniejsze rozpoznanie mówcy z audio
+SPEAKER_MATCH_TTL = 10.0  # nie dopasowuj ponownie tego samego napisu do starej wypowiedzi
+# Wypowiedź z dźwięku to „od ciszy do ciszy”, a postacie w szybkim dialogu odpowiadają sobie bez przerwy — w jednej
+# wypowiedzi bywa kilka osób (test 09.10: 7,8 s = trzy postacie → jedna próbka i jedno przypisanie na wszystkie).
+# Nowa postać zaczyna mówić dokładnie wtedy, gdy pojawia się jej napis, więc momenty pojawiania się napisów dzielą wypowiedź.
+SPEAKER_ANCHOR_GAP = 1.2  # napisy bliżej siebie niż tyle sekund to ta sama kwestia albo migający odczyt OCR
+SPEAKER_ANCHOR_LEAD = 0.25  # OCR widzi napis chwilę po tym, jak postać zaczęła mówić
+SPEAKER_SEGMENT_MIN = 0.9  # krótszych odcinków nie dzielimy (ani wektor mówcy, ani próbka nic z nich nie mają)
+
+
+def speech_text_score(a, b):
+    """Jak bardzo angielski napis `a` pasuje do rozpoznanego z dźwięku tekstu `b` (0…1). Bierze drobne literówki OCR/ASR
+    i to, że jeden tekst jest fragmentem drugiego (napis bywa krótszy od całej wypowiedzi albo odwrotnie)."""
+    wa = [w for w in re.findall(r"[a-z']+", (a or "").lower()) if len(w) >= 2]
+    wb = [w for w in re.findall(r"[a-z']+", (b or "").lower()) if len(w) >= 2]
+    if not wa or not wb:
+        return 0.0
+
+    def contained(x, y):
+        hit = sum(
+            1 for w in x if any(w == v or (len(w) >= 4 and SequenceMatcher(None, w, v, autojunk=False).ratio() >= 0.8) for v in y)
+        )
+        return hit, hit / len(x)
+
+    best = 0.0
+    for x, y in ((wa, wb), (wb, wa)):
+        hit, share = contained(x, y)
+        if hit >= 2 or (hit >= 1 and len(x) <= 2):
+            best = max(best, share)
+    return best
+
+
+class SpeakerBank:
+    """Postacie rozpoznane z dźwięku gry: wektory mówców, próbki i klucze głosów.
+
+    observe() przyjmuje nagranie wypowiedzi (całe albo początek trwającej), voice_for() odpowiada, czyim głosem
+    czytać napis pojawiający się w danej chwili."""
+
+    def __init__(self, cloud_getter, transcribe, log=None, is_lektor=None, expects_english=None):
+        self._cloud = cloud_getter
+        # czy mowa z gry ma być po angielsku (lektor tłumaczy EN→PL): wtedy próbka brzmiąca po polsku to głos lektora
+        self._expects_english = expects_english
+        self._transcribe = transcribe
+        self._log = log or (lambda _line: None)
+        self._is_lektor = is_lektor
+        self._skipped = 0
+        self.anchors = deque(maxlen=40)  # momenty pojawiania się napisów (time.monotonic)
+        debug = os.environ.get("LIVEDUB_SPEAKER_DEBUG")
+        self._debug = Path(debug) if debug else None
+        if self._debug is not None:
+            self._debug.mkdir(parents=True, exist_ok=True)
+        try:  # resztki po zabitym procesie (np. restart w trakcie liczenia wektora mówcy) nie zostają na dysku
+            for old_file in (CACHE_DIR / "speakers").glob("*.wav"):
+                if time.time() - old_file.stat().st_mtime > 300:
+                    old_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        self._jobs = queue.Queue(maxsize=6)
+        self._cond = threading.Condition()
+        self.speakers = {}  # klucz → {"centroid", "n", "pool", "ready"}
+        self.timeline = deque(maxlen=40)  # {"start", "end", "key", "provisional"}
+        self._thread = None
+        self._backend = None
+        self._generation = 0
+        self._key_prefix = os.urandom(4).hex()
+        self._closed = False
+
+    def close(self):
+        self._closed = True
+        self.reset()
+
+    def reset(self):
+        """Inne źródło albo silnik: stare rozpoznania i praca z kolejki nie pasują do nowych postaci."""
+        with self._cond:
+            self._generation += 1
+            self.speakers.clear()
+            self.timeline.clear()
+            self._cond.notify_all()
+
+    def any_ready(self):
+        with self._cond:
+            return not self._closed and self._cloud() is self._backend and any(sp["ready"] for sp in self.speakers.values())
+
+    def note_subtitle(self, t):
+        """Napis pojawił się o `t` (time.monotonic) — tu najpewniej zaczyna mówić nowa postać."""
+        with self._cond:
+            if self.anchors and t - self.anchors[-1] < SPEAKER_ANCHOR_GAP:
+                return
+            self.anchors.append(t)
+
+    def split_by_subtitles(self, audio, start, end):
+        """[(nagranie, początek, koniec)]: wypowiedź pocięta w miejscach, gdzie pojawiły się napisy (bez krótkich okruchów)."""
+        total = audio.size / float(SAMPLE_RATE)
+        begin = end - total  # czas pierwszej próbki nagrania
+        with self._cond:
+            cuts = sorted(a - SPEAKER_ANCHOR_LEAD for a in self.anchors)
+        cuts = [c for c in cuts if begin + SPEAKER_SEGMENT_MIN < c < end - SPEAKER_SEGMENT_MIN]
+        if not cuts:
+            return [(audio, start, end)]
+        bounds = [begin] + cuts[:5] + [end]
+        out = []
+        for a, b in zip(bounds, bounds[1:]):
+            clip = audio[int((a - begin) * SAMPLE_RATE):int((b - begin) * SAMPLE_RATE)]
+            if clip.size >= int(SPEAKER_SEGMENT_MIN * 0.7 * SAMPLE_RATE):
+                out.append((clip, max(a, start) if a == begin else a, b))
+        return out or [(audio, start, end)]
+
+    def observe(self, audio, start, end, provisional=False):
+        cloud = self._cloud()
+        if self._closed or cloud is None or not cloud.ready:
+            return
+        if self._is_lektor is not None and self._is_lektor(start, end):
+            # w tym czasie grał lektor: jego (a po sklonowaniu — „postaci”) głos nie jest nową postacią z gry
+            self._skipped += 1
+            if self._skipped in (1, 5) or self._skipped % 25 == 0:
+                self._log(f"postacie: pomijam {self._skipped}. wypowiedź nakładającą się na głos lektora")
+            return
+        with self._cond:
+            if cloud is not self._backend:
+                self.reset()
+                self._backend = cloud
+            generation = self._generation
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._run, name="speaker-bank", daemon=True)
+                self._thread.start()
+        pieces = [(audio, start, end)] if provisional else self.split_by_subtitles(audio, start, end)
+        for clip, a, b in pieces:
+            try:
+                self._jobs.put_nowait((clip.copy(), a, b, provisional, generation))
+            except queue.Full:
+                break  # rozpoznawanie nie nadąża — pomijamy, następna wypowiedź nadrobi
+
+    def voice_for(self, t, wait=0.0, text=None):
+        """Klucz głosu postaci, która mówi napis `text` pojawiający się w chwili `t` (time.monotonic), albo None.
+
+        Z tekstem: szukamy wypowiedzi z dźwięku, której ANGIELSKA transkrypcja pasuje do angielskiego napisu (to
+        wprost mówi, która postać go wypowiada); bez dopasowania tekstu — najbliższa w czasie."""
+        deadline = time.monotonic() + max(0.0, wait)
+        if t <= 0 or time.monotonic() - t > SPEAKER_MATCH_TTL:
+            self._log("postacie: pomijam stare dopasowanie głosu")
+            return None
+        with self._cond:
+            while True:
+                if self._closed or self._cloud() is not self._backend:
+                    return None
+                found, how = None, "czas"
+                if text:
+                    scored = [
+                        (speech_text_score(text, e.get("text")), -abs(e["start"] - t), e)
+                        for e in self.timeline if e.get("text") and e["key"] is not None and abs(e["start"] - t) <= 9.0
+                    ]
+                    scored = [item for item in scored if item[0] >= 0.5]
+                    if scored:
+                        found, how = max(scored, key=lambda item: (item[0], item[1]))[2], "tekst"
+                if found is None and (not text or time.monotonic() >= deadline):
+                    candidates = (e for e in reversed(self.timeline) if e["start"] <= t + 0.9 and e["end"] >= t - 0.4)
+                    found = min(candidates, key=lambda e: max(e["start"] - t, t - e["end"], 0.0), default=None)
+                    if found is not None and found["key"] is None:
+                        found = None
+                if found is not None or time.monotonic() >= deadline:
+                    break
+                self._cond.wait(max(0.0, deadline - time.monotonic()))
+            key = found["key"] if found else None
+            for _ in range(3):  # scalona/zapomniana postać → jej następca
+                alias = self.speakers.get(key, {}).get("alias") if key else None
+                if not alias:
+                    break
+                key = alias
+            if key and self.speakers.get(key, {}).get("ready"):
+                self.speakers[key]["used"] = self.speakers[key].get("used", 0) + 1
+                self._log(f"postacie: dopasowanie {key.split('_')[0]} po {how} (podobieństwo {found.get('similarity') or 0:.2f})")
+                return key
+            if key:
+                self._log(f"postacie: {key.split('_')[0]} rozpoznana po {how}, ale jej głos jeszcze nie jest gotowy")
+            return None
+
+    # --- wątek rozpoznawania ---------------------------------------------------------------
+    def _run(self):
+        while not self._closed:
+            try:
+                audio, start, end, provisional, generation = self._jobs.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            try:
+                self._handle(audio, start, end, provisional, generation)
+            except Exception as exc:
+                self._log(f"postacie: błąd {exc}")
+            finally:
+                self._jobs.task_done()
+
+    def _handle(self, audio, start, end, provisional, generation=None):
+        cloud = self._cloud()
+        with self._cond:
+            if generation is None:
+                generation = self._generation
+            if cloud is None or not cloud.ready or generation != self._generation:
+                return
+        vec = cloud.embed(audio)
+        if vec is None:
+            return
+        vec = np.asarray(vec, dtype=np.float32).reshape(-1)
+        norm = float(np.linalg.norm(vec))
+        if not np.isfinite(vec).all() or norm < 1e-9:
+            return
+        vec = vec / norm
+        seconds = audio.size / float(SAMPLE_RATE)
+        try:
+            said = self._transcribe(audio) or ""  # angielski tekst tego segmentu (Parakeet ~60 ms) — do dopasowania napisu
+        except Exception:
+            said = ""
+        with self._cond:
+            if generation != self._generation or cloud is not self._cloud():
+                return
+            key, similarity = self._assign(vec, seconds, create=not provisional)
+            # wstępny odczyt trwającej wypowiedzi zastępuje ostateczny z tego samego początku
+            self.timeline = deque((e for e in self.timeline if not (e["provisional"] and abs(e["start"] - start) < 0.05)), maxlen=40)
+            self.timeline.append({
+                "start": start, "end": end, "key": key, "provisional": provisional, "similarity": similarity, "text": said,
+            })
+            self._cond.notify_all()
+        if self._debug is not None:
+            try:
+                tag = f"{int(start * 1000) % 10**9:09d}_{'p' if provisional else 'f'}_{(key or 'none').split('_')[0]}"
+                pcm = (np.clip(audio, -1.0, 1.0) * 32767.0).astype("<i2")
+                with wave.open(str(self._debug / f"utt_{tag}.wav"), "wb") as handle:
+                    handle.setnchannels(1)
+                    handle.setsampwidth(2)
+                    handle.setframerate(SAMPLE_RATE)
+                    handle.writeframes(pcm.tobytes())
+                self._log(f"postacie[debug]: {tag} {seconds:.1f}s podobieństwo {similarity if similarity is not None else float('nan'):.2f} | {said[:70]!r}")
+            except Exception:
+                pass
+        if provisional or key is None or seconds < SPEAKER_UTT_SEC:
+            return
+        self._collect(key, audio, seconds, cloud, generation, vec)
+
+    def _assign(self, vec, seconds, create):
+        """(klucz, podobieństwo). Krótkie segmenty mają zaszumione wektory: nie zakładają postaci i nie przesuwają jej
+        środka, a przy dopasowaniu dostają nieco luźniejszy próg (test 09.10: bez tego 15 „postaci” w zwiastunie z ~7)."""
+        best, dist = None, 9.0
+        for key, sp in self.speakers.items():
+            d = 1.0 - float(vec @ sp["centroid"])
+            if d < dist:
+                best, dist = key, d
+        solid = seconds >= SPEAKER_UTT_SEC
+        limit = SPEAKER_NEW_DIST + (0.0 if seconds >= 2.2 else 0.08)
+        ready = sum(1 for sp in self.speakers.values() if sp["ready"])
+        if ready >= SPEAKER_READY_ENOUGH:
+            # mamy już komplet głosów: nie szukamy dalej nowych postaci — najbliższy GOTOWY głos, jeśli jest dość blisko
+            best_ready, d_ready = None, 9.0
+            for key, sp in self.speakers.items():
+                if sp["ready"]:
+                    d = 1.0 - float(vec @ sp["centroid"])
+                    if d < d_ready:
+                        best_ready, d_ready = key, d
+            if best_ready is not None and d_ready <= SPEAKER_LOOSE_DIST and (best is None or dist > limit):
+                return best_ready, max(-1.0, min(1.0, 1.0 - d_ready))
+            if best is None or dist > limit:
+                return None, max(-1.0, min(1.0, 1.0 - dist)) if best is not None else None
+        sim = max(-1.0, min(1.0, 1.0 - dist)) if best is not None else None
+        if best is not None and dist <= limit:
+            if create and solid:  # ostateczna, dość długa wypowiedź doprecyzowuje środek postaci
+                sp = self.speakers[best]
+                merged = sp["centroid"] * sp["n"] + vec * seconds
+                sp["centroid"] = merged / max(float(np.linalg.norm(merged)), 1e-9)
+                sp["n"] += seconds
+            return best, sim
+        if not (create and solid) or len(self.speakers) >= SPEAKER_MAX:
+            return None, sim
+        key = f"s{len(self.speakers) + 1}_{self._key_prefix}_{self._generation}"
+        self.speakers[key] = {"centroid": vec, "n": seconds, "pool": [], "ready": False}
+        self._log(f"postacie: nowa postać {key} ({len(self.speakers)} rozpoznanych)")
+        return key, sim
+
+    @staticmethod
+    def _sample_quality(sample, text):
+        """(ocena, powód odrzucenia albo ""): próbka ma być mową — dość słów, bez samych odgłosów, z wyraźnym głosem."""
+        words = re.findall(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż']{2,}", strip_fillers(text))
+        voiced = voiced_fraction(sample)
+        if len(words) < SPEAKER_SAMPLE_MIN_WORDS:
+            return 0.0, f"za mało słów: {len(words)}"
+        if voiced < SPEAKER_SAMPLE_MIN_VOICED:
+            return 0.0, f"za mało głosu: {voiced:.2f}"
+        return len(words) * voiced, ""
+
+    def _forget(self, key, cloud, alias=None):
+        sp = self.speakers.get(key)
+        if sp is None:
+            return
+        with self._cond:
+            sp["ready"] = False
+            sp["alias"] = alias
+            self._cond.notify_all()
+        try:
+            cloud.forget_voice(key)
+        except Exception:
+            pass
+
+    def _prune(self, fresh, cloud):
+        """Zdublowane głosy (ta sama postać rozpoznana dwa razy) scalamy, nadmiar ponad SPEAKER_KEEP zapominamy."""
+        with self._cond:
+            ready = [(k, sp) for k, sp in self.speakers.items() if sp["ready"]]
+        for k, sp in ready:
+            if k == fresh:
+                continue
+            if 1.0 - float(self.speakers[fresh]["centroid"] @ sp["centroid"]) < SPEAKER_MERGE_DIST:
+                loser, keeper = (fresh, k) if self.speakers[fresh].get("quality", 0) < sp.get("quality", 0) else (k, fresh)
+                self._log(f"postacie: {loser.split('_')[0]} to ta sama postać co {keeper.split('_')[0]} — zostawiam lepszą próbkę")
+                self._forget(loser, cloud, alias=keeper)
+        with self._cond:
+            ready = [(k, sp) for k, sp in self.speakers.items() if sp["ready"]]
+        if len(ready) > SPEAKER_KEEP:
+            loser = min(ready, key=lambda item: (item[1].get("used", 0), item[1].get("quality", 0)))[0]
+            if loser != fresh:
+                nearest = max((k for k, _s in ready if k != loser),
+                              key=lambda k: float(self.speakers[loser]["centroid"] @ self.speakers[k]["centroid"]))
+                self._log(f"postacie: za dużo głosów — zapominam {loser.split('_')[0]} (najrzadziej używany)")
+                self._forget(loser, cloud, alias=nearest)
+
+    def _collect(self, key, audio, seconds, cloud, generation, vec=None):
+        with self._cond:
+            if generation != self._generation:
+                return
+            sp = self.speakers[key]
+        if sp["ready"] or sp.get("blocked"):
+            return
+        audio = audio[:int(SPEAKER_SAMPLE_SEC[1] * SAMPLE_RATE)].copy()
+        if vec is not None and float(vec @ sp["centroid"]) < SPEAKER_CLIP_MIN_SIM:
+            return  # ten kawałek jest dalej od postaci, niż wolno — nie psuje jej próbki
+        sp["pool"].append((audio.size / float(SAMPLE_RATE), audio))
+        sp["pool"].sort(key=lambda item: -item[0])
+        del sp["pool"][4:]
+        total = sum(sec for sec, _a in sp["pool"])
+        if total < SPEAKER_SAMPLE_SEC[0]:
+            return
+        chunks, got = [], 0
+        limit = int(SPEAKER_SAMPLE_SEC[1] * SAMPLE_RATE)
+        for sec, clip in sp["pool"]:
+            if chunks:
+                gap = np.zeros(min(int(0.15 * SAMPLE_RATE), limit - got), dtype=np.float32)
+                chunks.append(gap)
+                got += gap.size
+            clip = clip[:limit - got]
+            chunks.append(clip)
+            got += clip.size
+            if got >= limit:
+                break
+        sample = np.concatenate(chunks)
+        text = self._transcribe(sample)  # Parakeet: OmniVoice potrzebuje transkrypcji wzorca
+        with self._cond:
+            if not text or cloud is not self._cloud() or not cloud.ready or generation != self._generation:
+                return
+        if self._debug is not None:
+            try:
+                pcm = (np.clip(sample, -1.0, 1.0) * 32767.0).astype("<i2")
+                with wave.open(str(self._debug / f"sample_{key.split('_')[0]}.wav"), "wb") as handle:
+                    handle.setnchannels(1)
+                    handle.setsampwidth(2)
+                    handle.setframerate(SAMPLE_RATE)
+                    handle.writeframes(pcm.tobytes())
+                (self._debug / f"sample_{key.split('_')[0]}.txt").write_text(text, encoding="utf-8")
+            except Exception:
+                pass
+        if self._expects_english is not None and self._expects_english() and (
+                any(ch in PL_MARK for ch in text) or looks_polish(text)):
+            # angielska mowa z gry nie zawiera polskich zdań — to przeciekł głos lektora (albo klona): nie klonuj go
+            with self._cond:
+                sp["pool"] = []
+                sp["blocked"] = True
+            self._log(f"postacie: próbka {key.split('_')[0]} brzmi po polsku ({text[:50]!r}) — odrzucona, to nie postać z gry")
+            return
+        quality, why = self._sample_quality(sample, text)
+        if why:
+            # słaba próbka („Mm-hmm.”, „Come on.”): nie klonujemy, zbieramy od nowa — do SPEAKER_SAMPLE_TRIES razy
+            with self._cond:
+                sp["pool"] = []
+                sp["tries"] = sp.get("tries", 0) + 1
+                if sp["tries"] >= SPEAKER_SAMPLE_TRIES:
+                    sp["blocked"] = True
+            self._log(f"postacie: próbka {key.split('_')[0]} odrzucona ({why}): {normalize_text(text)[:50]!r}")
+            return
+        took = cloud.set_voice(key, sample, text)
+        if took is not None:
+            with self._cond:
+                if generation != self._generation or cloud is not self._cloud():
+                    return
+                sp["ready"] = True
+                sp["quality"] = quality
+                sp["used"] = 0
+                sp["pool"].clear()
+                self._cond.notify_all()
+            self._prune(key, cloud)
+            sample_text = normalize_text(text)[:70]
+            self._log(
+                f"postacie: głos {key} gotowy ({sample.size / SAMPLE_RATE:.1f} s próbki, {took:.1f}s; "
+                f"transkrypcja próbki: {sample_text!r})"
+            )
 
 
 class MaleLektor:
@@ -3075,7 +3579,7 @@ class MaleLektor:
         style.dp = (1 - blend) * calm.dp + blend * other.dp
         return style
 
-    def prepare(self, text, volume=1.0, mood="calm", arousal=0.0, hurry=False, boost=None):
+    def prepare(self, text, volume=1.0, mood="calm", arousal=0.0, hurry=False, boost=None, voice=None):
         """Zwraca ścieżkę gotowego WAV (z cache, jeśli ta sama kwestia już była).
 
         arousal: jak mówi postać (-1 szept … +1 krzyk), mood: wskazówka z tekstu."""
@@ -3102,6 +3606,16 @@ class MaleLektor:
         gain = 1.3 * max(0.0, min(1.0, float(volume))) * params["gain"] * punct_gain
         cloud = self.cloud
         voice_tag = cloud.tag if cloud is not None and time.monotonic() >= cloud.failed_until else f"st15|{self.voice}"
+        revision = getattr(cloud, "voice_rev", {}).get(voice)
+        if voice and not voice_tag.startswith("st") and revision is not None:
+            voice_tag = f"{voice_tag}|v:{cloud.voice_session}:{voice}:{revision}"
+        elif voice and not voice_tag.startswith("st"):
+            log_timing(f"postacie: klon {voice} nie jest gotowy; kwestia przechodzi na Supertonic")
+            cloud = None
+            voice_tag = f"st15|{self.voice}"
+            voice = None
+        else:
+            voice = None
         key = f"{voice_tag}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
         path = CACHE_DIR / f"{text_key(key)}.wav"
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -3111,14 +3625,14 @@ class MaleLektor:
         t0 = time.monotonic()
         stretch = None
         if not voice_tag.startswith("st"):
-            stretch = self._synth_cloud(cloud, text, raw, pace, pause)
+            stretch = self._synth_cloud(cloud, text, raw, pace, pause, voice)
             if stretch is None:
                 path = CACHE_DIR / f"{text_key(key.replace(voice_tag, f'st15|{self.voice}', 1))}.wav"
                 if path.exists() and path.stat().st_size >= 64:
                     return path
         filt = LEKTOR_FILTER
         if stretch is not None:
-            pre = getattr(cloud, "pre_filter", "")
+            pre = "" if voice else getattr(cloud, "pre_filter", "")  # „pogrubienie” lektora nie dotyczy głosów postaci
             filt = f"{pre},{LEKTOR_CLOUD_FILTER}" if pre else LEKTOR_CLOUD_FILTER
         if stretch is None:
             stretch = self._synth(text, raw, pace, self._style(params["blend"]), pause)
@@ -3154,17 +3668,20 @@ class MaleLektor:
         self._write_voice(np.asarray(wav, dtype=np.float32).reshape(-1), int(self.model.sample_rate), text, speed, path, pause)
         return stretch
 
-    def _synth_cloud(self, cloud, text, path, pace, pause):
+    def _synth_cloud(self, cloud, text, path, pace, pause, voice=None):
         """Lektor z VoiceStudio; None = nie wyszło (lektor czyta Supertonic). Tempo w całości po stronie głosu."""
         speed, stretch = lektor_speed_split(pace, text)
         rate = speed * stretch / LEKTOR_SPEED  # 1,0 = zwykłe tempo lektora
         prev, at = self._cloud_prev
-        audio = cloud.synth(text, speed=rate, previous=prev if time.monotonic() - at < 12.0 else "")
+        audio = cloud.synth(
+            text, speed=rate, previous="" if voice else (prev if time.monotonic() - at < 12.0 else ""), voice=voice
+        )
         if audio is None:
             if cloud.error and self.on_cloud_error:
                 self.on_cloud_error(cloud.error)
             return None
-        self._cloud_prev = (text, time.monotonic())
+        if not voice:
+            self._cloud_prev = (text, time.monotonic())
         self._write_voice(audio, cloud.rate, text, max(0.5, rate * LEKTOR_SPEED), path, pause)
         return 1.0
 
@@ -3225,7 +3742,27 @@ class MaleLektor:
                 except OSError:
                     pass
 
+    def speaking_between(self, start, end, margin=0.3):
+        """Czy lektor grał w [start, end] (time.monotonic) — jego głos może przeciekać do dźwięku gry i nie jest postacią."""
+        spans = getattr(self, "play_spans", None)
+        if not spans:
+            return False
+        return any(a < end + margin and b > start - margin for a, b in list(spans))
+
+    def _note_play(self, path):
+        spans = getattr(self, "play_spans", None)
+        if spans is None:
+            spans = self.play_spans = deque(maxlen=60)
+        try:
+            with wave.open(str(path), "rb") as info:
+                seconds = info.getnframes() / float(info.getframerate())
+        except Exception:
+            seconds = 5.0
+        now = time.monotonic()
+        spans.append((now, now + seconds + 0.25))
+
     def play(self, path, rate=1.0):
+        self._note_play(path)
         # afplay w osobnym procesie: OCR i synteza w silniku nie przerywają dźwięku (bez trzasków);
         # -r = szybsze odtwarzanie bez zmiany wysokości głosu (nadrabianie zaległości)
         with self.lock:
@@ -3668,6 +4205,17 @@ class UtteranceCutter:
         self.spoken = 0.0
         self.quiet = 0.0
         self.floor = None
+        self.t0 = 0.0  # kiedy zaczęła się trwająca wypowiedź (time.monotonic)
+        self.peeked = False
+        self.last_start = self.last_end = 0.0
+
+    def peek(self, min_spoken):
+        """Trwająca wypowiedź, gdy mówiono już `min_spoken` s — raz na wypowiedź: (nagranie dotąd, czas startu) albo None.
+        Do rozpoznania mówcy, zanim wypowiedź się skończy (lektor rusza wcześniej niż cisza kończąca kwestię)."""
+        if not self.buf or self.peeked or self.spoken < min_spoken:
+            return None
+        self.peeked = True
+        return np.concatenate(self.buf), self.t0
 
     def _voice(self, mono):
         """Czy w kawałku jest głos: wyraźnie ponad tłem (ulica, tłum nigdy nie cichną) i okresowy
@@ -3690,6 +4238,8 @@ class UtteranceCutter:
                 while self.preroll and self.preroll_n - self.preroll[0].size >= int(SAMPLE_RATE * PREROLL_SEC):
                     self.preroll_n -= self.preroll.pop(0).size
                 return None
+            self.t0 = time.monotonic() - (self.preroll_n + mono.size) / float(SAMPLE_RATE)
+            self.peeked = False
             self.buf = self.preroll + [mono]
             self.preroll, self.preroll_n = [], 0
             self.spoken, self.quiet = duration, 0.0
@@ -3705,6 +4255,11 @@ class UtteranceCutter:
         if self.quiet >= SILENCE_SEC or total >= MAX_SPEECH_SEC:
             audio = np.concatenate(self.buf)
             enough = self.spoken >= MIN_SPEECH_SEC
+            quiet_n = int(round(self.quiet * SAMPLE_RATE))
+            if quiet_n:
+                audio = audio[:-quiet_n]
+            self.last_start = self.t0
+            self.last_end = self.t0 + audio.size / float(SAMPLE_RATE)
             self.buf, self.spoken, self.quiet = [], 0.0, 0.0
             return audio if enough else None
         return None
@@ -3726,7 +4281,9 @@ class LiveTranscriber:
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 
-    def submit(self, audio):
+    def submit(self, audio, start=None):
+        if start is not None:
+            audio = (audio, start)
         # STT wolniejszy niż mowa: stare nagrania nie mogą się składać w RAM (każde to setki KB).
         # Sygnał stop (None) zostaje na końcu kolejki.
         if self.jobs.qsize() < 3:
@@ -3764,9 +4321,15 @@ class LiveTranscriber:
                 audio = self.jobs.get()
                 if audio is None:
                     return
+                start = None
+                if isinstance(audio, tuple):
+                    audio, start = audio
                 text = self.stt.transcribe(audio)
                 if _speakable(text):
-                    self.on_line(text, audio)
+                    if start is None:
+                        self.on_line(text, audio)
+                    else:
+                        self.on_line(text, audio, start)
         except Exception as exc:
             self.ready.set()
             if self.on_error:
@@ -4429,6 +4992,13 @@ class Engine:
         self._engine_chosen = bool(self.cfg.get("lektorEngineChosen"))
         self._sync_voice()
         self.translator = ArgosTranslator()
+        # klonowanie głosów postaci: działa tylko z lektorem VoiceStudio (OmniVoice); cfg "cloneVoices": false wyłącza
+        self.speakers = None
+        self.clone_voices = bool(self.cfg.get("cloneVoices", True))
+        if self.clone_voices:
+            self.speakers = SpeakerBank(lambda: self.lektor.cloud, lambda a: self.stt.transcribe(a), log=log_timing,
+                                    is_lektor=((lambda a, b: self.lektor.speaking_between(a, b)) if os.environ.get("LIVEDUB_SPEAKER_GUARD") else None),
+                                    expects_english=lambda: not self._pl_subs_active)
         if LlmTranslator is not None and llm_translate_wanted():
             # slang po polsku zamiast dosłownego Argos; Argos zostaje zapasem (model ładuje się w tle)
             self.translator = LlmTranslator(self.translator, log=log_timing)
@@ -4601,6 +5171,7 @@ class Engine:
             "sourceLabel": self._source_label() if self.source_info else None,
             "lektorEngine": getattr(self, "lektor_engine", "supertonic"),
             "omniPack": getattr(self, "omni_pack", ""),
+            "cloneVoices": getattr(self, "clone_voices", True),
             "omniPacks": voicepacks() if voicestudio_python() else [],
         }
 
@@ -4652,6 +5223,7 @@ class Engine:
                 "lektorEngine": self.lektor_engine,
                 "lektorEngineChosen": getattr(self, "_engine_chosen", False),
                 "omniPack": self.omni_pack,
+                "cloneVoices": self.clone_voices,
             }
         )
 
@@ -4669,6 +5241,18 @@ class Engine:
         self.emit({"event": "state", **self.snapshot()})
 
     def configure(self, data):
+        if "cloneVoices" in data:
+            self.clone_voices = bool(data["cloneVoices"])
+            if self.speakers is not None:
+                self.speakers.reset()
+            if self.clone_voices and self.speakers is None:
+                self.speakers = SpeakerBank(lambda: self.lektor.cloud, lambda a: self.stt.transcribe(a), log=log_timing,
+                                    is_lektor=((lambda a, b: self.lektor.speaking_between(a, b)) if os.environ.get("LIVEDUB_SPEAKER_GUARD") else None),
+                                    expects_english=lambda: not self._pl_subs_active)
+            elif not self.clone_voices:
+                if self.speakers is not None:
+                    self.speakers.close()
+                self.speakers = None
         if "mode" in data:
             self.mode = normalize_mode(data["mode"])
         if "device" in data:
@@ -4710,6 +5294,8 @@ class Engine:
                 self.stop()
                 threading.Timer(0.6, lambda: self.start(auto=auto)).start()
         if data.get("source") in SOURCES and data["source"] != self.source:
+            if self.speakers is not None:
+                self.speakers.reset()
             self.source = data["source"]
             self.source_info = find_source_window(self.source, GAME_PROFILES[self.game].get("prefer", "ps"))
             self.ps_window = self.source_info[:4] if self.source_info else None
@@ -4724,6 +5310,9 @@ class Engine:
         self.emit({"event": "state", **self.snapshot()})
 
     def apply_game(self, game, persist=True, announce=True, reset_lock=True):
+        bank = getattr(self, "speakers", None)
+        if bank is not None and normalize_game(game) != self.game:
+            bank.reset()
         # inna gra = może mieć inne napisy; polskie wykryjemy od nowa
         self._pl_subs_at = None
         self.game = normalize_game(game)
@@ -5210,6 +5799,8 @@ class Engine:
                 return None
             first = self._queue[0]
             items = [first] + [it for it in self._queue[1:] if it[1] == first[1]]
+            if getattr(self, "speakers", None) is not None and getattr(getattr(self, "lektor", None), "cloud", None) is not None:
+                items = [first]  # osobne napisy mogą należeć do różnych postaci
         srcs = [it[0] for it in items]
         return (_join_parts(srcs) if len(srcs) > 1 else srcs[0]), first[1], srcs
 
@@ -5243,6 +5834,8 @@ class Engine:
             parts = [first]
             # przygotowane zawczasu: weź dokładnie ten zestaw, dla którego dźwięk już czeka
             limit = len(self._prefetch_parts) if self._prefetch_parts and self._prefetch_parts[0] == first[0] else 99
+            if getattr(self, "speakers", None) is not None and getattr(getattr(self, "lektor", None), "cloud", None) is not None:
+                limit = 1
             while len(parts) < limit and self._queue and self._queue[0][1] == first[1]:
                 parts.append(self._queue.pop(0))
             self._prefetch_parts = None
@@ -5371,6 +5964,29 @@ class Engine:
                         self._spec_done.wait_for(lambda: self._spec_busy != src, timeout=4.0)
                 with self._ready_lock:
                     ready = self._ready.pop(src, None)
+                # kto mówi: jeśli rozpoznana postać ma gotowy głos, czytamy nim — zapas z syntezy zwykłym głosem odpada
+                voice = None
+                bank = getattr(self, "speakers", None)
+                if bank is not None and bank.any_ready() and getattr(self.lektor, "cloud", None) is not None:
+                    seen0 = min((t for t in (self._seen_at.get(part) for part in parts) if t), default=None)
+                    if seen0:
+                        voice = bank.voice_for(seen0, wait=SPEAKER_WAIT_SEC, text=src if translate else None)
+                if voice:
+                    ready = None
+                # tryb ścisły (domyślny, cfg „cloneOnly”): bez próbki głosu tej postaci lektor milczy — zwykły głos
+                # domyślny nie czyta za postacie. Działa tylko, gdy klonowanie jest naprawdę dostępne (lektor VoiceStudio).
+                cloud = getattr(self.lektor, "cloud", None)
+                if (bank is not None and not voice and self.cfg.get("cloneOnly", True)
+                        and cloud is not None and getattr(cloud, "ready", False)):
+                    now = time.monotonic()
+                    if now - getattr(self, "_clone_wait_note", 0.0) > 20.0:
+                        self._clone_wait_note = now
+                        self.emit({"event": "status", "text": "Czekam na próbkę głosu postaci — do tego czasu lektor milczy."})
+                    self._timing(f"postacie: brak próbki głosu tej postaci — pomijam kwestię: {parts[-1][:60]!r}")
+                    for part in parts:
+                        self._mark_spoken(part)
+                        self._seen_at.pop(part, None)
+                    continue
                 if ready:
                     text, segments, arousal, boost, path = ready
                 else:
@@ -5380,7 +5996,7 @@ class Engine:
                     # pierwsze zdanie od razu — reszta syntezuje się, gdy lektor już mówi
                     path = self.lektor.prepare(
                         segments[0][0], volume=self.lektor_volume / 100.0, mood=segments[0][1], arousal=arousal,
-                        hurry=self._queue_waiting(src), boost=boost,
+                        hurry=self._queue_waiting(src), boost=boost, voice=voice,
                     )
                 # nowy napis: model liczył w czasie syntezy — ostatnie słowo przed odtworzeniem
                 # przy polskich napisach niepolski skrawek (nazwa ulicy z HUD) czeka na model dłużej
@@ -5407,6 +6023,7 @@ class Engine:
                     + f", tempo x{boost:.2f}"
                     + (f", połączone {len(parts)}" if len(parts) > 1 else "")
                     + (f", wejście z głosem postaci +{waited:.2f}s" if waited > 0.02 else "")
+                    + (f", głos {voice}" if voice else "")
                     + f" | {text[:70]!r}"
                 )
                 self.speaking_text = src
@@ -5431,7 +6048,7 @@ class Engine:
                         seg, mood = segments[idx + 1]
                         nxt = self.lektor.prepare(
                             seg, volume=self.lektor_volume / 100.0, mood=mood, arousal=arousal,
-                            hurry=self._queue_waiting(src), boost=boost,
+                            hurry=self._queue_waiting(src), boost=boost, voice=voice,
                         )
                     else:
                         # ostatni fragment gra — w tym czasie przygotuj kolejną kwestię z kolejki
@@ -5705,7 +6322,7 @@ class Engine:
             )
         return self._tts_interrupt.is_set()
 
-    def _on_heard(self, heard, audio=None):
+    def _on_heard(self, heard, audio=None, start=None):
         if not heard or heard.lower() in JUNK_HEARD:
             return
         # jak postać to powiedziała — liczone zawsze, żeby miernik uczył się mowy w tej grze
@@ -5744,6 +6361,8 @@ class Engine:
             return
         if not convo_only:
             self._heard_offered_at = time.monotonic()
+        if start is not None:
+            self._seen_at.setdefault(strip_fillers(heard), start)
         self._offer_line(heard, True)
 
     def _drop_repeated_heard(self, heard):
@@ -5955,6 +6574,9 @@ class Engine:
                 if len(self._seen_at) > 32:
                     self._seen_at.clear()
                 self._seen_at.setdefault(key, now)
+                bank = getattr(self, "speakers", None)
+                if bank is not None:
+                    bank.note_subtitle(now)  # tu zaczyna mówić (nowa) postać — dzieli wypowiedź z dźwięku
         self._ocr_samples = samples
         if samples:
             # przy remisie wygrywa wariant czytany najczęściej („klama” ×6 nad „klarna” ×2), potem
@@ -6187,15 +6809,23 @@ class Engine:
                     continue
                 self.prosody.feed(chunk)
                 self.voice.feed(chunk)
-                if live is None:
+                bank = getattr(self, "speakers", None) if self.lektor.cloud is not None else None
+                if live is None and bank is None:
                     continue
                 audio = state.feed(chunk)
+                if bank is not None:
+                    part = state.peek(SPEAKER_MIN_SEC)  # kto mówi — jeszcze w trakcie wypowiedzi
+                    if part is not None:
+                        bank.observe(part[0], part[1], time.monotonic(), provisional=True)
                 if audio is not None:
-                    # koniec wypowiedzi = przed chwilą ciszy, która ją zamknęła; początek — minus jej długość
-                    end = time.monotonic() - SILENCE_SEC
-                    start = end - audio.size / float(SAMPLE_RATE) + PREROLL_SEC
+                    # znaczniki z cięcia dźwięku, wspólne dla odczytu wstępnego, końcowego i STT
+                    start, end = state.last_start, state.last_end
+                    if bank is not None and not self.prosody.is_quiet(audio):
+                        bank.observe(audio, start, end)
+                    if live is None:
+                        continue
                     if self._unsubtitled_speech(audio, start, end):
-                        live.submit(audio)
+                        live.submit(audio, start=start)
                     elif not self.prosody.is_quiet(audio):
                         # dialog z napisem: nie rozpoznajemy (GPU dla lektora), tylko miernik emocji się uczy
                         self.prosody.analyze(audio)

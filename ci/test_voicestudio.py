@@ -33,11 +33,12 @@ class OmniVoice:
     def from_pretrained(cls, *a, **k): return cls()
     def create_voice_clone_prompt(self, ref, text):
         assert text, "brak tekstu voicepacka"
-        return "prompt"
+        return "default" if ref.endswith("/voice.wav") else "clone"
     def generate(self, text, language, voice_clone_prompt, num_step, speed=None):
-        assert language == "pl" and voice_clone_prompt == "prompt"
+        assert language == "pl" and voice_clone_prompt in ("default", "clone")
         t = np.arange(int(24000 * 0.05 * len(text))) / 24000
-        return [_Wav((np.sin(2 * np.pi * 150 * t) * 0.3).astype("float32"))]
+        freq = 150 if voice_clone_prompt == "default" else 300
+        return [_Wav((np.sin(2 * np.pi * freq * t) * 0.3).astype("float32"))]
 """
 
 
@@ -101,6 +102,48 @@ class VoiceStudioTest(unittest.TestCase):
         self.assertFalse(backend.ready)
         self.assertIn("Supertonic", backend.error)
         self.assertIsNone(backend.synth("Hej."))
+
+    def test_registered_character_changes_voice_and_sample_is_removed(self):
+        import numpy as np
+
+        backend = ge.OmniVoiceLocal("lektor")
+        try:
+            self.wait_ready(backend)
+            default = backend.synth("Cześć.")
+            self.assertIsNotNone(backend.set_voice("s1", np.zeros(16000, dtype=np.float32), "Hello."))
+            clone = backend.synth("Cześć.", voice="s1")
+            self.assertFalse(np.array_equal(default, clone))
+            self.assertIsNone(backend.synth("Cześć.", voice="unknown"))  # brak klonu: kwestia przechodzi na Supertonic, a nie na obcy głos
+            self.assertEqual(list((ge.CACHE_DIR / "speakers").glob("*.wav")), [])
+        finally:
+            backend.close()
+
+    def test_wrong_reply_id_stops_process_instead_of_playing_wrong_audio(self):
+        backend = ge.OmniVoiceLocal("lektor")
+        try:
+            self.wait_ready(backend)
+            backend.proc.stdin.write(b'{"id": -1, "op": "unknown"}\n')
+            backend.proc.stdin.flush()
+            time.sleep(0.1)
+            self.assertIsNone(backend.synth("Cześć."))
+            self.assertFalse(backend.ready)
+            self.assertIsNone(backend.proc)
+        finally:
+            backend.close()
+
+    def test_timeout_closes_process_and_cleans_reference(self):
+        import numpy as np
+
+        backend = ge.OmniVoiceLocal("lektor")
+        try:
+            self.wait_ready(backend)
+            with patch("select.select", return_value=([], [], [])):
+                self.assertIsNone(backend.set_voice("s1", np.zeros(16000, dtype=np.float32), "Hello."))
+            self.assertFalse(backend.ready)
+            self.assertIsNone(backend.proc)
+            self.assertEqual(list((ge.CACHE_DIR / "speakers").glob("*.wav")), [])
+        finally:
+            backend.close()
 
 
 class MemoryCapTest(unittest.TestCase):

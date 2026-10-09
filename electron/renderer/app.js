@@ -114,6 +114,7 @@ function applyState(msg) {
     document.getElementById("srcChrome").classList.toggle("primary", msg.source === "chrome");
   }
   if (typeof msg.autoStart === "boolean") document.getElementById("autoStart").checked = msg.autoStart;
+  if (typeof msg.cloneVoices === "boolean") document.getElementById("cloneVoices").checked = msg.cloneVoices;
   if (Array.isArray(msg.omniPacks)) {
     const engine = document.getElementById("lektorEngine");
     const studio = engine.querySelector('option[value="voicestudio"]');
@@ -133,6 +134,7 @@ function applyState(msg) {
     document.getElementById("lektorEngine").value = msg.lektorEngine;
     const packs = document.getElementById("omniPack").options.length;
     document.getElementById("omniPackRow").classList.toggle("hidden", msg.lektorEngine !== "voicestudio" || packs < 2);
+    document.getElementById("cloneVoicesRow").classList.toggle("hidden", msg.lektorEngine !== "voicestudio");
   }
   if (typeof msg.running === "boolean") {
     state.running = msg.running;
@@ -219,6 +221,10 @@ document.getElementById("autoStart").onchange = (e) => {
 document.getElementById("game").onchange = (e) => send({ cmd: "config", game: e.target.value });
 document.getElementById("lektorEngine").onchange = (e) => send({ cmd: "config", lektorEngine: e.target.value });
 document.getElementById("omniPack").onchange = (e) => send({ cmd: "config", omniPack: e.target.value });
+document.getElementById("cloneVoices").onchange = (e) => {
+  send({ cmd: "config", cloneVoices: e.target.checked });
+  window.gr.releaseFocus();
+};
 fillGames(GAMES, "gta6");
 
 window.gr.onEvent((msg) => {
