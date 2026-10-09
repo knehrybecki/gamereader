@@ -358,9 +358,13 @@ class LlmTranslator:
         hit = self._cache.get(text)
         if hit is not None:
             return hit
+        started = time.monotonic()
         out = self._ask(text) if self.ready else None
         if out is None:
+            if self.ready:
+                self._log(f"tłumaczenie: Argos (model nie zdążył albo odrzucony, {time.monotonic() - started:.2f}s) | {text[:60]!r}")
             return self.fallback.translate(text)
+        self._log(f"tłumaczenie: model {time.monotonic() - started:.2f}s | {text[:50]!r} -> {out[:60]!r}")
         self._cache[text] = out
         while len(self._cache) > 256:
             self._cache.popitem(last=False)
