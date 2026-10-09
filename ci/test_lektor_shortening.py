@@ -5,7 +5,10 @@ from pathlib import Path
 from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from gamereader_engine import Engine, MaleLektor, LEKTOR_MAX_RATE, LEKTOR_SPEED
+import numpy as np
+from gamereader_engine import (
+    AppleVisionOcr, Engine, MaleLektor, LEKTOR_MAX_RATE, LEKTOR_SPEED, drop_dim_lines, ink_brightness,
+)
 
 
 class FakeTranslator:
@@ -139,6 +142,54 @@ class LektorShorteningTest(unittest.TestCase):
         lektor = self._real_lektor()
         boost = lektor.line_boost("Krótka kwestia.", 6.0, 30.0)
         self.assertLessEqual(boost * LEKTOR_SPEED, LEKTOR_MAX_RATE + 0.03)
+
+
+class DimLinesTest(unittest.TestCase):
+    """Jasność liter z kadrów GTA VI (09.10): jasna linia = mówiąca postać, ciemniejsza = osoba poboczna."""
+
+    def test_same_colour_lines_are_both_read(self):
+        # zmierzone: 229/231, 234/238, 235/236 — dwie linie jednego koloru
+        for first, second in ((229, 231), (234, 238), (235, 236)):
+            kept = drop_dim_lines([("Jedna.", first, 5000), ("Druga.", second, 3000)])
+            self.assertEqual(kept, ["Jedna.", "Druga."])
+
+    def test_clearly_darker_line_is_dropped(self):
+        # zmierzone: „Hey, Billy!” 214, „Yo, what’s up?” 188
+        kept = drop_dim_lines([("Hey, Billy!", 214, 1080), ("Yo, what's up?", 188, 860)])
+        self.assertEqual(kept, ["Hey, Billy!"])
+
+    def test_darker_first_line_is_dropped_too(self):
+        kept = drop_dim_lines([("Dodaje.", 185, 900), ("Mówi.", 230, 1200)])
+        self.assertEqual(kept, ["Mówi."])
+
+    def test_single_line_and_tiny_ink_are_never_dropped(self):
+        self.assertEqual(drop_dim_lines([("Sama.", 150, 900)]), ["Sama."])
+        self.assertEqual(drop_dim_lines([("Mm.", 100, 40), ("Jasna.", 235, 900)]), ["Mm.", "Jasna."])
+
+    def test_ink_brightness_takes_the_median_of_letter_pixels_only(self):
+        lum = np.full((20, 40), 30.0, dtype=np.float32)
+        lum[5:10, 5:25] = 200.0
+        ink = lum > 100
+        bright, n = ink_brightness(lum, ink, (0, 0, 40, 20))
+        self.assertEqual((bright, n), (200.0, 100))
+        self.assertEqual(ink_brightness(lum, ink, (30, 12, 8, 6)), (0.0, 0))
+
+    def test_text_on_ink_skips_the_darker_line(self):
+        lum = np.full((60, 200), 20.0, dtype=np.float32)
+        ink = np.zeros((60, 200), dtype=bool)
+        lum[5:25, 10:190] = 235.0   # jasna linia
+        lum[35:55, 40:160] = 190.0  # ciemniejsza
+        # litery to cienkie kreski (filtr tablic odrzuca pełne plamy)
+        ink[5:25, 10:190:3] = True
+        ink[35:55, 40:160:3] = True
+        ocr = AppleVisionOcr()
+        ocr._run_items = lambda *_a, **_k: [
+            (0.1, 10, "Hey, Billy!", (10, 5, 180, 20), 0.9),
+            (0.6, 40, "Yo, what's up?", (40, 35, 120, 20), 0.9),
+        ]
+        self.assertEqual(ocr._text_on_ink(None, ink, lum), "Hey, Billy!")
+        # bez jasności kadru zachowanie jak dotąd: obie linie
+        self.assertEqual(ocr._text_on_ink(None, ink), "Hey, Billy! Yo, what's up?")
 
 
 if __name__ == "__main__":

@@ -3865,6 +3865,31 @@ def strip_speaker_label(text):
     return raw
 
 
+# Napis z dwóch linii: jasna to mówiąca postać, ciemniejsza (szarawa) — osoba poboczna, która coś dodaje.
+# Pomiar na kadrach GTA VI: linie tego samego koloru różnią się o 1–4 pkt jasności liter, ciemniejsza o ~26.
+DIM_LINE_DELTA = 20.0
+# poniżej tylu pikseli liter pomiar jasności nic nie znaczy (krótkie „Mm-hmm.”, kropki, ślady obwódki)
+DIM_LINE_MIN_INK = 120
+
+
+def ink_brightness(lum, ink, box):
+    """(mediana jasności liter, liczba pikseli liter) w ramce odczytu."""
+    x, y, w, h = box
+    ys, xs = slice(max(0, y), max(0, y + h)), slice(max(0, x), max(0, x + w))
+    values = lum[ys, xs][ink[ys, xs]]
+    return (float(np.median(values)), int(values.size)) if values.size else (0.0, 0)
+
+
+def drop_dim_lines(entries):
+    """entries: [(tekst, jasność liter, liczba pikseli)] → teksty bez linii wyraźnie ciemniejszych od najjaśniejszej.
+    Najjaśniejsza linia zostaje zawsze; linie z za małą liczbą pikseli do pomiaru też."""
+    solid = [bright for _text, bright, n in entries if n >= DIM_LINE_MIN_INK]
+    if len(solid) < 2:
+        return [text for text, _bright, _n in entries]
+    top = max(solid)
+    return [text for text, bright, n in entries if n < DIM_LINE_MIN_INK or bright >= top - DIM_LINE_DELTA]
+
+
 class AppleVisionOcr:
     def __init__(self):
         self.boost = 2.4
@@ -4159,8 +4184,9 @@ class AppleVisionOcr:
             image = image.resize(size, Image.Resampling.LANCZOS)
         return image
 
-    def _text_on_ink(self, image, ink):
-        """Zostaw tylko odczyt leżący na białych literach napisu. Tablica i HUD odpadają."""
+    def _text_on_ink(self, image, ink, lum=None):
+        """Zostaw tylko odczyt leżący na białych literach napisu. Tablica i HUD odpadają.
+        Z `lum` (jasność kadru) odpadają też linie wyraźnie ciemniejsze od najjaśniejszej — osoby poboczne."""
         try:
             items = self._run_items(image, "vision", "accurate", self.languages)
         except Exception:
@@ -4178,8 +4204,9 @@ class AppleVisionOcr:
                 continue
             if self.skip_yellow_speaker and looks_like_speaker_name(text):
                 continue
-            kept.append(text)
-        return normalize_text(" ".join(kept))
+            bright, n_ink = ink_brightness(lum, ink, box) if lum is not None else (0.0, 0)
+            kept.append((text, bright, n_ink))
+        return normalize_text(" ".join(drop_dim_lines(kept)))
 
     def read(self, frame):
         if frame is None or frame.size == 0:
@@ -4197,9 +4224,10 @@ class AppleVisionOcr:
             primary, secondary = mask, color
         else:
             primary, secondary = color, mask
-        raw = self._text_on_ink(primary, ink)
+        lum = np.asarray(color.convert("L"), dtype=np.float32)
+        raw = self._text_on_ink(primary, ink, lum)
         if self._score(raw) < 14:
-            other = self._text_on_ink(secondary, ink)
+            other = self._text_on_ink(secondary, ink, lum)
             if self._score(other) > self._score(raw):
                 raw = other
         best = repair_polish_ocr(raw)
