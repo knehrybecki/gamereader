@@ -1279,14 +1279,15 @@ _SOFT_WORDS = (
 )
 # 8 kroków dyfuzji: mniej robotycznie niż 5 (sesja 27.09: 12 najlepsze, 8 = kompromis z czasem syntezy ~+55%)
 SUPERTONIC_STEPS = 8
-# tempo lektora (parametr speed Supertonic przy zwykłej kwestii; było 1,05)
-LEKTOR_SPEED = 1.10
+# tempo lektora (parametr speed Supertonic przy zwykłej kwestii; było 1,05, potem 1,10)
+# 09.10: „dalej za wolno wobec NPC” — 1,18 (model bełkocze dopiero powyżej ~1,35)
+LEKTOR_SPEED = 1.18
 # najszybsze tempo samego modelu — powyżej Supertonic bełkocze (1,5 → 15 % słów źle rozpoznanych)
 LEKTOR_MAX_SPEED = 1.35
 # spóźniony lektor przyspiesza tylko tempem samego głosu. Bełkot z sesji 13:48 robiło rozciąganie
 # ffmpeg (atempo ×1,12–1,40), nie tempo modelu — atempo wyłączone. Sesja 16:30: przy suficie ×1,15
 # lektor stał na stałym tempie i nie nadążał za napisami (1–1,7 s za nimi) — sufit znów ×1,25.
-LEKTOR_MAX_RATE = 1.25
+LEKTOR_MAX_RATE = 1.30
 LEKTOR_MAX_STRETCH = 1.0
 # gdy w kolejce czeka już następny napis: kolejne fragmenty syntezują się szybciej, bez pauz
 LEKTOR_CATCHUP_RATE = 1.08
@@ -2967,11 +2968,14 @@ class MaleLektor:
         # sufit łącznego tempa lektora (nie samego modelu) — przy ×1,15 skrót wchodzi, zanim narośnie spóźnienie
         return len(text or "") / (self.cps1 * max(0.6, seconds * 0.92)) / LEKTOR_MAX_RATE
 
-    def line_boost(self, text, seconds):
+    def line_boost(self, text, seconds, lag=0.0):
         """Przyspieszenie CAŁEJ kwestii (jedno dla wszystkich jej fragmentów).
 
         Dłuższa kwestia = szybciej (napis i tak zniknie), a do tego lektor ma się zmieścić
-        w `seconds` — czasie, przez jaki gra pokazuje taki napis."""
+        w `seconds` — czasie, przez jaki gra pokazuje taki napis. `lag` = o ile sekund lektor jest
+        już spóźniony za napisem: budżet z tempa napisów (z pauzami między replikami) bywa za luźny
+        i bez tego lektor czytał ×1,00 mimo narastającej kolejki — od 1 s spóźnienia dochodzi tempo,
+        przy 2,5 s jest już sufit."""
         base = LEKTOR_SPEED / max(0.5, float(self.tts_scale or 1.0))
         n = len(text or "")
         if n <= 60:
@@ -2984,7 +2988,9 @@ class MaleLektor:
             by_length = 1.16
         needed = len(text) / (self.cps1 * max(0.6, seconds * 0.92)) / base if seconds and seconds > 0 else 1.0
         boost = max(1.0, by_length, min(LEKTOR_MAX_RATE / base, needed))
-        boost = min(boost, LEKTOR_MAX_RATE / base)
+        cap = LEKTOR_MAX_RATE / base
+        late = min(1.0, max(0.0, (float(lag or 0.0) - 1.0) / 1.5))
+        boost = min(max(boost, 1.0 + late * (cap - 1.0)), cap)
         return round(boost * 20) / 20  # stopnie co 0,05 — cache się powtarza
 
     def _style(self, blend):
@@ -5416,7 +5422,7 @@ class Engine:
         if text != before:
             self._timing(f"skrót (na {seconds:.1f}s): {before[:70]!r} -> {text[:70]!r}")
             segments = self.lektor.plan(text)
-        boost = self.lektor.line_boost(text, seconds)
+        boost = self.lektor.line_boost(text, seconds, lag)
         return text, segments, float(arousal or 0.0), boost
 
     def _said_fold(self, sentence):

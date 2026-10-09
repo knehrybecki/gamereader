@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from gamereader_engine import Engine
+from gamereader_engine import Engine, MaleLektor, LEKTOR_MAX_RATE, LEKTOR_SPEED
 
 
 class FakeTranslator:
@@ -27,7 +27,7 @@ class FakeLektor:
     def overload(self, text, seconds):
         return len(text or "") / (self.cps1 * max(0.6, seconds * 0.92)) / 1.25
 
-    def line_boost(self, text, seconds):
+    def line_boost(self, text, seconds, lag=0.0):
         return 1.0
 
 
@@ -117,6 +117,28 @@ class LektorShorteningTest(unittest.TestCase):
         engine.voice = Mock()
         engine.voice.alive.side_effect = AssertionError("tłumaczenie nie pyta o głos postaci")
         self.assertEqual(engine._film_entry("Hello there.", 10.0, True), 0.0)
+
+    def _real_lektor(self):
+        lektor = MaleLektor.__new__(MaleLektor)
+        lektor.cps1 = 15.0
+        lektor.tts_scale = 1.0
+        return lektor
+
+    def test_late_lektor_speeds_up_even_when_the_subtitle_budget_is_loose(self):
+        # sesja 10:22: ×1,00 przy 30 pominiętych kwestiach, bo budżet z tempa napisów był za luźny
+        lektor = self._real_lektor()
+        text = "Powinieneś zobaczyć tego gościa."
+        self.assertEqual(lektor.line_boost(text, 6.0, 0.0), 1.0)
+        self.assertEqual(lektor.line_boost(text, 6.0, 1.0), 1.0)
+        mid = lektor.line_boost(text, 6.0, 1.75)
+        top = lektor.line_boost(text, 6.0, 2.5)
+        self.assertGreater(mid, 1.0)
+        self.assertGreater(top, mid)
+
+    def test_lag_never_pushes_the_tempo_past_the_ceiling(self):
+        lektor = self._real_lektor()
+        boost = lektor.line_boost("Krótka kwestia.", 6.0, 30.0)
+        self.assertLessEqual(boost * LEKTOR_SPEED, LEKTOR_MAX_RATE + 0.03)
 
 
 if __name__ == "__main__":
