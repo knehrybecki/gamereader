@@ -675,6 +675,29 @@ EN_COMMON = EN_HINTS | {
     "know", "here", "there", "now", "come", "going", "want", "got", "all", "right", "okay", "yeah",
     "no", "yes", "let's", "gonna", "him", "her", "us", "them", "out", "up", "if", "so", "but",
 }
+# Dialogowe słownictwo angielskie: dodatni dowód, że krótka kwestia („Hey, Billy!”, „No way!”, „Run!”) jest po angielsku.
+# Bez tego kwestie bez żadnego z ~60 słów powyżej szły do lektora nietłumaczone i były czytane po angielsku
+# (10 z 24 krótkich kwestii w teście 09.10). Słowa będące też polskimi („ten”, „most”, „my”, „by”…) są wykluczone.
+EN_DIALOGUE = set("""
+hey hi hello nope alright sure thing things nice good great bad wait run hold stop look see watch listen hear
+going gonna wanna gotta give take took make made lets put keep kept leave left bring call tell told say said ask think
+thought knew mean need like love hate feel find found work play move drive ride shoot kill die dead live alive help save try use
+show turn open close pull push grab drop fall fight win lose won lost man men woman guy guys girl boy kid kids dude bro brother buddy
+friend mate baby boss cop cops police car truck bike boat house home place room door street road town city money cash gun shit fuck
+fucking damn hell ass bitch god jesus christ oh ah uh um well because then than when while where why how who which whose
+me myself yourself himself herself some any every both each few many much more only too very
+even still again ever never always sometimes maybe probably really actually already yet once twice today tonight tomorrow yesterday
+morning night day time year week minute hour back away down over under off into onto through around behind front next last first
+third four five hundred thousand little big small long short old new young hot cold hard easy fast slow quiet loud safe crazy
+stupid sorry please thanks thank welcome goodbye bye fine wrong true real free ready done late early rich poor high low deep dark
+light black white red blue green way
+dont doesnt didnt cant couldnt wont wouldnt shouldnt isnt arent wasnt werent havent hasnt hadnt youre youll youve theyre theyll
+weve ive ill hes shes thats whats whos hows theres heres
+don't doesn't didn't can't couldn't won't wouldn't shouldn't isn't aren't wasn't weren't haven't hasn't hadn't i'm i'll i've i'd
+you're you'll you've you'd we're we'll we've they're they'll they've he'll she'll that's what's who's how's there's here's it's he's
+she's where's
+""".split())
+EN_COMMON = EN_COMMON | EN_DIALOGUE
 # słowa wspólne dla obu języków („to”, „i”, „we”…) nie rozstrzygają
 EN_PL_SHARED = {"to", "i", "a", "o", "we", "no", "na", "do", "on", "go", "ta", "tak"}
 
@@ -689,6 +712,7 @@ def looks_polish(text):
     en_hits = sum(1 for word in words if word in EN_COMMON and word not in EN_PL_SHARED)
     hits = 0
     pl_only = 0
+    long_pl = 0
     for word in words:
         if "'" in word:
             continue
@@ -698,7 +722,11 @@ def looks_polish(text):
         ):
             hits += 1
             pl_only += word not in EN_PL_SHARED
-    # „to”, „i”, „we” są w obu językach — same nie przeważą nad angielskimi słowami
+            long_pl += word not in EN_PL_SHARED and len(token) >= 5
+    # „to”, „i”, „we” są w obu językach — same nie przeważą nad angielskimi słowami. Remis (np. angielskie „you”
+    # kontra polskie „same” w „Nice to meet you guys. Same, pleasure.”) wygrywa polski tylko przy dłuższym polskim słowie
+    if pl_only == en_hits and en_hits > 0:
+        return hits >= 1 and long_pl > 0
     return hits >= 1 and pl_only >= en_hits
 
 

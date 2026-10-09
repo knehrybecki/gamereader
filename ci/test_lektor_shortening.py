@@ -7,7 +7,7 @@ from unittest.mock import Mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 from gamereader_engine import (
-    AppleVisionOcr, Engine, MaleLektor, LEKTOR_MAX_RATE, LEKTOR_SPEED, drop_dim_lines, drop_detached_last, ink_brightness, repair_polish_ocr, strip_fillers, is_grunt_only,
+    AppleVisionOcr, Engine, MaleLektor, LEKTOR_MAX_RATE, LEKTOR_SPEED, drop_dim_lines, drop_detached_last, ink_brightness, repair_polish_ocr, strip_fillers, is_grunt_only, looks_polish, should_translate,
 )
 
 
@@ -323,6 +323,38 @@ class GruntTest(unittest.TestCase):
     def test_real_words_are_never_removed(self):
         for text in self.WORDS:
             self.assertEqual(strip_fillers(text), text, text)
+
+
+class ShortEnglishTest(unittest.TestCase):
+    """Krótkie angielskie kwestie bez słów z małej listy EN_COMMON szły do lektora nietłumaczone (log 12:04, test 09.10)."""
+
+    def test_short_english_lines_are_sent_to_translation(self):
+        for text in ("Hey, Billy!", "Hey. Billy!", "No way!", "Oh, shit.", "Billy, wait!", "Hold on.", "Nice one, Jay.",
+                     "Where's Lucia?", "Run!", "Sure thing.", "Don't move.", "Cool. Stay there."):
+            self.assertTrue(should_translate(text), text)
+
+    def test_short_polish_lines_are_not(self):
+        for text in ("Hej, Billy!", "Ty prowadzisz?", "Dawaj, dawaj.", "Nie, w prawo.", "To tutaj.", "Wsiadaj.", "Tego nie wiem.",
+                     "Ruszaj się!", "Idziemy!", "Spokojnie, Jay.", "To moi kumple."):
+            self.assertFalse(should_translate(text), text)
+
+    def test_words_that_are_also_polish_are_no_english_evidence(self):
+        from gamereader_engine import EN_DIALOGUE
+        for word in ("ten", "most", "my", "by", "sam", "pan", "dom", "mama", "tak", "nie", "jak"):
+            self.assertNotIn(word, EN_DIALOGUE, word)
+
+
+class LooksPolishTest(unittest.TestCase):
+    def test_english_line_with_a_polish_homograph_is_translated(self):
+        # log 12:01: „Same” (pol. „same”) remisowało z „you” i angielski szedł do lektora bez tłumaczenia
+        # (samo „Same, pleasure.” bez angielskiego słowa ze słownika zostaje nierozstrzygalne — granica reguły)
+        for text in ("Nice to meet you guys. Same, pleasure.", "Nice to meet you guyse Same, pleasure."):
+            self.assertTrue(should_translate(text), text)
+
+    def test_polish_without_diacritics_stays_polish(self):
+        for text in ("Dobrze, Charles, to my to podnosimy,", "Hej Jak leci?",
+                     "Wsiadaj do auta i jedz za mna."):
+            self.assertFalse(should_translate(text), text)
 
 
 if __name__ == "__main__":
