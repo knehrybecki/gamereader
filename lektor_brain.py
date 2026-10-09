@@ -46,6 +46,39 @@ BRAIN_MLX_CACHE_BYTES = 256 * 1024 * 1024
 # sufit aktywnej pamięci MLX: wagi Qwen 4-bit (~3 GB) + Parakeet + aktywacje, z zapasem
 MLX_MEMORY_LIMIT_BYTES = 12 * 1024 * 1024 * 1024
 
+# Tłumaczenie slangu modelem językowym (Gemma 3 12B, 4 bit, MLX) zamiast dosłownego Argos. Włączane flagą
+# LIVEDUB_LLM_TRANSLATE=1 (model ~7,5 GB nie jest w paczce, tylko Mac z ≥ 32 GB). Argos zostaje zapasem:
+# gdy model się ładuje, nie zdąży w LLM_TRANSLATE_TIMEOUT s albo odda śmieci, kwestia idzie przez Argos.
+LLM_TRANSLATE_MODEL = "mlx-community/gemma-3-12b-it-4bit"
+LLM_TRANSLATE_MIN_RAM_GB = 32
+LLM_TRANSLATE_TIMEOUT = 1.6
+LLM_TRANSLATE_EXTRA_BYTES = 10 * 1024 * 1024 * 1024
+LLM_TRANSLATE_SYSTEM = (
+    "Jesteś tłumaczem napisów do polskiego dubbingu gier i filmów kryminalnych (styl GTA). "
+    "Tłumacz z angielskiego na naturalną, potoczną polszczyznę, jak mówi się na ulicy: angielski slang, przekleństwa i idiomy "
+    "zamieniaj na polskie ODPOWIEDNIKI (nie dosłownie). Zachowaj osobę i sens (I → ja, you → ty), krótkie zdania nadające się "
+    "do czytania na głos, bez wyjaśnień. Zwróć wyłącznie tłumaczenie."
+)
+LLM_TRANSLATE_SHOTS = (
+    ("I'm gon roll me a fat one.", "Skręcę sobie grubego."),
+    ("What's up, dawg? You good?", "No siema, stary. Wszystko git?"),
+    ("That's sketchy as hell, I'm out.", "Śmierdzi na kilometr, spadam."),
+    ("He's a snitch. Everybody knows.", "To kapuś. Wszyscy wiedzą."),
+    ("We're so screwed.", "Jesteśmy w czarnej dupie."),
+    ("Let's roll. Get in.", "Jedziemy. Wsiadaj."),
+)
+
+
+def llm_translate_wanted(env=None):
+    """Czy ten proces ma tłumaczyć modelem (flaga + Mac z Apple Silicon, mlx-lm i dość pamięci)."""
+    env = os.environ if env is None else env
+    if not env.get("LIVEDUB_LLM_TRANSLATE"):
+        return False
+    if sys.platform != "darwin" or platform.machine() != "arm64":
+        return False
+    return importlib.util.find_spec("mlx_lm") is not None and _ram_gb() >= LLM_TRANSLATE_MIN_RAM_GB
+
+
 DIALOGUE_QUESTION = (
     "To tekst odczytany przez OCR z ekranu gry albo filmu. Czy to kwestia dialogowa wypowiedziana przez postać?",
     ["tak — zdanie mówione przez postać", "nie — menu, podpowiedź przycisku, logo, znak wodny, napisy końcowe albo zlepek liter"],
@@ -94,7 +127,7 @@ def cap_mlx_cache():
     try:
         import mlx.core as mx
 
-        mx.set_memory_limit(MLX_MEMORY_LIMIT_BYTES)
+        mx.set_memory_limit(MLX_MEMORY_LIMIT_BYTES + (LLM_TRANSLATE_EXTRA_BYTES if llm_translate_wanted() else 0))
         mx.set_cache_limit(BRAIN_MLX_CACHE_BYTES)
         mx.clear_cache()
     except Exception:
@@ -288,3 +321,144 @@ class LektorBrain:
         del ids, logits, picked
         mx.clear_cache()
         return probs
+
+
+class LlmTranslator:
+    """Tłumacz EN→PL: model językowy w stałym wątku (MLX), a gdy nie jest gotowy / nie zdąży / odda śmieci — Argos.
+
+    translate() zawsze wraca w najgorszym razie po `timeout` s i zawsze oddaje tekst."""
+
+    def __init__(self, fallback, timeout=LLM_TRANSLATE_TIMEOUT, log=None):
+        self.fallback = fallback
+        self.timeout = timeout
+        self._log = log or (lambda _line: None)
+        self.ready = False
+        self.failed = None
+        self.model = None
+        self.tok = None
+        self._jobs = deque()
+        self._cond = threading.Condition()
+        self._thread = None
+        self._cache = OrderedDict()
+        self._context = deque(maxlen=3)  # (angielski, polski) trzech ostatnich kwestii — ciągłość rozmowy
+        self._context_lock = threading.Lock()
+
+    # --- API zgodne z ArgosTranslator -----------------------------------------------------
+    def ensure(self):
+        self.fallback.ensure()
+        self.start()
+
+    def start(self):
+        with self._cond:
+            if self._thread is None and not self.failed:
+                self._thread = threading.Thread(target=self._load_then_work, name="mlx-translate", daemon=True)
+                self._thread.start()
+
+    def translate(self, text):
+        hit = self._cache.get(text)
+        if hit is not None:
+            return hit
+        out = self._ask(text) if self.ready else None
+        if out is None:
+            return self.fallback.translate(text)
+        self._cache[text] = out
+        while len(self._cache) > 256:
+            self._cache.popitem(last=False)
+        with self._context_lock:
+            self._context.append((text, out))
+        return out
+
+    # --- wątek modelu ---------------------------------------------------------------------
+    def _ask(self, text):
+        job = {"text": text, "event": threading.Event(), "out": None, "dropped": False}
+        with self._cond:
+            self._jobs.append(job)
+            self._cond.notify_all()
+        if not job["event"].wait(self.timeout):
+            job["dropped"] = True  # nikt już nie czeka na tę odpowiedź
+            return None
+        return job["out"]
+
+    def _start_worker(self):
+        with self._cond:
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._work, name="mlx-translate", daemon=True)
+                self._thread.start()
+
+    def _load_then_work(self):
+        cap_mlx_cache()
+        try:
+            import mlx.core as mx
+
+            mx.set_default_device(mx.gpu)
+        except Exception:
+            pass
+        try:
+            t0 = time.monotonic()
+            self._load()
+            self.ready = True
+            self._log(f"tłumacz slangu gotowy ({LLM_TRANSLATE_MODEL.split('/')[-1]}, {time.monotonic() - t0:.1f}s)")
+        except Exception as exc:
+            self.failed = str(exc)
+            self._log(f"tłumacz slangu niedostępny: {exc}")
+            return
+        self._work()
+
+    def _load(self):
+        with HEAVY_IMPORT_LOCK:
+            import mlx.core as mx
+            from huggingface_hub import snapshot_download
+            from mlx_lm import load
+
+            path = snapshot_download(LLM_TRANSLATE_MODEL, local_files_only=True)
+            model, tok = load(path)
+            mx.eval(model.parameters())
+            self.model, self.tok = model, tok
+            self._complete(self._messages("Hello."))  # rozgrzewka: pierwszy przebieg kompiluje jądra
+
+    def _work(self):
+        while True:
+            with self._cond:
+                while not self._jobs:
+                    self._cond.wait()
+                job = self._jobs.popleft()
+            if job["dropped"]:
+                continue  # kwestia już poszła przez Argos
+            try:
+                job["out"] = self._clean(job["text"], self._complete(self._messages(job["text"])))
+            except Exception as exc:
+                self._log(f"tłumacz slangu: błąd {exc}")
+                job["out"] = None
+            job["event"].set()
+
+    def _messages(self, text):
+        msgs = [{"role": "system", "content": LLM_TRANSLATE_SYSTEM}]
+        for src, dst in LLM_TRANSLATE_SHOTS:
+            msgs += [{"role": "user", "content": src}, {"role": "assistant", "content": dst}]
+        with self._context_lock:
+            recent = list(self._context)
+        for src, dst in recent:
+            msgs += [{"role": "user", "content": src}, {"role": "assistant", "content": dst}]
+        msgs.append({"role": "user", "content": text})
+        return msgs
+
+    def _complete(self, messages):
+        from mlx_lm import generate
+
+        try:
+            prompt = self.tok.apply_chat_template(messages, add_generation_prompt=True, tokenize=False, enable_thinking=False)
+        except TypeError:
+            prompt = self.tok.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+        return generate(self.model, self.tok, prompt=prompt, max_tokens=90, verbose=False)
+
+    @staticmethod
+    def _clean(src, raw):
+        """Odpowiedź modelu → jedna linia po polsku albo None (wtedy Argos)."""
+        text = " ".join((raw or "").split())
+        if not text or len(text) > max(60, len(src) * 3) or "\n" in (raw or "").strip():
+            return None
+        if sum(ch.isalpha() for ch in text) < 2:
+            return None
+        if text.lower().strip(" .!?") == src.lower().strip(" .!?"):
+            return None  # model oddał angielski bez zmian
+        return text

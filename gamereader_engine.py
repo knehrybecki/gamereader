@@ -20,10 +20,14 @@ import numpy as np
 from PIL import Image
 
 try:
-    from lektor_brain import HEAVY_IMPORT_LOCK, LektorBrain, brain_supported, cap_mlx_cache
+    from lektor_brain import HEAVY_IMPORT_LOCK, LektorBrain, LlmTranslator, brain_supported, cap_mlx_cache, llm_translate_wanted
 except Exception:  # starsza paczka bez modułu — lektor działa na samych regułach
     LektorBrain = None
+    LlmTranslator = None
     HEAVY_IMPORT_LOCK = threading.RLock()
+
+    def llm_translate_wanted():
+        return False
 
     def brain_supported():
         return False
@@ -4389,6 +4393,10 @@ class Engine:
         self._engine_chosen = bool(self.cfg.get("lektorEngineChosen"))
         self._sync_voice()
         self.translator = ArgosTranslator()
+        if LlmTranslator is not None and llm_translate_wanted():
+            # slang po polsku zamiast dosłownego Argos; Argos zostaje zapasem (model ładuje się w tle)
+            self.translator = LlmTranslator(self.translator, log=log_timing)
+            self.translator.start()
         self.stt = ParakeetSTT()
         self.prosody = ProsodyMeter()
         # czy postać teraz mówi (dźwięk gry) — lektor wchodzi chwilę po niej, jak w filmie
