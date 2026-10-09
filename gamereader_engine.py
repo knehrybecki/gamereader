@@ -1055,6 +1055,14 @@ def is_interjection(text):
     return len(words) <= 2
 
 
+def echoed_translation(src, out):
+    """Argos kopiuje angielską „sieczkę” z OCR prawie bez zmian: ≥4 różne słowa (3+ litery) z odczytu wracają
+    w wyniku i to ≥60 % wszystkich — prawdziwe tłumaczenie dzieli z oryginałem najwyżej imiona i powtórzenia."""
+    src_words = {w for w in _fold_words(src) if len(w) >= 3}
+    shared = len(src_words & set(_fold_words(out)))
+    return shared >= 4 and shared * 10 >= len(src_words) * 6
+
+
 def is_trailing_remark(text):
     """Krótka uwaga na końcu kwestii (do 4 słów, nie pytanie): „Teraz, to pierwsze wrażenie!”, „Tak to działa.”"""
     words = re.findall(r"[\wÀ-ž']+", text or "")
@@ -5461,6 +5469,9 @@ class Engine:
             # „Mm-hmm”, „Uh” — przed tłumaczeniem: Argos robi z „Mm-hmm.” czytane „Min-hamm.”, które zajmuje lektora
             clean = strip_fillers(src)
             text = self.translator.translate(clean) if clean else ""
+            if text and echoed_translation(clean, text):
+                self._timing(f"pomijam — tłumacz oddał angielski bez zmian: {clean[:70]!r}")
+                text = ""
         else:
             text = src
         text = strip_fillers(text)
@@ -5505,8 +5516,9 @@ class Engine:
             sentences.pop(filler)
         # lektor spóźniony, a kwestia wciąż długa: końcowa krótka uwaga („Teraz, to pierwsze wrażenie!”) wypada —
         # jak u lektora w filmie, który pomija dopowiedzenia, żeby zdążyć z treścią
+        # (decyduje model decyzji, czy zdanie niesie informację; bez niego — tylko wtrącenie do 2 słów)
         for _ in range(forced):
-            if len(sentences) < 2 or not is_trailing_remark(sentences[-1]):
+            if len(sentences) < 2 or not (is_trailing_remark(sentences[-1]) and self._skippable(sentences[-1])):
                 break
             sentences.pop()
         if (len(sentences) > 1 or len(sentences) < total_sentences

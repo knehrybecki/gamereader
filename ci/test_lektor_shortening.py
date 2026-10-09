@@ -43,6 +43,7 @@ def make_engine(translator, seconds):
     engine.catch_up = False
     engine._screen_budget = Mock(return_value=seconds)
     engine._timing = Mock()
+    engine.brain = None
     return engine
 
 
@@ -217,24 +218,70 @@ class DetachedLineTest(unittest.TestCase):
 
 
 class TrailingRemarkTest(unittest.TestCase):
-    def test_late_lektor_drops_a_short_trailing_remark(self):
-        engine = make_engine(FakeTranslator(
-            "Zawsze mówiłem, że jeśli kosmici wylądują, chcę, żeby wylądowali w środku wyścigu TMC. Teraz, to pierwsze wrażenie!"), 9.0)
-        engine._lag = 2.4
-        text, _s, _a, _b = engine._plan_line("I always said if aliens land, I want 'em to land in a TMC race. Now, that's a first impression!", True)
+    LONG = "Zawsze mówiłem, że jeśli kosmici wylądują, chcę, żeby wylądowali w środku wyścigu TMC. Teraz, to pierwsze wrażenie!"
+
+    def _engine(self, lag, info):
+        engine = make_engine(FakeTranslator(self.LONG), 9.0)
+        engine._lag = lag
+        engine.brain = Mock(verdict=Mock(return_value={"dialog": 0.9, "info": info}))
+        return engine
+
+    def test_late_lektor_drops_a_trailing_remark_the_model_finds_empty(self):
+        text, _s, _a, _b = self._engine(2.4, 0.05)._plan_line("I always said ... Now, that's a first impression!", True)
         self.assertTrue(text.endswith("wyścigu TMC."))
 
+    def test_trailing_sentence_with_information_is_kept(self):
+        # log 11:41: „Mamy tam mnóstwo wypożyczalni!” (4 słowa) wypadło tylko dlatego, że było krótkie
+        engine = make_engine(FakeTranslator("Jeśli chcesz wziąć udział w akcji. Mamy tam mnóstwo wypożyczalni!"), 9.0)
+        engine._lag = 3.0
+        engine.brain = Mock(verdict=Mock(return_value={"dialog": 0.9, "info": 0.9}))
+        text, _s, _a, _b = engine._plan_line("If you wanna get in on the action. We got plenty of rentals!", True)
+        self.assertTrue(text.endswith("wypożyczalni!"))
+
+    def test_without_the_model_only_a_two_word_remark_is_dropped(self):
+        engine = make_engine(FakeTranslator("Wsiadaj do auta i jedź za mną do magazynu. Uważaj na gliniarzy!"), 9.0)
+        engine._lag = 3.0
+        text, _s, _a, _b = engine._plan_line("Get in the car and follow me to the warehouse. Watch out for cops!", True)
+        self.assertTrue(text.endswith("gliniarzy!"))
+        engine = make_engine(FakeTranslator("Wsiadaj do auta i jedź za mną do magazynu. Dobra, jadę."), 9.0)
+        engine._lag = 3.0
+        text, _s, _a, _b = engine._plan_line("Get in the car and follow me to the warehouse. Okay, going.", True)
+        self.assertEqual(text, "Wsiadaj do auta i jedź za mną do magazynu.")
+
     def test_on_time_lektor_reads_the_remark(self):
-        engine = make_engine(FakeTranslator("Zawsze mówiłem, że wylądują w środku wyścigu TMC. Teraz, to pierwsze wrażenie!"), 9.0)
-        engine._lag = 0.3
-        text, _s, _a, _b = engine._plan_line("I always said they land in a TMC race. Now, that's a first impression!", True)
+        engine = self._engine(0.3, 0.05)
+        text, _s, _a, _b = engine._plan_line("I always said ... Now, that's a first impression!", True)
         self.assertTrue(text.endswith("pierwsze wrażenie!"))
 
-    def test_a_question_or_long_sentence_is_never_a_remark(self):
+    def test_a_question_is_never_a_remark(self):
         engine = make_engine(FakeTranslator("Idziemy do magazynu. Czy ktoś ma klucz?"), 9.0)
         engine._lag = 4.0
         text, _s, _a, _b = engine._plan_line("We go to the warehouse. Does anyone have a key?", True)
         self.assertTrue(text.endswith("klucz?"))
+
+
+class UntranslatedTest(unittest.TestCase):
+    """Argos kopiuje angielską „sieczkę” z OCR prawie bez zmian — to nie może wejść do lektora (log 11:41)."""
+
+    def test_echoed_english_garbage_is_dropped(self):
+        src = "Shorila ae able to at flegst beat Ey. Shoulde able to at least beat T."
+        engine = make_engine(FakeTranslator(src), 6.0)
+        text, segments, _a, _b = engine._plan_line(src, True)
+        self.assertEqual((text, segments), ("", []))
+
+    def test_dialogue_with_repeated_words_is_kept(self):
+        # log 11:41: „And there's Billy. Here, c'mon, c'mon.” — powtórzone „Cimon” to nie echo
+        engine = make_engine(FakeTranslator("I jest Billy. Tutaj, Chon, Cimon, Cimon."), 6.0)
+        text, _s, _a, _b = engine._plan_line("And there's Billy. Here, chon, Cimon, Cimon.", True)
+        self.assertTrue(text.startswith("I jest Billy"))
+
+    def test_real_translation_with_shared_names_is_kept(self):
+        engine = make_engine(FakeTranslator("Jason i Lucia. Cześć."), 6.0)
+        text, _s, _a, _b = engine._plan_line("Jason and Lucia. Hey.", True)
+        self.assertEqual(text, "Jason i Lucia. Cześć.")
+        engine = make_engine(FakeTranslator("Ricky, Sam i oni są tam. Wchodzisz?"), 6.0)
+        text, _s, _a, _b = engine._plan_line("Ricky, Sam and them are down this way. You comin in?", True)
+        self.assertTrue(text.startswith("Ricky, Sam"))
 
 
 class EnglishPronounTest(unittest.TestCase):
