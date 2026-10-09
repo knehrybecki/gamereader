@@ -1309,18 +1309,19 @@ _SOFT_WORDS = (
 # 8 kroków dyfuzji: mniej robotycznie niż 5 (sesja 27.09: 12 najlepsze, 8 = kompromis z czasem syntezy ~+55%)
 SUPERTONIC_STEPS = 8
 # tempo lektora (parametr speed Supertonic przy zwykłej kwestii; było 1,05, potem 1,10)
-# 09.10: „dalej za wolno wobec NPC” — 1,18 (model bełkocze dopiero powyżej ~1,35)
-LEKTOR_SPEED = 1.18
+# 09.10: „dalej za wolno wobec NPC” — 1,18, potem 1,42. Pomiar (20 kwestii GTA, Supertonic + Parakeet, profil
+# tts 0,92): tempo ×1,28 → ×1,55 skraca nagrania o 12 %, błędnych słów 3,8 % → 3,8 % (bez różnicy)
+LEKTOR_SPEED = 1.42
 # najszybsze tempo samego modelu — powyżej Supertonic bełkocze (1,5 → 15 % słów źle rozpoznanych)
 LEKTOR_MAX_SPEED = 1.35
 # spóźniony lektor przyspiesza tylko tempem samego głosu. Bełkot z sesji 13:48 robiło rozciąganie
 # ffmpeg (atempo ×1,12–1,40), nie tempo modelu — atempo wyłączone. Sesja 16:30: przy suficie ×1,15
 # lektor stał na stałym tempie i nie nadążał za napisami (1–1,7 s za nimi) — sufit znów ×1,25.
-LEKTOR_MAX_RATE = 1.30
+LEKTOR_MAX_RATE = 1.60
 # krótkie fragmenty model czyta wolniej (limity w lektor_short_speed_cap), resztę tempa dociąga ffmpeg atempo.
 # Test 09.10 (20 krótkich kwestii GTA, Supertonic + Parakeet): atempo do ×1,10 skraca nagrania o 8 % bez
 # nowych błędów rozpoznania (5,5 % słów jak bez atempo); poluzowanie limitów MODELU podwajało błędy (11 %).
-LEKTOR_MAX_STRETCH = 1.10
+LEKTOR_MAX_STRETCH = 1.20
 # gdy w kolejce czeka już następny napis: kolejne fragmenty syntezują się szybciej, bez pauz
 LEKTOR_CATCHUP_RATE = 1.08
 # tempo dopasowane do napisów: lektor ma się zmieścić w czasie, w którym napis wisi na ekranie

@@ -141,7 +141,7 @@ class LektorShorteningTest(unittest.TestCase):
     def test_lag_never_pushes_the_tempo_past_the_ceiling(self):
         lektor = self._real_lektor()
         boost = lektor.line_boost("Krótka kwestia.", 6.0, 30.0)
-        self.assertLessEqual(boost * LEKTOR_SPEED, LEKTOR_MAX_RATE + 0.03)
+        self.assertLessEqual(boost * LEKTOR_SPEED, LEKTOR_MAX_RATE + 0.05)  # boost zaokrąglany co 0,05
 
 
 class DimLinesTest(unittest.TestCase):

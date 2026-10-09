@@ -335,14 +335,17 @@ class SubtitleFiltersTest(unittest.TestCase):
         self.assertLessEqual(speed, LEKTOR_MAX_RATE)
         self.assertLessEqual(stretch, LEKTOR_MAX_STRETCH)
         self.assertLessEqual(speed * stretch, LEKTOR_MAX_RATE + 1e-6)
-        # sesja 15:16: bełkot robiło atempo ×1,12 razem z szybkim modelem. Od 09.10 atempo ≤ ×1,10 tylko tam, gdzie
+        # sesja 15:16: bełkot robiło atempo ×1,12 razem z szybkim modelem. Od 09.10 atempo ≤ ×1,20 tylko tam, gdzie
         # model jest sam ograniczony (krótki fragment, ≤1,02) — pomiar Parakeet: bez nowych błędów, nagrania −8 %
-        self.assertLessEqual(stretch, 1.10 + 1e-6)
+        self.assertLessEqual(stretch, LEKTOR_MAX_STRETCH + 1e-6)
+        # 09.10 (drugi pomiar): ×1,55 nominalnie bez wzrostu błędów rozpoznania — krótki fragment wciąż ≤ ×1,25 łącznie
         self.assertLessEqual(speed * stretch, 1.25 + 1e-6)
-        # długi fragment: tempo tylko w modelu, bez rozciągania ffmpeg
+        # długi fragment: model nie szybciej niż LEKTOR_MAX_SPEED (×1,35), resztę dociąga atempo ≤ ×1,20
+        from gamereader_engine import LEKTOR_MAX_SPEED
         long_speed, long_stretch = lektor_speed_split(0.53, "Zabierz Franklina blisko jachtu i wracaj do miasta.")
-        self.assertEqual(long_stretch, 1.0)
-        self.assertLessEqual(long_speed, LEKTOR_MAX_RATE)
+        self.assertLessEqual(long_speed, LEKTOR_MAX_SPEED)
+        self.assertLessEqual(long_stretch, LEKTOR_MAX_STRETCH + 1e-6)
+        self.assertLessEqual(long_speed * long_stretch, LEKTOR_MAX_RATE + 1e-6)
 
     def test_stt_queue_drops_stale_audio_but_keeps_stop(self):
         from gamereader_engine import LiveTranscriber
