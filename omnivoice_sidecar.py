@@ -20,6 +20,11 @@ import wave
 
 RATE = 24000
 PROTOCOL_OUT = sys.stdout
+# PyTorch na MPS kompiluje i trzyma bez limitu osobny graf GPU dla każdego kształtu wejścia: każda nowa długość kwestii
+# to ~55 MB RAM na zawsze (pomiar 19.10: 30 kwestii → +2 GB). Długości dopełniamy do wielokrotności — kształtów jest
+# kilkanaście na całą sesję, a powtórzony kształt nie płaci też za kompilację.
+SHAPE_STEP = 32
+DECODE_TAIL = 12  # ostatnie ramki dźwięku liczone bez dopełnienia (zasięg splotów dekodera to ~8 ramek)
 
 
 def reply(payload):
@@ -58,11 +63,9 @@ class Embedder:
             paths = sorted(glob.glob(f"{HF_HUB_CACHE}/models--pyannote--wespeaker-voxceleb-resnet34-LM/snapshots/*/pytorch_model.bin"))
             if not paths:
                 raise RuntimeError("brak wespeaker w cache")
+            # zostaje na CPU: na MPS każda nowa długość nagrania kompiluje graf (+14 MB na wypowiedź, na zawsze),
+            # a CPU liczy ten sam wektor 2× szybciej (pomiar 19.10: ~85 ms vs ~200 ms)
             self.inf = Inference(Model.from_pretrained(paths[0]), window="whole")
-            try:
-                self.inf.to(torch.device("mps" if torch.backends.mps.is_available() else "cpu"))
-            except Exception:
-                pass
         finally:
             hub.hf_hub_download, torch.load = original_download, original_load
 
@@ -90,6 +93,141 @@ class Embedder:
         return (vector / norm).tolist()
 
 
+def decode_on_gpu(model, device):
+    """Dekoder audio (DAC z tokenizera Higgs) na GPU. VoiceStudio trzyma cały tokenizer na CPU, bo jego enkoder nie
+    działa na MPS — a dekodowanie długiej kwestii na CPU alokuje ~1 GB buforów, które malloc macOS zostawia w procesie
+    (pomiar 19.10: 3,5 → 8 GB po 20 kwestiach). Na MPS ten sam dźwięk (różnica ~1e-5) powstaje 4× szybciej i bez
+    przyrostu RAM. Enkoder (wzorce głosów postaci) zostaje na CPU, dlatego kwantyzator na GPU jest kopią."""
+    import copy
+
+    import torch
+    from transformers.models.higgs_audio_v2_tokenizer.modeling_higgs_audio_v2_tokenizer import (
+        HiggsAudioV2TokenizerDecoderOutput,
+    )
+
+    tok = model.audio_tokenizer
+    if device != "mps" or tok.device.type != "cpu":
+        return
+    quantizer = copy.deepcopy(tok.quantizer).to(device)
+    tok.fc2.to(device)
+    tok.acoustic_decoder.to(device)
+
+    def run(codes):
+        with torch.inference_mode():
+            quantized = quantizer.decode(codes.transpose(0, 1))
+            return tok.acoustic_decoder(tok.fc2(quantized.transpose(1, 2)).transpose(1, 2))
+
+    def padded(codes, pad, left=False):
+        fill = (codes[..., :1] if left else codes[..., -1:]).expand(*codes.shape[:-1], pad)
+        return torch.cat([fill, codes] if left else [codes, fill], dim=-1)
+
+    def decode(audio_codes, return_dict=None):
+        codes = audio_codes.to(device)
+        frames, hop = codes.shape[-1], tok.config.hop_length
+        if frames < 2 * DECODE_TAIL or frames % SHAPE_STEP == 0:  # krótkich kształtów jest najwyżej kilkanaście
+            audio = run(codes)
+        else:
+            # dopełnienie zmienia dźwięk ~8 ramek przy brzegu: środek z dopełnionej całości, a koniec z okna
+            # SHAPE_STEP ostatnich prawdziwych ramek (zawsze ten sam kształt)
+            head = run(padded(codes, -frames % SHAPE_STEP))[..., :(frames - DECODE_TAIL) * hop]
+            window = codes[..., -SHAPE_STEP:] if frames >= SHAPE_STEP else padded(codes, SHAPE_STEP - frames, left=True)
+            audio = torch.cat([head, run(window)[..., -DECODE_TAIL * hop:]], dim=-1)
+        return HiggsAudioV2TokenizerDecoderOutput(audio.cpu())
+
+    tok.decode = decode
+
+
+def bucket_shapes(model):
+    """OmniVoice._generate_iterative, w którym GPU liczy wyłącznie model — na długości dopełnionej do SHAPE_STEP.
+
+    Każdy nowy kształt dowolnej operacji na MPS to kompilacja grafu, który zostaje w pamięci na zawsze (pomiar 19.10:
+    ~15 grafów i ~13 MB na kwestię nawet po dopełnieniu samego modelu — budowa wejścia, maski, wybór tokenów). Wejście
+    składamy więc na CPU, dopełnienie jest zamaskowane jak w batchu OmniVoice (widzi tylko siebie, pozycje prawdziwych
+    tokenów bez zmian), a wybór tokenów liczy się na CPU (kilka ms na krok; CPU niczego nie kompiluje)."""
+    import math
+
+    import torch
+    from omnivoice.models.omnivoice import _combine_text, _get_time_steps, _gumbel_sample, _tokenize_with_nonverbal_tags
+
+    codebooks, mask_id = model.config.num_audio_codebook, model.config.audio_mask_id
+
+    def prepare(text, num_target, ref_text, ref_tokens, lang, instruct, denoise):
+        """OmniVoice._prepare_inference_inputs na CPU: (tokeny [C, N], początek audio w sekwencji)."""
+        style = "<|denoise|>" if denoise and ref_tokens is not None else ""
+        style += f"<|lang_start|>{lang or 'None'}<|lang_end|><|instruct_start|>{instruct or 'None'}<|instruct_end|>"
+        wrapped = f"<|text_start|>{_combine_text(ref_text=ref_text, text=text)}<|text_end|>"
+        parts = [model.text_tokenizer(style, return_tensors="pt").input_ids.repeat(codebooks, 1),
+                 _tokenize_with_nonverbal_tags(wrapped, model.text_tokenizer).repeat(codebooks, 1)]
+        if ref_tokens is not None:
+            parts.append(ref_tokens.cpu())
+        parts.append(torch.full((codebooks, num_target), mask_id, dtype=torch.long))
+        ids = torch.cat(parts, dim=1)
+        return ids, ids.shape[1] - num_target - (ref_tokens.size(-1) if ref_tokens is not None else 0)
+
+    def generate_iterative(task, gen_config):
+        batch, target_lens = task.batch_size, task.target_lens
+        prepared = [prepare(task.texts[i], target_lens[i], task.ref_texts[i], task.ref_audio_tokens[i], task.langs[i],
+                            task.instructs[i], gen_config.denoise) for i in range(batch)]
+        c_lens = [ids.shape[1] for ids, _start in prepared]
+        length = math.ceil(max(c_lens) / SHAPE_STEP) * SHAPE_STEP
+        input_ids = torch.full((2 * batch, codebooks, length), mask_id, dtype=torch.long)
+        audio_mask = torch.zeros((2 * batch, length), dtype=torch.bool)
+        attention = torch.zeros((2 * batch, 1, length, length), dtype=torch.bool)
+        for i, (ids, audio_start) in enumerate(prepared):
+            c_len, u_len = c_lens[i], target_lens[i]
+            input_ids[i, :, :c_len] = ids  # z warunkiem (tekst, wzorzec głosu)
+            audio_mask[i, audio_start:c_len] = True
+            attention[i, :, :c_len, :c_len] = True
+            input_ids[batch + i, :, :u_len] = ids[:, -u_len:]  # bez warunku: same tokeny kwestii
+            audio_mask[batch + i, :u_len] = True
+            attention[batch + i, :, :u_len, :u_len] = True
+        diagonal = torch.arange(length)
+        attention[:, 0, diagonal, diagonal] |= ~attention[:, 0].any(dim=-1)
+        device = model.device
+        audio_mask_gpu, attention_gpu = audio_mask.to(device), attention.to(device)
+
+        tokens = torch.full((batch, codebooks, max(target_lens)), mask_id, dtype=torch.long)
+        timesteps = _get_time_steps(t_start=0.0, t_end=1.0, num_step=gen_config.num_step + 1,
+                                    t_shift=gen_config.t_shift).tolist()
+        schedules = []
+        for t_len in target_lens:
+            total = rem = t_len * codebooks
+            schedule = []
+            for step in range(gen_config.num_step):
+                num = rem if step == gen_config.num_step - 1 else min(
+                    math.ceil(total * (timesteps[step + 1] - timesteps[step])), rem)
+                schedule.append(int(num))
+                rem -= int(num)
+            schedules.append(schedule)
+        layer_ids = torch.arange(codebooks).view(1, -1, 1)
+
+        for step in range(gen_config.num_step):
+            logits = model(input_ids=input_ids.to(device), audio_mask=audio_mask_gpu,
+                           attention_mask=attention_gpu).logits.cpu()
+            for i in range(batch):
+                k = schedules[i][step]
+                if k <= 0:
+                    continue
+                c_len, t_len = c_lens[i], target_lens[i]
+                pred_tokens, scores = model._predict_tokens_with_scoring(
+                    logits[i:i + 1, :, c_len - t_len:c_len].float(), logits[batch + i:batch + i + 1, :, :t_len].float(),
+                    gen_config)
+                scores = scores - layer_ids * gen_config.layer_penalty_factor
+                if gen_config.position_temperature > 0.0:
+                    scores = _gumbel_sample(scores, gen_config.position_temperature)
+                sample = tokens[i:i + 1, :, :t_len]
+                scores.masked_fill_(sample != mask_id, -float("inf"))
+                _values, top = torch.topk(scores.flatten(), k)
+                flat = sample.flatten()
+                flat[top] = pred_tokens.flatten()[top]
+                sample.copy_(flat.view_as(sample))
+                input_ids[i:i + 1, :, c_len - t_len:c_len] = sample
+                input_ids[batch + i:batch + i + 1, :, :t_len] = sample
+        return [tokens[i, :, :target_lens[i]] for i in range(batch)]
+
+    model._generate_iterative = generate_iterative
+
+
 def main():
     sys.stdout = sys.stderr  # biblioteki mogą pisać postęp; stdout protokołu zawiera wyłącznie JSON
     root, pack, steps = sys.argv[1], sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 12
@@ -103,6 +241,12 @@ def main():
         model = OmniVoice.from_pretrained(
             "k2-fsa/OmniVoice", device_map=device, dtype=torch.float16 if device == "mps" else torch.float32
         )
+        if device == "mps":
+            try:  # inna wersja VoiceStudio bez tych wnętrzności: czytamy dalej, tylko bez oszczędzania pamięci
+                decode_on_gpu(model, device)
+                bucket_shapes(model)
+            except Exception as exc:
+                print(f"OmniVoice bez kubełków kształtów: {exc}", file=sys.stderr)
         with open(f"{pack}/voice.txt", encoding="utf-8") as handle:
             ref_text = handle.read().strip()
         prompt = model.create_voice_clone_prompt(f"{pack}/voice.wav", ref_text)
@@ -152,6 +296,8 @@ def main():
                 handle.setframerate(RATE)
                 handle.writeframes((audio * 32767.0).astype("<i2").tobytes())
             reply({"id": job.get("id"), "ok": True, "voice": requested_voice or "default"})
+            if device == "mps":  # już po odpowiedzi: bufory ze szczytu kwestii wracają do systemu
+                torch.mps.empty_cache()
         except Exception as exc:
             reply({"id": job.get("id"), "ok": False, "error": str(exc)[:200]})
 
