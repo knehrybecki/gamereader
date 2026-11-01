@@ -1,6 +1,7 @@
 import AudioToolbox
 import CoreAudio
 import Foundation
+import os
 
 // Ściszanie gry na czas lektora (macOS 14.2+).
 // Core Audio Process Tap przejmuje dźwięk procesów gry z wyciszeniem oryginału (mutedWhenTapped),
@@ -75,32 +76,80 @@ func duckProcessObjects(target: String) -> [AudioObjectID] {
     }
 }
 
+/// Półkowy filtr RBJ (biquad) — podbicie basu albo góry o kilka dB.
+private struct Shelf {
+    var b0 = 1.0, b1 = 0.0, b2 = 0.0, a1 = 0.0, a2 = 0.0
+
+    init() {}
+
+    init(high: Bool, freq: Double, gainDB: Double, rate: Double) {
+        let a = pow(10, gainDB / 40)
+        let w = 2 * Double.pi * freq / rate
+        let cw = cos(w), alpha = sin(w) / 2 * sqrt(2)  // nachylenie S = 1
+        let sa = 2 * sqrt(a) * alpha
+        let sign = high ? -1.0 : 1.0
+        let a0 = (a + 1) + sign * (a - 1) * cw + sa
+        b0 = a * ((a + 1) - sign * (a - 1) * cw + sa) / a0
+        b1 = sign * 2 * a * ((a - 1) - sign * (a + 1) * cw) / a0
+        b2 = a * ((a + 1) - sign * (a - 1) * cw - sa) / a0
+        a1 = -sign * 2 * ((a - 1) + sign * (a + 1) * cw) / a0
+        a2 = ((a + 1) + sign * (a - 1) * cw - sa) / a0
+    }
+}
+
 final class Ducker {
     private let target: String
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
     private var procID: AudioDeviceIOProcID?
 
-    // głośność gry: cel ustawiany z stdin, bieżąca wygładzana w wątku audio
-    private let gainLock = NSLock()
+    // głośność gry: cel ustawiany z stdin, bieżąca wygładzana w wątku audio.
+    // Wątek audio nigdy nie czeka na blokadę (trylock) — inaczej gra trzeszczy.
+    private var gainLock = os_unfair_lock()
     private var targetGain: Float = 1.0
+    private var lastGoal: Float = 1.0
     private var currentGain: Float = 1.0
     private var smoothing: Float = 0.0005
 
-    // 48 kHz (zwykle) → 16 kHz mono na stdout
+    // odświeżenie dźwięku Remote Play (skompresowany strumień brzmi płasko): +bas, +góra, miękki limiter
+    private var enhance = true
+    private var bass = Shelf()
+    private var treble = Shelf()
+    private static let maxChannels = 8
+    private let filterState = UnsafeMutablePointer<Double>.allocate(capacity: 8 * Ducker.maxChannels)
+
+    // 48 kHz (zwykle) → 16 kHz mono do STT: wątek audio tylko dopisuje do pierścienia,
+    // na stdout pisze osobny wątek (zapis w wątku audio = przerwy w dźwięku gry)
     private var hop = 3
     private var carry: Float = 0
     private var carryCount = 0
+    private static let ringSize = 1 << 16
+    private let ring = UnsafeMutablePointer<Float>.allocate(capacity: Ducker.ringSize)
+    private var ringLock = os_unfair_lock()
+    private var ringWrite = 0
+    private var ringRead = 0
+    private let ringReady = DispatchSemaphore(value: 0)
     private var reportedAudio = false
+
+    // kanały wejścia bez alokacji w wątku audio
+    private let inPtr = UnsafeMutablePointer<UnsafeMutablePointer<Float>>.allocate(capacity: Ducker.maxChannels)
+    private let inChan = UnsafeMutablePointer<Int>.allocate(capacity: Ducker.maxChannels)
+    private let inStride = UnsafeMutablePointer<Int>.allocate(capacity: Ducker.maxChannels)
 
     init(target: String) {
         self.target = target
+        filterState.initialize(repeating: 0, count: 8 * Ducker.maxChannels)
+        if ProcessInfo.processInfo.environment["LIVEDUB_GAME_EQ"] == "0" { enhance = false }
     }
 
     func setGain(_ value: Float) {
-        gainLock.lock()
+        os_unfair_lock_lock(&gainLock)
         targetGain = max(0, min(1, value))
-        gainLock.unlock()
+        os_unfair_lock_unlock(&gainLock)
+    }
+
+    func setEnhance(_ on: Bool) {
+        enhance = on
     }
 
     func start() throws {
@@ -142,6 +191,15 @@ final class Ducker {
         hop = max(1, Int((rate / 16000).rounded()))
         // stała czasowa ~90 ms — płynne ściszenie bez trzasków
         smoothing = Float(1 - exp(-1 / (0.09 * rate)))
+        bass = Shelf(high: false, freq: 110, gainDB: 3.5, rate: rate)
+        treble = Shelf(high: true, freq: 6500, gainDB: 3.0, rate: rate)
+
+        // większy bufor wątku audio = odporność na chwilowe obciążenie (modele lektora); ~10 ms przy 48 kHz
+        var frames = UInt32(512)
+        var framesAddr = address(kAudioDevicePropertyBufferFrameSize)
+        AudioObjectSetPropertyData(aggregateID, &framesAddr, 0, nil, UInt32(MemoryLayout<UInt32>.size), &frames)
+
+        Thread.detachNewThread { [weak self] in self?.pumpToStdout() }
 
         status = AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateID, nil) { [weak self] _, input, _, output, _ in
             self?.render(input: input, output: output)
@@ -164,54 +222,93 @@ final class Ducker {
         tapID = AudioObjectID(kAudioObjectUnknown)
     }
 
-    private func render(input: UnsafePointer<AudioBufferList>, output: UnsafeMutablePointer<AudioBufferList>) {
-        let inList = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
-        let outList = UnsafeMutableAudioBufferListPointer(output)
-
-        // kanały wejścia (tap) jako płaska lista (bufor, kanał w buforze, liczba kanałów w buforze)
-        var inChannels: [(UnsafeMutablePointer<Float>, Int, Int)] = []
-        var inFrames = Int.max
-        for buffer in inList {
-            guard let data = buffer.mData, buffer.mNumberChannels > 0 else { continue }
-            let channels = Int(buffer.mNumberChannels)
-            let samples = data.assumingMemoryBound(to: Float.self)
-            inFrames = min(inFrames, Int(buffer.mDataByteSize) / (4 * channels))
-            for c in 0..<channels { inChannels.append((samples, c, channels)) }
-        }
-        if inChannels.isEmpty { inFrames = 0 }
-
-        gainLock.lock()
-        let goal = targetGain
-        gainLock.unlock()
-        var gain = currentGain
-        let step = smoothing
-
-        // mono do STT (przed ściszeniem — rozpoznawanie ma słyszeć pełną głośność)
-        if inFrames > 0 {
-            var mono: [Float] = []
-            mono.reserveCapacity(inFrames / hop + 2)
-            let n = Float(inChannels.count)
-            for f in 0..<inFrames {
-                var sum: Float = 0
-                for (samples, c, stride) in inChannels { sum += samples[f * stride + c] }
-                carry += sum / n
-                carryCount += 1
-                if carryCount >= hop {
-                    mono.append(carry / Float(carryCount))
-                    carry = 0
-                    carryCount = 0
-                }
+    /// Wątek zapisu: pierścień → stdout (do STT). Pełny potok = gubimy próbki, gra gra dalej.
+    private func pumpToStdout() {
+        let chunk = UnsafeMutablePointer<Float>.allocate(capacity: Ducker.ringSize)
+        while true {
+            _ = ringReady.wait(timeout: .now() + 0.05)
+            os_unfair_lock_lock(&ringLock)
+            var count = 0
+            while ringRead != ringWrite {
+                chunk[count] = ring[ringRead]
+                ringRead = (ringRead + 1) & (Ducker.ringSize - 1)
+                count += 1
             }
-            if !mono.isEmpty {
-                mono.withUnsafeBytes { raw in _ = Darwin.write(STDOUT_FILENO, raw.baseAddress, raw.count) }
+            os_unfair_lock_unlock(&ringLock)
+            if count > 0 {
+                _ = Darwin.write(STDOUT_FILENO, chunk, count * MemoryLayout<Float>.size)
                 if !reportedAudio {
                     reportedAudio = true
                     FileHandle.standardError.write(Data("AUDIO_OK\n".utf8))
                 }
             }
         }
+    }
+
+    @inline(__always)
+    private func shelf(_ x: Double, _ f: Shelf, _ st: UnsafeMutablePointer<Double>) -> Double {
+        // postać bezpośrednia I: st[0..1] = poprzednie wejścia, st[2..3] = poprzednie wyjścia
+        let y = f.b0 * x + f.b1 * st[0] + f.b2 * st[1] - f.a1 * st[2] - f.a2 * st[3]
+        st[1] = st[0]; st[0] = x
+        st[3] = st[2]; st[2] = y
+        return y
+    }
+
+    private func render(input: UnsafePointer<AudioBufferList>, output: UnsafeMutablePointer<AudioBufferList>) {
+        let inList = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
+        let outList = UnsafeMutableAudioBufferListPointer(output)
+
+        // kanały wejścia (tap) jako płaska lista (bufor, kanał w buforze, liczba kanałów w buforze)
+        var inCount = 0
+        var inFrames = Int.max
+        for buffer in inList {
+            guard let data = buffer.mData, buffer.mNumberChannels > 0 else { continue }
+            let channels = Int(buffer.mNumberChannels)
+            let samples = data.assumingMemoryBound(to: Float.self)
+            inFrames = min(inFrames, Int(buffer.mDataByteSize) / (4 * channels))
+            for c in 0..<channels where inCount < Ducker.maxChannels {
+                inPtr[inCount] = samples
+                inChan[inCount] = c
+                inStride[inCount] = channels
+                inCount += 1
+            }
+        }
+        if inCount == 0 { inFrames = 0 }
+
+        if os_unfair_lock_trylock(&gainLock) {
+            lastGoal = targetGain
+            os_unfair_lock_unlock(&gainLock)
+        }
+        let goal = lastGoal
+        let step = smoothing
+
+        // mono do STT (przed ściszeniem i korekcją — rozpoznawanie ma słyszeć oryginał)
+        if inFrames > 0, os_unfair_lock_trylock(&ringLock) {
+            let n = Float(inCount)
+            var wrote = false
+            for f in 0..<inFrames {
+                var sum: Float = 0
+                for i in 0..<inCount { sum += inPtr[i][f * inStride[i] + inChan[i]] }
+                carry += sum / n
+                carryCount += 1
+                if carryCount >= hop {
+                    let next = (ringWrite + 1) & (Ducker.ringSize - 1)
+                    if next != ringRead {  // pełny pierścień = odrzuć próbkę, nie czekaj
+                        ring[ringWrite] = carry / Float(carryCount)
+                        ringWrite = next
+                        wrote = true
+                    }
+                    carry = 0
+                    carryCount = 0
+                }
+            }
+            os_unfair_lock_unlock(&ringLock)
+            if wrote { ringReady.signal() }
+        }
 
         // odtwarzanie gry na wyjście z naszą głośnością
+        let eq = enhance
+        var gain = currentGain
         var outIndex = 0
         for buffer in outList {
             guard let data = buffer.mData, buffer.mNumberChannels > 0 else { continue }
@@ -223,9 +320,23 @@ final class Ducker {
                 gain += (goal - gain) * step
                 for c in 0..<channels {
                     var value: Float = 0
-                    if f < inFrames, !inChannels.isEmpty {
-                        let (src, sc, stride) = inChannels[(outIndex + c) % inChannels.count]
-                        value = src[f * stride + sc] * gain
+                    if f < inFrames, inCount > 0 {
+                        let i = (outIndex + c) % inCount
+                        value = inPtr[i][f * inStride[i] + inChan[i]]
+                        let slot = min(outIndex + c, Ducker.maxChannels - 1)
+                        if eq {
+                            let st = filterState + slot * 8
+                            var x = shelf(Double(value), bass, st)
+                            x = shelf(x, treble, st + 4)
+                            // podbicie ~3 dB zostawia mniej zapasu — miękki limiter zamiast przesteru
+                            value = Float(x * 0.89)
+                            if abs(value) > 0.8 {
+                                let sign: Float = value < 0 ? -1 : 1
+                                let over = abs(value) - 0.8
+                                value = sign * (0.8 + 0.2 * over / (over + 0.2))
+                            }
+                        }
+                        value *= gain
                     }
                     samples[f * channels + c] = value
                 }
@@ -274,6 +385,8 @@ func runDucker(target: String) {
             let parts = line.split(separator: " ")
             if parts.first == "GAIN", parts.count >= 2, let value = Float(parts[1]) {
                 ducker.setGain(value)
+            } else if parts.first == "EQ", parts.count >= 2 {
+                ducker.setEnhance(parts[1] != "0")
             }
         }
         ducker.stop()
