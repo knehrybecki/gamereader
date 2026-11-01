@@ -15,3 +15,4 @@ dist/
 macos/GameReader
 macos/AudioTap
 .DS_Store
+tmp-preview/

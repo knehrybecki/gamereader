@@ -4361,8 +4361,10 @@ _UI_DIALOGUE_WORDS = None
 # wielowyrazowe podpowiedzi — w każdej wielkości liter; pojedyncze czasowniki tylko WIELKIMI
 # („Wróć do domu, Franklin.” to dialog, „WRÓĆ” to przycisk)
 _HUD_PROMPTS = re.compile(
-    r"(?<!\w)(?:(?i:pierwsza osoba|trzecia osoba|ruszaj kamerą|obróć kamerę|zmień widok|ukryj menu|pokaż menu)"
-    r"|ZOOM|PRZEGLĄDAJ|WRÓĆ|WYBIERZ|KUP|ZAMONTUJ|OBRÓĆ)(?!\w)"
+    r"(?<!\w)(?:(?i:pierwsza osoba|trzecia osoba|ruszaj kamerą|obróć kamerę|zmień widok|ukryj menu|pokaż menu"
+    r"|powr[oóö]t do menu g[łl]\w*)"
+    # menu pauzy przerywnika pod napisem: „WZNÓW  POWRÓT  POMIŃ” (OCR: POWRÖT, GL)
+    r"|ZOOM|PRZEGLĄDAJ|WRÓĆ|WYBIERZ|KUP|ZAMONTUJ|OBRÓĆ|WZN[OÓ]W|POMI[NŃ]|POWR[OÓÖ]T)(?!\w)"
 )
 _SHORT_PL = {
     "a", "i", "o", "u", "w", "z", "ze", "we", "na", "do", "to", "ta", "te", "ty", "tu", "ja", "mi", "ci", "go",

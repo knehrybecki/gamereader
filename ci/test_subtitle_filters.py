@@ -404,5 +404,15 @@ class ColonSpeakerTest(unittest.TestCase):
             self.assertEqual(strip_colon_speaker(text), text)
 
 
+class PauseMenuTest(unittest.TestCase):
+    def test_pause_menu_under_subtitle_is_cut(self):
+        self.assertEqual(strip_hud_prompts('Dlatego pozwalam mu się trochę poprzekomarzać. WZNÓW _ POWRÖT POMIŃ'),
+                         'Dlatego pozwalam mu się trochę poprzekomarzać.')
+        self.assertEqual(strip_hud_prompts("')) POMIŃ WZNÓW POWRÓT DO MENU GL"), '')
+
+    def test_dialogue_with_same_words_stays(self):
+        for text in ('Pomiń to, Luca.', 'Powrót do domu był trudny.'):
+            self.assertEqual(strip_hud_prompts(text), text)
+
 if __name__ == "__main__":
     unittest.main()
