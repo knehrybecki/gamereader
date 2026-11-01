@@ -74,8 +74,15 @@ else:
     CACHE_DIR = Path.home() / "Library/Caches/GameReader"
 # Lektor: Supertonic 3 (kod MIT, model OpenRAIL-M) — czysta polska wymowa.
 # Synteza na CPU — na Macu szybsza od CoreML (zmierzone).
-SUPERTONIC_VOICES = ("M5", "M2", "M3", "M4", "M1")
+SUPERTONIC_VOICES = ("M5", "M2", "M3", "M4", "M1", "F1", "F2", "F3", "F4", "F5")
 DEFAULT_SUPERTONIC_VOICE = "M5"
+
+
+def _lively_voice(voice):
+    """Domieszka żywszego głosu tej samej płci — więcej melodii przy tej samej barwie lektora."""
+    if voice.startswith("F"):
+        return "F1" if voice != "F1" else "F2"
+    return "M1" if voice != "M1" else "M4"
 
 # Mastering: suchy, bliski mikrofon — ciepło, czytelność, kompresja, równa głośność.
 # Poziom jest wyrównany już przy syntezie (RMS ~ -20 dBFS); głośność/emocja idzie PRZED limiterem,
@@ -3458,6 +3465,18 @@ class MaleLektor:
         self._cloud_prev = ("", 0.0)
         self.on_cloud_error = None
 
+    def set_voice(self, voice):
+        """Inny głos Supertonic (M1–M5, F1–F5) bez przeładowania modelu."""
+        if voice not in SUPERTONIC_VOICES or voice == self.voice:
+            return
+        with self.load_lock:
+            self.voice = voice
+            if self.model is not None:
+                self.styles = {
+                    "calm": self.model.get_voice_style(voice_name=voice),
+                    "lively": self.model.get_voice_style(voice_name=_lively_voice(voice)),
+                }
+
     def set_backend(self, backend):
         """OmniVoiceLocal albo None (Supertonic). Poprzedni lokalny model zwalnia GPU."""
         old, self.cloud = self.cloud, backend
@@ -3503,8 +3522,7 @@ class MaleLektor:
             log_timing(f"lektor: CPU nie wstaje ({exc}) — próbuję GPU")
             model, calm = load(["CoreMLExecutionProvider", "CPUExecutionProvider"])
             self.device_label = "GPU"
-        # M1 = żywszy głos; domieszka daje więcej melodii przy tej samej barwie lektora
-        other = model.get_voice_style(voice_name="M1" if self.voice != "M1" else "M4")
+        other = model.get_voice_style(voice_name=_lively_voice(self.voice))
         # proces odtwarzacza od razu — pierwsza kwestia nie czeka na jego start
         with self.lock:
             try:
@@ -5226,6 +5244,7 @@ class Engine:
             "sourceKind": self._source_kind(),
             "sourceLabel": self._source_label() if self.source_info else None,
             "lektorEngine": getattr(self, "lektor_engine", "supertonic"),
+            "lektorVoice": self.lektor.voice,
             "omniPack": getattr(self, "omni_pack", ""),
             "cloneVoices": getattr(self, "clone_voices", True),
             "omniPacks": voicepacks() if voicestudio_python() else [],
@@ -5326,6 +5345,8 @@ class Engine:
             self._sync_voice()
             if self.lektor_engine == "supertonic":
                 self.emit({"event": "status", "text": "Lektor: Supertonic."})
+        if str(data.get("lektorVoice") or "").upper() in SUPERTONIC_VOICES:
+            self.lektor.set_voice(str(data["lektorVoice"]).upper())
         if "omniPack" in data and data["omniPack"] in voicepacks():
             self.omni_pack = data["omniPack"]
             self._sync_voice()

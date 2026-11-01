@@ -135,7 +135,9 @@ function applyState(msg) {
     const packs = document.getElementById("omniPack").options.length;
     document.getElementById("omniPackRow").classList.toggle("hidden", msg.lektorEngine !== "voicestudio" || packs < 2);
     document.getElementById("cloneVoicesRow").classList.toggle("hidden", msg.lektorEngine !== "voicestudio");
+    document.getElementById("stVoiceRow").classList.toggle("hidden", msg.lektorEngine !== "supertonic");
   }
+  if (msg.lektorVoice) document.getElementById("stVoice").value = msg.lektorVoice;
   if (typeof msg.running === "boolean") {
     state.running = msg.running;
     setLive(msg.running);
@@ -220,6 +222,7 @@ document.getElementById("autoStart").onchange = (e) => {
 };
 document.getElementById("game").onchange = (e) => send({ cmd: "config", game: e.target.value });
 document.getElementById("lektorEngine").onchange = (e) => send({ cmd: "config", lektorEngine: e.target.value });
+document.getElementById("stVoice").onchange = (e) => send({ cmd: "config", lektorVoice: e.target.value });
 document.getElementById("omniPack").onchange = (e) => send({ cmd: "config", omniPack: e.target.value });
 document.getElementById("cloneVoices").onchange = (e) => {
   send({ cmd: "config", cloneVoices: e.target.checked });
