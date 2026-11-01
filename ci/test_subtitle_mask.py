@@ -48,6 +48,19 @@ class SubtitleMaskTest(unittest.TestCase):
         draw.text((295, 104), 'Zabrali ją dokądś.', font=ImageFont.load_default(size=22), fill=(166, 165, 165))
         self.assertIsNotNone(AppleVisionOcr.subtitle_mask(np.asarray(image)[:, :, ::-1].copy()))
 
+    def test_yellow_letters_on_black_bar_survive(self):
+        # przerywnik filmowy: przygaszone żółte litery (~100 jasności) na czarnym pasku pod sceną
+        image = Image.new('RGB', (1160, 232), (24, 25, 22))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((0, 0, 1160, 78), fill=(200, 195, 180))
+        draw.text((230, 140), 'LUCA: Dlatego pozwalam mu się trochę.', font=ImageFont.load_default(size=30), fill=(120, 122, 72))
+        self.assertIsNotNone(AppleVisionOcr.subtitle_mask(np.asarray(image)[:, :, ::-1].copy()))
+
+    def test_any_color_mode_accepts_blue_letters(self):
+        frame = fixture(color=(100, 180, 255), background=(20, 20, 20), outline=False)
+        self.assertIsNone(AppleVisionOcr.subtitle_mask(frame))
+        self.assertIsNotNone(AppleVisionOcr.subtitle_mask(frame, any_color=True))
+
     def test_plain_snow_is_not_a_subtitle(self):
         self.assertIsNone(AppleVisionOcr.subtitle_mask(np.full((120, 600, 3), 222, dtype=np.uint8)))
 

@@ -1242,7 +1242,9 @@ GAME_PROFILES = {
     "generic": {
         **_GAME_BASE,
         "label": "Inna gra",
-        "hint": "Ustawienia jak w GTA VI. Jak nie łapie napisów — zaznacz pasek ręcznie.",
+        "hint": "Ustawienia jak w GTA VI, napisy w każdym kolorze. Jak nie łapie napisów — zaznacz pasek ręcznie.",
+        # nieznana gra: żółte, niebieskie, zielone napisy też czytamy (kosztem ryzyka HUD)
+        "any_color_subs": True,
     },
 }
 # gry usunięte z listy: zapisany wybór przechodzi na najbliższy profil
@@ -4544,6 +4546,8 @@ class AppleVisionOcr:
     def __init__(self):
         self.boost = 2.4
         self.skip_yellow_speaker = False
+        # „Inna gra”: napisy w dowolnym kolorze (domyślnie tylko białe i żółte na czarnym pasku)
+        self.any_color = False
         self.accurate_first = True
         self.languages = ["pl-PL"]
 
@@ -4786,9 +4790,28 @@ class AppleVisionOcr:
         return lo, hi
 
     @staticmethod
-    def subtitle_mask(frame):
+    def _colored_letters(rgb, lum, spread, r, any_color=False):
+        """Kolorowe litery (~100–200 jasności) wyraźnie jaśniejsze od ciemnego sąsiedztwa.
+        Domyślnie tylko żółte/złote i tylko na czarnym pasku filmowym — żółty HUD i tablice
+        na scenie dalej odpadają. `any_color` („Inna gra”): każdy kolor, pasek albo obwódka."""
+        if not any_color and float(np.median(lum)) > 45:
+            return None
+        red, green, blue = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+        if any_color:
+            hue = spread >= 15
+        else:
+            hue = (blue < 0.8 * np.minimum(red, green)) & (np.abs(red - green) < 0.25 * np.maximum(red, green))
+        lo, hi = AppleVisionOcr._local_min_max(lum, r)
+        text = hue & (lum > 80) & (spread >= 15) & (lum >= hi - 25) & (lo < 50) & (lo < lum - 50)
+        if int(text.sum()) < 150 or float(text.mean()) > 0.2:
+            return None
+        return text
+
+    @staticmethod
+    def subtitle_mask(frame, any_color=False):
         """Białe/szare litery przy czarnej obwódce lub tle → czarny tekst na białym tle.
-        Kolorowe litery i jasne tło bez ciemnego sąsiedztwa nie trafiają do OCR."""
+        Żółte litery tylko na czarnym pasku; inne kolory i jasne tło bez ciemnego sąsiedztwa
+        nie trafiają do OCR — chyba że `any_color` (profil „Inna gra”)."""
         rgb = frame[:, :, ::-1].astype(np.float32) if frame.shape[-1] == 3 else frame.astype(np.float32)
         lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
         spread = rgb.max(axis=2) - rgb.min(axis=2)
@@ -4818,7 +4841,14 @@ class AppleVisionOcr:
             share = float(text.mean())
             # krótka kwestia („Zabrali ją dokądś.”) to ~0,2 % szerokiego paska — liczy się ilość liter, nie udział
             if int(text.sum()) < 150 or share > 0.35:
-                return None
+                text = None
+        # żółte napisy (Hogwarts, filmowe przerywniki) dokładamy zawsze: biała ścieżka mogła złapać
+        # sam brzeg sceny nad paskiem, a odczyt bez liter pod spodem i tak odpada w _text_on_ink
+        colored = AppleVisionOcr._colored_letters(rgb, lum, spread, r, any_color)
+        if colored is not None:
+            text = colored if text is None else (text | colored)
+        if text is None:
+            return None
         mask = np.where(text, 0, 255).astype(np.uint8)
         image = Image.fromarray(mask).convert("RGB")
         width, height = image.size
@@ -4865,7 +4895,7 @@ class AppleVisionOcr:
     def read(self, frame):
         if frame is None or frame.size == 0:
             return ""
-        mask = self.subtitle_mask(frame)
+        mask = self.subtitle_mask(frame, self.any_color)
         if mask is None:
             return ""
         # Maska tylko wykrywa napis. Sam obraz z maski Vision czyta dobrze na Netflixie
@@ -5321,6 +5351,7 @@ class Engine:
             self.interval = float(profile["interval"])
         self.ocr.boost = float(profile["boost"])
         self.ocr.skip_yellow_speaker = bool(profile.get("skip_yellow_speaker"))
+        self.ocr.any_color = bool(profile.get("any_color_subs"))
         self.ocr.accurate_first = bool(profile.get("ocr_accurate_first"))
         langs = profile.get("ocr_langs") or ["pl-PL"]
         self.ocr.languages = list(langs)
