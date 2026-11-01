@@ -10,7 +10,7 @@ from gamereader_engine import (
     Engine, RecurringFragments, strip_lead_junk, screen_junk_level, same_utterance, ocr_reading_rank,
     trim_ocr_edges, condense_polish, lektor_speed_split, LEKTOR_MAX_RATE, LEKTOR_MAX_STRETCH,
     strip_known_prefix, ocr_reading_unsettled, repair_polish_ocr, RecurringLead, extends_utterance,
-    strip_hud_prompts,
+    strip_hud_prompts, strip_colon_speaker,
 )
 
 
@@ -391,6 +391,17 @@ class SubtitleFiltersTest(unittest.TestCase):
         self.assertIsInstance(made, Session)
         self.assertFalse(seen["opts"].enable_cpu_mem_arena)
         self.assertFalse(seen["opts"].enable_mem_pattern)
+
+
+class ColonSpeakerTest(unittest.TestCase):
+    def test_speaker_name_with_colon_is_not_read(self):
+        self.assertEqual(strip_colon_speaker('LUCA: Dlatego pozwalam mu się trochę poprzekomarzać.'),
+                         'Dlatego pozwalam mu się trochę poprzekomarzać.')
+        self.assertEqual(strip_colon_speaker('Luca Rossi: Chodź tu.'), 'Chodź tu.')
+
+    def test_ordinary_sentences_with_colon_stay(self):
+        for text in ('Słuchaj: to ważne.', 'Uwaga: nie ruszaj się', 'Godzina 12:30 wybiła.', 'Nie wiem: może jutro?'):
+            self.assertEqual(strip_colon_speaker(text), text)
 
 
 if __name__ == "__main__":

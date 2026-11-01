@@ -4472,6 +4472,25 @@ def region_is_yellow(rgb, box_px, margin=1):
     return r >= 145 and g >= 115 and b <= 140 and (r + g) >= (2.1 * b + 40) and (r - b) >= 35
 
 
+_COLON_SPEAKER = re.compile(
+    r"^\s*([A-ZĄĆĘŁŃÓŚŹŻ][\w'ąćęłńóśźżĄĆĘŁŃÓŚŹŻ.\-]*(?:\s+[A-ZĄĆĘŁŃÓŚŹŻ][\w'ąćęłńóśźżĄĆĘŁŃÓŚŹŻ.\-]*){0,2})\s*:\s+(\S.*)$"
+)
+
+
+def strip_colon_speaker(text):
+    """„LUCA: Dlatego…” → „Dlatego…”. Imię z dwukropkiem przed kwestią lektor pomija.
+    Zostaje, gdy pierwsze słowo to zwykły początek zdania („Słuchaj: …”)."""
+    m = _COLON_SPEAKER.match(text or "")
+    if not m or len(m.group(1)) > 24 or len(m.group(2)) < 2:
+        return text
+    # po imieniu kwestia zaczyna się wielką literą; „Uwaga: nie ruszaj się” to zwykłe zdanie
+    if m.group(2)[0].islower() and not m.group(1).isupper():
+        return text
+    if any(polish_fold(w) in DIALOGUE_STARTERS for w in re.findall(r"[\wąćęłńóśźżĄĆĘŁŃÓŚŹŻ']+", m.group(1))):
+        return text
+    return m.group(2).strip()
+
+
 def strip_speaker_label(text):
     """Odetnij wiodące imię mówcy od dialogu (fallback gdy kolor nie wystarczy)."""
     raw = normalize_text(text)
@@ -4914,7 +4933,7 @@ class AppleVisionOcr:
             other = self._text_on_ink(secondary, ink, lum)
             if self._score(other) > self._score(raw):
                 raw = other
-        best = repair_polish_ocr(raw)
+        best = strip_colon_speaker(repair_polish_ocr(raw))
         return best if usable_ocr(best) else ""
 
 
