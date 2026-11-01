@@ -1228,6 +1228,8 @@ GAME_PROFILES = {
         "hint": "Na razie wycinki z Netflixa w Chrome (do testów); po premierze PS Remote Play.",
         # w trybie źródła „Auto” najpierw szukaj Netflixa w Chrome
         "prefer": "chrome",
+        # żółte napisy (np. imię/kwestia postaci) czytamy też na jasnej scenie
+        "yellow_subs": True,
     },
     "gta5": {
         **_GAME_BASE,
@@ -4569,6 +4571,8 @@ class AppleVisionOcr:
         self.skip_yellow_speaker = False
         # „Inna gra”: napisy w dowolnym kolorze (domyślnie tylko białe i żółte na czarnym pasku)
         self.any_color = False
+        # GTA VI: żółte napisy także na scenie (z obwódką), nie tylko na czarnym pasku
+        self.yellow_subs = False
         self.accurate_first = True
         self.languages = ["pl-PL"]
 
@@ -4811,11 +4815,12 @@ class AppleVisionOcr:
         return lo, hi
 
     @staticmethod
-    def _colored_letters(rgb, lum, spread, r, any_color=False):
+    def _colored_letters(rgb, lum, spread, r, any_color=False, yellow=False):
         """Kolorowe litery (~100–200 jasności) wyraźnie jaśniejsze od ciemnego sąsiedztwa.
         Domyślnie tylko żółte/złote i tylko na czarnym pasku filmowym — żółty HUD i tablice
-        na scenie dalej odpadają. `any_color` („Inna gra”): każdy kolor, pasek albo obwódka."""
-        if not any_color and float(np.median(lum)) > 45:
+        na scenie dalej odpadają. `yellow` (GTA VI): żółte także z obwódką na scenie.
+        `any_color` („Inna gra”): każdy kolor, pasek albo obwódka."""
+        if not (any_color or yellow) and float(np.median(lum)) > 45:
             return None
         red, green, blue = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
         if any_color:
@@ -4829,10 +4834,10 @@ class AppleVisionOcr:
         return text
 
     @staticmethod
-    def subtitle_mask(frame, any_color=False):
+    def subtitle_mask(frame, any_color=False, yellow=False):
         """Białe/szare litery przy czarnej obwódce lub tle → czarny tekst na białym tle.
         Żółte litery tylko na czarnym pasku; inne kolory i jasne tło bez ciemnego sąsiedztwa
-        nie trafiają do OCR — chyba że `any_color` (profil „Inna gra”)."""
+        nie trafiają do OCR — chyba że `yellow` (żółte wszędzie) albo `any_color` (profil „Inna gra”)."""
         rgb = frame[:, :, ::-1].astype(np.float32) if frame.shape[-1] == 3 else frame.astype(np.float32)
         lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
         spread = rgb.max(axis=2) - rgb.min(axis=2)
@@ -4865,7 +4870,7 @@ class AppleVisionOcr:
                 text = None
         # żółte napisy (Hogwarts, filmowe przerywniki) dokładamy zawsze: biała ścieżka mogła złapać
         # sam brzeg sceny nad paskiem, a odczyt bez liter pod spodem i tak odpada w _text_on_ink
-        colored = AppleVisionOcr._colored_letters(rgb, lum, spread, r, any_color)
+        colored = AppleVisionOcr._colored_letters(rgb, lum, spread, r, any_color, yellow)
         if colored is not None:
             text = colored if text is None else (text | colored)
         if text is None:
@@ -4916,7 +4921,7 @@ class AppleVisionOcr:
     def read(self, frame):
         if frame is None or frame.size == 0:
             return ""
-        mask = self.subtitle_mask(frame, self.any_color)
+        mask = self.subtitle_mask(frame, self.any_color, self.yellow_subs)
         if mask is None:
             return ""
         # Maska tylko wykrywa napis. Sam obraz z maski Vision czyta dobrze na Netflixie
@@ -5373,6 +5378,7 @@ class Engine:
         self.ocr.boost = float(profile["boost"])
         self.ocr.skip_yellow_speaker = bool(profile.get("skip_yellow_speaker"))
         self.ocr.any_color = bool(profile.get("any_color_subs"))
+        self.ocr.yellow_subs = bool(profile.get("yellow_subs"))
         self.ocr.accurate_first = bool(profile.get("ocr_accurate_first"))
         langs = profile.get("ocr_langs") or ["pl-PL"]
         self.ocr.languages = list(langs)

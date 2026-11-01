@@ -61,6 +61,12 @@ class SubtitleMaskTest(unittest.TestCase):
         self.assertIsNone(AppleVisionOcr.subtitle_mask(frame))
         self.assertIsNotNone(AppleVisionOcr.subtitle_mask(frame, any_color=True))
 
+    def test_yellow_mode_accepts_outlined_yellow_on_scene(self):
+        frame = fixture(color=(255, 220, 0))
+        self.assertIsNone(AppleVisionOcr.subtitle_mask(frame))
+        self.assertIsNotNone(AppleVisionOcr.subtitle_mask(frame, yellow=True))
+        self.assertIsNone(AppleVisionOcr.subtitle_mask(fixture(color=(100, 180, 255)), yellow=True))
+
     def test_plain_snow_is_not_a_subtitle(self):
         self.assertIsNone(AppleVisionOcr.subtitle_mask(np.full((120, 600, 3), 222, dtype=np.uint8)))
 
