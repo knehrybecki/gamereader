@@ -250,6 +250,16 @@ def main():
         with open(f"{pack}/voice.txt", encoding="utf-8") as handle:
             ref_text = handle.read().strip()
         prompt = model.create_voice_clone_prompt(f"{pack}/voice.wav", ref_text)
+        # rejestry lektora (voice-zywy.wav + .txt): ta sama osoba w innym tonie, wybierane per kwestia („style”)
+        styles = {}
+        import glob as _glob
+        for style_wav in sorted(_glob.glob(f"{pack}/voice-*.wav")):
+            style = style_wav[len(f"{pack}/voice-"):-len(".wav")]
+            try:
+                with open(f"{pack}/voice-{style}.txt", encoding="utf-8") as handle:
+                    styles[style] = model.create_voice_clone_prompt(style_wav, handle.read().strip())
+            except OSError:
+                continue
         model.generate(text="Lektor gotowy.", language="pl", voice_clone_prompt=prompt, num_step=steps)
     except Exception as exc:  # brak VoiceStudio / modelu / voicepacka — LiveDub zostaje przy Supertonic
         reply({"ready": False, "error": str(exc)[:200]})
@@ -285,7 +295,7 @@ def main():
             if requested_voice and requested_voice not in voices:
                 reply({"id": job.get("id"), "ok": False, "voice": None, "error": f"brak aktywnej próbki mówcy {requested_voice}"})
                 continue
-            chosen = voices[requested_voice] if requested_voice else prompt
+            chosen = voices[requested_voice] if requested_voice else styles.get(job.get("style"), prompt)
             language = job.get("language") if job.get("language") in ("pl", "es") else "pl"  # „es”: zdanie po hiszpańsku
             wav = model.generate(
                 text=job["text"], language=language, voice_clone_prompt=chosen, num_step=steps, speed=speed

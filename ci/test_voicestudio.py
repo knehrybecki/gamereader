@@ -62,7 +62,9 @@ class VoiceStudioTest(unittest.TestCase):
         (packs / "lektor").mkdir(parents=True)
         (packs / "lektor/voice.wav").write_bytes(b"RIFF")
         (packs / "lektor/voice.txt").write_text("Spokojny głos lektora.", encoding="utf-8")
-        (packs / "lektor/voice.json").write_text('{"deepen": 0.92}')
+        (packs / "lektor/voice.json").write_text('{"deepen": 0.92, "styles": {"zywy": {"lps": 11.0}}}')
+        (packs / "lektor/voice-zywy.wav").write_bytes(b"RIFF")
+        (packs / "lektor/voice-zywy.txt").write_text("Żywy głos lektora!", encoding="utf-8")
         self.patches = [
             patch.object(ge, "VOICESTUDIO_ROOT", root),
             patch.object(ge, "VOICEPACK_DIR", packs),
@@ -93,6 +95,19 @@ class VoiceStudioTest(unittest.TestCase):
             audio = backend.synth("Złap Franklina.", speed=1.0)
             self.assertIsNotNone(audio)
             self.assertGreater(audio.size, 1000)
+        finally:
+            backend.close()
+
+    def test_lively_register_uses_its_own_sample(self):
+        import numpy as np
+
+        backend = ge.OmniVoiceLocal("lektor")
+        try:
+            self.wait_ready(backend)
+            calm = backend.synth("Uciekaj stąd.")
+            lively = backend.synth("Uciekaj stąd.", style="zywy")
+            self.assertFalse(np.array_equal(calm, lively))  # atrapa modelu: inna próbka = inny ton
+            self.assertTrue(np.array_equal(calm, backend.synth("Uciekaj stąd.", style="nie-ma")))  # brak rejestru = zwykły
         finally:
             backend.close()
 
@@ -305,6 +320,50 @@ class SpanishLineTest(unittest.TestCase):
     def test_voicestudio_polish_sentence_stays_polish(self):
         names = VoiceStudioNamesTest()
         self.assertEqual(names.spoken_by_voicestudio("Lucia, wsiadaj.", with_language=True), ("Lus'ija, wsiadaj.", "pl"))
+
+
+class LektorStyleTest(unittest.TestCase):
+    """Melodia jak w filmie (pomiar 18.11, S.W.A.T. i „Królewska niespodzianka”): pytania, wykrzyknienia i mocno
+    przeżywane kwestie lektor mówi wyżej — czytamy je próbką „żywą”, resztę spokojną."""
+
+    def test_questions_exclamations_and_excitement_are_lively(self):
+        self.assertEqual(ge.lektor_style("Naprawdę?"), "zywy")
+        self.assertEqual(ge.lektor_style("Uciekaj!", mood="lively"), "zywy")
+        self.assertEqual(ge.lektor_style("Dobra.", arousal=0.6), "zywy")
+
+    def test_plain_and_soft_lines_stay_calm(self):
+        self.assertIsNone(ge.lektor_style("Dobra, jedziemy do portu."))
+        self.assertIsNone(ge.lektor_style("Przepraszam… nie chciałem.", mood="soft", arousal=0.6))
+
+    def test_each_register_reaches_film_tempo(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        (Path(tmp.name) / "glos").mkdir()
+        (Path(tmp.name) / "glos/voice.json").write_text('{"lps": 10.18, "styles": {"zywy": {"lps": 10.98}}}')
+        with patch.object(ge, "VOICEPACK_DIR", Path(tmp.name)):
+            ov = ge.OmniVoiceLocal("glos")
+        self.assertAlmostEqual(ov.job_speed(1.0), round(ge.OMNI_TARGET_LPS / 10.18, 2))
+        self.assertAlmostEqual(ov.job_speed(1.0, "zywy"), round(ge.OMNI_TARGET_LPS / 10.98, 2))
+        self.assertIn("zywy", ov.tag)  # nowy rejestr = nowe nagrania w cache
+
+    def test_voicestudio_gets_register_for_line(self):
+        names = VoiceStudioNamesTest()
+        lektor = ge.MaleLektor.__new__(ge.MaleLektor)
+        lektor._cloud_prev = ("", 0.0)
+        lektor.on_cloud_error = None
+        lektor._write_voice = lambda *args: None
+        got = {}
+
+        class Cloud:
+            rate = 24000
+            error = ""
+
+            def synth(self, text, style=None, **kwargs):
+                got["style"] = style
+                return ge.np.zeros(2400, dtype=ge.np.float32)
+
+        lektor._synth_cloud(Cloud(), "Naprawdę?", "out.wav", 1.0, 0.0, style="zywy")
+        self.assertEqual(got["style"], "zywy")
 
 
 if __name__ == "__main__":

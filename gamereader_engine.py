@@ -1417,6 +1417,19 @@ def lektor_voice_params(arousal):
     }
 
 
+def lektor_style(text, mood="calm", arousal=0.0):
+    """Rejestr lektora VoiceStudio: „zywy” (druga próbka, voice-zywy.wav) albo None = zwykła, spokojna próbka.
+
+    Pomiar 18.11 (S.W.A.T., „Królewska niespodzianka”): lektor filmowy mówi wyżej pytania, wykrzyknienia
+    i mocno przeżywane kwestie (150–188 Hz wobec 102–115 Hz w spokojnych). Kwestie „miękkie” zostają spokojne."""
+    if mood == "soft":
+        return None
+    end = normalize_text(text or "").rstrip("\"'”»)] ")
+    if mood == "lively" or end.endswith(("?", "!")) or float(arousal or 0.0) >= 0.4:
+        return "zywy"
+    return None
+
+
 def _sentence_mood(sentence):
     low = sentence.lower()
     if "!" in sentence or any(w in low for w in _LIVELY_WORDS):
@@ -2910,7 +2923,16 @@ class OmniVoiceLocal:
         except (TypeError, ValueError):
             lps = 0.0
         self.speed_scale = OMNI_TARGET_LPS / lps if lps > 1.0 else OMNI_SPEED_SCALE
-        self.tag = f"ov1|{self.pack}|{OMNI_STEPS}|{deepen:.2f}|{self.speed_scale:.3f}"
+        # rejestry (voice-zywy.wav …): każdy z własnym tempem; brak pomiaru = tempo zwykłej próbki
+        self.styles = {}
+        for style, info in (meta.get("styles") or {}).items():
+            try:
+                style_lps = float((info or {}).get("lps") or 0.0)
+            except (TypeError, ValueError, AttributeError):
+                style_lps = 0.0
+            self.styles[str(style)] = OMNI_TARGET_LPS / style_lps if style_lps > 1.0 else self.speed_scale
+        styles_tag = ",".join(f"{k}:{v:.3f}" for k, v in sorted(self.styles.items()))
+        self.tag = f"ov1|{self.pack}|{OMNI_STEPS}|{deepen:.2f}|{self.speed_scale:.3f}|{styles_tag}"
         self.error = ""
         self.failed_until = 0.0
         self.ready = False
@@ -3027,12 +3049,12 @@ class OmniVoiceLocal:
         if self.on_ready:
             self.on_ready(self)
 
-    def job_speed(self, rate):
+    def job_speed(self, rate, style=None):
         """Tempo lektora (1,0 = zwykłe) → speed dla OmniVoice: głos z pomiarem „lps” mówi ~OMNI_TARGET_LPS liter/s."""
         low, high = OMNI_SPEED_RANGE if self.speed_scale != OMNI_SPEED_SCALE else (0.75, 1.2)
-        return round(max(low, min(high, rate * self.speed_scale)), 2)
+        return round(max(low, min(high, rate * self.styles.get(style, self.speed_scale))), 2)
 
-    def synth(self, text, speed=1.0, previous="", voice=None, language="pl"):
+    def synth(self, text, speed=1.0, previous="", voice=None, language="pl", style=None):
         """Mono float32 albo None (model jeszcze się ładuje / padł) — wtedy lektor czyta Supertonic.
         voice: klucz postaci z set_voice() — czyta jej głosem zamiast lektora z voicepacka."""
         if not self.ready or time.monotonic() < self.failed_until:
@@ -3046,9 +3068,12 @@ class OmniVoiceLocal:
                 return None
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
             out = CACHE_DIR / f"ov_job_{os.getpid()}_{self.voice_session}.wav"
-            job = {"text": text, "speed": self.job_speed(speed), "out": str(out)}
+            style = style if style in self.styles and not voice else None
+            job = {"text": text, "speed": self.job_speed(speed, style), "out": str(out)}
             if language != "pl":
                 job["language"] = language
+            if style:
+                job["style"] = style
             if voice:
                 if voice not in self.voice_rev:
                     self.error = f"VoiceStudio: brak gotowego klonu {voice} — ta kwestia Supertonic."
@@ -3737,7 +3762,7 @@ class MaleLektor:
         t0 = time.monotonic()
         stretch = None
         if not voice_tag.startswith("st"):
-            stretch = self._synth_cloud(cloud, text, raw, pace, pause, voice)
+            stretch = self._synth_cloud(cloud, text, raw, pace, pause, voice, None if voice else lektor_style(text, mood, a))
             if stretch is None:
                 path = CACHE_DIR / f"{text_key(key.replace(voice_tag, f'st15|{self.voice}', 1))}.wav"
                 if path.exists() and path.stat().st_size >= 64:
@@ -3780,7 +3805,7 @@ class MaleLektor:
         self._write_voice(np.asarray(wav, dtype=np.float32).reshape(-1), int(self.model.sample_rate), text, speed, path, pause)
         return stretch
 
-    def _synth_cloud(self, cloud, text, path, pace, pause, voice=None):
+    def _synth_cloud(self, cloud, text, path, pace, pause, voice=None, style=None):
         """Lektor z VoiceStudio; None = nie wyszło (lektor czyta Supertonic). Tempo w całości po stronie głosu."""
         speed, stretch = lektor_speed_split(pace, text)
         rate = speed * stretch / LEKTOR_SPEED  # 1,0 = zwykłe tempo lektora
@@ -3789,7 +3814,7 @@ class MaleLektor:
         # nazwy w oryginale, hiszpańskie spolszczone (Lucia → Lus'ija); polish_pronounce to obejścia Supertonic
         spanish = spanish_sentence(text)
         audio = cloud.synth(
-            text if spanish else voicestudio_names(text), speed=rate, language="es" if spanish else "pl",
+            text if spanish else voicestudio_names(text), speed=rate, language="es" if spanish else "pl", style=style,
             previous="" if voice else (prev if time.monotonic() - at < 12.0 else ""), voice=voice,
         )
         if audio is None:

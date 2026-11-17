@@ -37,9 +37,8 @@ def main():
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     model = OmniVoice.from_pretrained("k2-fsa/OmniVoice", device_map=device, dtype=torch.float32)
     rate = getattr(model, "sampling_rate", 24000)
-    for name in names:
-        pack = PACKS / name
-        prompt = model.create_voice_clone_prompt(str(pack / "voice.wav"), (pack / "voice.txt").read_text().strip())
+    def measure(wav, txt):
+        prompt = model.create_voice_clone_prompt(str(wav), txt.read_text().strip())
         letters = seconds = 0.0
         for i, text in enumerate(LINES):
             fix_random_seed(i)
@@ -49,16 +48,26 @@ def main():
             if loud.size:
                 seconds += (loud[-1] - loud[0]) / rate
                 letters += sum(ch.isalpha() for ch in text)
-        lps = round(letters / max(seconds, 0.1), 2)
+        return round(letters / max(seconds, 0.1), 2)
+
+    for name in names:
+        pack = PACKS / name
         meta_path = pack / "voice.json"
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             meta = {}
-        meta["lps"] = lps
+        meta["lps"] = measure(pack / "voice.wav", pack / "voice.txt")
+        print(f"✓ {name}: {meta['lps']} liter/s przy speed 1,0")
+        styles = {}
+        for wav in sorted(pack.glob("voice-*.wav")):  # rejestry (voice-zywy.wav …) mówią własnym tempem
+            style = wav.stem[len("voice-"):]
+            if (pack / f"voice-{style}.txt").is_file():
+                styles[style] = {"lps": measure(wav, pack / f"voice-{style}.txt")}
+                print(f"✓ {name} / {style}: {styles[style]['lps']} liter/s przy speed 1,0")
+        if styles:
+            meta["styles"] = styles
         meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
-        print(f"✓ {name}: {lps} liter/s przy speed 1,0")
-
 
 if __name__ == "__main__":
     main()
