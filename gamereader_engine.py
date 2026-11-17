@@ -1,4 +1,5 @@
 import copy
+import functools
 import hashlib
 import wave
 import json
@@ -1461,6 +1462,27 @@ def preferred_device_name(devices):
     return PS_REMOTE
 
 
+def cocoa_pool(fn):
+    """Obiekty Cocoa/Quartz z wywołania zwalniane od razu po nim.
+
+    Wątki Pythona nie mają własnej autorelease pool, więc wszystko, co Cocoa odda „autoreleased” (NSData z PNG,
+    lista okien, a przez nie cała klatka okna z CGWindowListCreateImage), zostawało w pamięci na zawsze — 17.11
+    silnik urósł do 8 GB w kwadrans przez 5 MB klatki Chrome. Owinięte funkcje zwracają tylko obiekty Pythona."""
+    try:
+        import objc
+    except Exception:
+        return fn
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with objc.autorelease_pool():
+            return fn(*args, **kwargs)
+
+    wrapper._cocoa_pool = True
+    return wrapper
+
+
+@cocoa_pool
 def remote_play_bounds():
     try:
         import Quartz
@@ -1562,6 +1584,7 @@ def find_remote_play_window():
     return _helper_bin_window() or _helper_remote_play_window()
 
 
+@cocoa_pool
 def _quartz_remote_play_info():
     """Zwraca (x, y, w, h, window_id) albo None."""
     try:
@@ -1620,6 +1643,7 @@ VIDEO_TITLES = ("netflix", "youtube", "twitch", "max", "prime video", "disney")
 CHROME_BAND = {"band": 0.2, "gap": 0.07, "inset": 0.1}
 
 
+@cocoa_pool
 def _quartz_chrome_info(video_only=False, titles=VIDEO_TITLES):
     """Okno Chrome (x, y, w, h, window_id, tytuł): najpierw karta z wideo, potem największe."""
     try:
@@ -1749,6 +1773,7 @@ def player_controls_visible(info):
     return bool(red.size) and int(red.sum(axis=1).max()) >= 14
 
 
+@cocoa_pool
 def capture_remote_play_band(left, top, width, height, info=None):
     """Szybki zrzut paska z okna źródła (Quartz w procesie, bez spawn helpera)."""
     if IS_WIN:
@@ -1860,6 +1885,7 @@ def _quartz_remote_play_window():
     return info[:4] if info is not None else None
 
 
+@cocoa_pool
 def _remote_play_pids():
     pids = set()
     try:
