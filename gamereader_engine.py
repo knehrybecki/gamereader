@@ -5118,9 +5118,9 @@ class Engine:
         self._engine_chosen = bool(self.cfg.get("lektorEngineChosen"))
         self._sync_voice()
         self.translator = ArgosTranslator()
-        # klonowanie głosów postaci: działa tylko z lektorem VoiceStudio (OmniVoice); cfg "cloneVoices": false wyłącza
+        # klonowanie głosów postaci: tylko z lektorem VoiceStudio (OmniVoice); domyślnie wyłączone, cfg "cloneVoices": true włącza
         self.speakers = None
-        self.clone_voices = bool(self.cfg.get("cloneVoices", True))
+        self.clone_voices = bool(self.cfg.get("cloneVoices", False))
         if self.clone_voices:
             self.speakers = SpeakerBank(lambda: self.lektor.cloud, lambda a: self.stt.transcribe(a), log=log_timing,
                                     is_lektor=((lambda a, b: self.lektor.speaking_between(a, b)) if os.environ.get("LIVEDUB_SPEAKER_GUARD") else None),
@@ -5298,7 +5298,7 @@ class Engine:
             "lektorEngine": getattr(self, "lektor_engine", "supertonic"),
             "lektorVoice": self.lektor.voice,
             "omniPack": getattr(self, "omni_pack", ""),
-            "cloneVoices": getattr(self, "clone_voices", True),
+            "cloneVoices": getattr(self, "clone_voices", False),
             "omniPacks": voicepacks() if voicestudio_python() else [],
         }
 
