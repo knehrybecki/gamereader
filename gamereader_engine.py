@@ -3721,8 +3721,10 @@ class MaleLektor:
         speed, stretch = lektor_speed_split(pace, text)
         rate = speed * stretch / LEKTOR_SPEED  # 1,0 = zwykłe tempo lektora
         prev, at = self._cloud_prev
+        # imiona jak w Supertonic (Lucia → Lus'ija, Jason → Dżejson); reszta polish_pronounce to obejścia Supertonic
         audio = cloud.synth(
-            text, speed=rate, previous="" if voice else (prev if time.monotonic() - at < 12.0 else ""), voice=voice
+            english_names_pl(text), speed=rate,
+            previous="" if voice else (prev if time.monotonic() - at < 12.0 else ""), voice=voice,
         )
         if audio is None:
             if cloud.error and self.on_cloud_error:

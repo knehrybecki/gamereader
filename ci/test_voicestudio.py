@@ -197,5 +197,38 @@ class MemoryCapTest(unittest.TestCase):
         self.assertFalse(opts.enable_mem_pattern)
 
 
+class VoiceStudioNamesTest(unittest.TestCase):
+    """Imiona bohaterów VoiceStudio czyta tak jak Supertonic: „Lucia” brzmi „Lus'ija”, nie tak, jak się pisze."""
+
+    def spoken_by_voicestudio(self, text):
+        lektor = ge.MaleLektor.__new__(ge.MaleLektor)
+        lektor._cloud_prev = ("", 0.0)
+        lektor.on_cloud_error = None
+        lektor._write_voice = lambda *args: None
+        sent = []
+
+        class Cloud:
+            rate = 24000
+            error = ""
+
+            def synth(self, text, **kwargs):
+                sent.append(text)
+                return ge.np.zeros(2400, dtype=ge.np.float32)
+
+        lektor._synth_cloud(Cloud(), text, "out.wav", 1.0, 0.0)
+        return sent[0]
+
+    def test_gta_names_are_pronounced(self):
+        spoken = self.spoken_by_voicestudio("Lucia, wsiadaj. Jason czeka w Vice City.")
+        self.assertEqual(spoken, "Lus'ija, wsiadaj. Dżejson czeka w Wajs S'iti.")
+
+    def test_declined_name_keeps_its_ending(self):
+        self.assertIn("Lus'iję", self.spoken_by_voicestudio("Lucię już złapali."))
+
+    def test_supertonic_only_tricks_stay_out(self):
+        # „staary” to obejście Supertonic (czytał „stery”) — OmniVoice przeciągnąłby „a”
+        self.assertEqual(self.spoken_by_voicestudio("Hej, stary."), "Hej, stary.")
+
+
 if __name__ == "__main__":
     unittest.main()
