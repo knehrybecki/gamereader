@@ -2845,8 +2845,13 @@ VOICESTUDIO_ROOT = Path(os.environ.get("VOICESTUDIO_ROOT") or Path.home() / "voi
 VOICEPACK_DIR = CONFIG_PATH.parent / "voicepacks"
 OMNI_STEPS = 8  # z krótkim wzorcem (~3 s) 8 kroków = ~0,6–0,8 s na kwestię
 OMNI_TIMEOUT = 8.0
-# OmniVoice z natury czyta ~18 zn/s — lektor filmowy ~15–16 zn/s
+# OmniVoice z natury czyta ~18 zn/s — lektor filmowy ~15–16 zn/s (głosy z opisu, np. lektor-M04: 13,9 liter/s)
 OMNI_SPEED_SCALE = 0.87
+# Głos z nagrania kopiuje tempo próbki (lektor-filmowy-1/2/3: 5,6–8 liter/s w grze), więc dostaje własny pomiar
+# „lps” w voice.json (tools/voicepack_tempo.py) i speed dobrany do tempa lektora filmowego: zmierzone 18.11
+# „Królewska niespodzianka” 10,9 i „Protektor” 9,8 liter/s (mediana kwestii lektora).
+OMNI_TARGET_LPS = 11.0
+OMNI_SPEED_RANGE = (0.7, 1.5)  # klony z nagrań: 0 błędów słów aż do 1,5 (Parakeet, 6 zdań GTA, 18.11)
 
 
 def voicepacks():
@@ -2876,7 +2881,12 @@ class OmniVoiceLocal:
         self.pre_filter = (
             f"asetrate={self.rate * deepen:.0f},aresample={self.rate},atempo={1 / deepen:.4f}" if deepen < 0.999 else ""
         )
-        self.tag = f"ov1|{self.pack}|{OMNI_STEPS}|{deepen:.2f}|{OMNI_SPEED_SCALE}"
+        try:
+            lps = float(meta.get("lps") or 0.0)
+        except (TypeError, ValueError):
+            lps = 0.0
+        self.speed_scale = OMNI_TARGET_LPS / lps if lps > 1.0 else OMNI_SPEED_SCALE
+        self.tag = f"ov1|{self.pack}|{OMNI_STEPS}|{deepen:.2f}|{self.speed_scale:.3f}"
         self.error = ""
         self.failed_until = 0.0
         self.ready = False
@@ -2993,6 +3003,11 @@ class OmniVoiceLocal:
         if self.on_ready:
             self.on_ready(self)
 
+    def job_speed(self, rate):
+        """Tempo lektora (1,0 = zwykłe) → speed dla OmniVoice: głos z pomiarem „lps” mówi ~OMNI_TARGET_LPS liter/s."""
+        low, high = OMNI_SPEED_RANGE if self.speed_scale != OMNI_SPEED_SCALE else (0.75, 1.2)
+        return round(max(low, min(high, rate * self.speed_scale)), 2)
+
     def synth(self, text, speed=1.0, previous="", voice=None):
         """Mono float32 albo None (model jeszcze się ładuje / padł) — wtedy lektor czyta Supertonic.
         voice: klucz postaci z set_voice() — czyta jej głosem zamiast lektora z voicepacka."""
@@ -3007,8 +3022,7 @@ class OmniVoiceLocal:
                 return None
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
             out = CACHE_DIR / f"ov_job_{os.getpid()}_{self.voice_session}.wav"
-            speed = max(0.75, min(1.2, speed * OMNI_SPEED_SCALE))
-            job = {"text": text, "speed": round(speed, 2), "out": str(out)}
+            job = {"text": text, "speed": self.job_speed(speed), "out": str(out)}
             if voice:
                 if voice not in self.voice_rev:
                     self.error = f"VoiceStudio: brak gotowego klonu {voice} — ta kwestia Supertonic."

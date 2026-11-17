@@ -239,5 +239,37 @@ class VoiceStudioNamesTest(unittest.TestCase):
         self.assertEqual(self.spoken_by_voicestudio("Hej, stary."), "Hej, stary.")
 
 
+class VoiceStudioTempoTest(unittest.TestCase):
+    """Każdy głos z nagrania mówi własnym tempem (kopiuje próbkę) — voice.json „lps” = litery/s przy speed 1,0,
+    a LiveDub dobiera speed tak, żeby lektor mówił jak w filmie (~11 liter/s, „Protektor” 9,8, romans 10,9)."""
+
+    def pack(self, meta):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        packs = Path(tmp.name)
+        (packs / "glos").mkdir()
+        (packs / "glos/voice.json").write_text(meta, encoding="utf-8")
+        p = patch.object(ge, "VOICEPACK_DIR", packs)
+        p.start()
+        self.addCleanup(p.stop)
+        return ge.OmniVoiceLocal("glos")
+
+    def test_measured_voice_reaches_film_tempo(self):
+        ov = self.pack('{"lps": 10.4}')
+        self.assertAlmostEqual(ov.job_speed(1.0), round(ge.OMNI_TARGET_LPS / 10.4, 2))
+        self.assertIn(f"{ge.OMNI_TARGET_LPS / 10.4:.3f}", ov.tag)  # inne tempo = inne nagrania w cache
+
+    def test_fast_voice_is_slowed_down(self):
+        self.assertLess(self.pack('{"lps": 13.1}').job_speed(1.0), 0.9)
+
+    def test_voice_without_measurement_keeps_old_scale(self):
+        self.assertAlmostEqual(self.pack('{"deepen": 1.0}').job_speed(1.0), ge.OMNI_SPEED_SCALE)
+
+    def test_speed_stays_in_intelligible_range(self):
+        ov = self.pack('{"lps": 10.4}')
+        self.assertEqual(ov.job_speed(5.0), 1.5)  # klony do 1,5 bez błędów słów (test 18.11)
+        self.assertEqual(ov.job_speed(0.1), 0.7)
+
+
 if __name__ == "__main__":
     unittest.main()
