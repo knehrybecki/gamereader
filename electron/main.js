@@ -441,14 +441,17 @@ function pickRegionOverlay() {
       if (done) return;
       done = true;
       ipcMain.removeListener("pick-done", onDone);
+      // prostokąt jest względem okna, a macOS stawia je pod paskiem menu (y=33 zamiast 0 na ekranie z notchem):
+      // liczone od rogu ekranu zaznaczenie lądowało 33 px wyżej i ucinało dół napisów
+      const origin = win.isDestroyed() ? b : win.getContentBounds();
       if (!win.isDestroyed()) win.close();
       if (!rect || !(rect.width >= 8 && rect.height >= 8)) {
         resolve("ERR cancel");
         return;
       }
       const dip = {
-        x: Math.round(b.x + rect.x),
-        y: Math.round(b.y + rect.y),
+        x: Math.round(origin.x + rect.x),
+        y: Math.round(origin.y + rect.y),
         width: Math.round(rect.width),
         height: Math.round(rect.height),
       };
