@@ -286,8 +286,9 @@ def main():
                 reply({"id": job.get("id"), "ok": False, "voice": None, "error": f"brak aktywnej próbki mówcy {requested_voice}"})
                 continue
             chosen = voices[requested_voice] if requested_voice else prompt
+            language = job.get("language") if job.get("language") in ("pl", "es") else "pl"  # „es”: zdanie po hiszpańsku
             wav = model.generate(
-                text=job["text"], language="pl", voice_clone_prompt=chosen, num_step=steps, speed=speed
+                text=job["text"], language=language, voice_clone_prompt=chosen, num_step=steps, speed=speed
             )[0]
             audio = np.clip(wav.squeeze().float().cpu().numpy(), -1.0, 1.0)
             with wave.open(job["out"], "wb") as handle:

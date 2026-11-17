@@ -35,9 +35,9 @@ class OmniVoice:
         assert text, "brak tekstu voicepacka"
         return "default" if ref.endswith("/voice.wav") else "clone"
     def generate(self, text, language, voice_clone_prompt, num_step, speed=None):
-        assert language == "pl" and voice_clone_prompt in ("default", "clone")
+        assert language in ("pl", "es") and voice_clone_prompt in ("default", "clone")
         t = np.arange(int(24000 * 0.05 * len(text))) / 24000
-        freq = 150 if voice_clone_prompt == "default" else 300
+        freq = (150 if voice_clone_prompt == "default" else 300) + (50 if language == "es" else 0)
         return [_Wav((np.sin(2 * np.pi * freq * t) * 0.3).astype("float32"))]
 """
 
@@ -93,6 +93,18 @@ class VoiceStudioTest(unittest.TestCase):
             audio = backend.synth("Złap Franklina.", speed=1.0)
             self.assertIsNotNone(audio)
             self.assertGreater(audio.size, 1000)
+        finally:
+            backend.close()
+
+    def test_spanish_sentence_reaches_model_as_spanish(self):
+        import numpy as np
+
+        backend = ge.OmniVoiceLocal("lektor")
+        try:
+            self.wait_ready(backend)
+            polish = backend.synth("Hola amigo.")
+            spanish = backend.synth("Hola amigo.", language="es")
+            self.assertFalse(np.array_equal(polish, spanish))  # atrapa modelu: „es” = inny ton
         finally:
             backend.close()
 
@@ -201,7 +213,7 @@ class VoiceStudioNamesTest(unittest.TestCase):
     """VoiceStudio (OmniVoice) mówi angielskie nazwy po angielsku z oryginalnego zapisu — spolszczenie dla Supertonic
     psuło je („Wajs S'iti” → „wajce ścici”). Lucia i imiona hiszpańskie zostają po hiszpańsku (Lus'ija)."""
 
-    def spoken_by_voicestudio(self, text):
+    def spoken_by_voicestudio(self, text, with_language=False):
         lektor = ge.MaleLektor.__new__(ge.MaleLektor)
         lektor._cloud_prev = ("", 0.0)
         lektor.on_cloud_error = None
@@ -212,12 +224,12 @@ class VoiceStudioNamesTest(unittest.TestCase):
             rate = 24000
             error = ""
 
-            def synth(self, text, **kwargs):
-                sent.append(text)
+            def synth(self, text, language="pl", **kwargs):
+                sent.append((text, language))
                 return ge.np.zeros(2400, dtype=ge.np.float32)
 
         lektor._synth_cloud(Cloud(), text, "out.wav", 1.0, 0.0)
-        return sent[0]
+        return sent[0] if with_language else sent[0][0]
 
     def test_english_stays_english_lucia_spanish(self):
         spoken = self.spoken_by_voicestudio("Lucia, wsiadaj. Jason czeka w Vice City przy Ocean Beach.")
@@ -269,6 +281,30 @@ class VoiceStudioTempoTest(unittest.TestCase):
         ov = self.pack('{"lps": 10.4}')
         self.assertEqual(ov.job_speed(5.0), 1.5)  # klony do 1,5 bez błędów słów (test 18.11)
         self.assertEqual(ov.job_speed(0.1), 0.7)
+
+
+class SpanishLineTest(unittest.TestCase):
+    """Wybór 18.11 (próbka 3): zdanie całe po hiszpańsku VoiceStudio mówi z oryginalnej pisowni modelem hiszpańskim;
+    polskie zdanie z hiszpańskim wtrąceniem zostaje po polsku, Lucia dalej „Lus'ija” (próbka 5)."""
+
+    def test_spanish_sentences(self):
+        for text in ("Hola, señor García! Vámonos, la policía ya viene.", "¿Qué pasa, hermano?", "No sé.",
+                     "Vamos, vamos, rápido!", "Gracias por todo, mi amor."):
+            self.assertTrue(ge.spanish_sentence(text), text)
+
+    def test_polish_sentences_with_spanish_words(self):
+        for text in ("Dobra, chodźmy. Vámonos, hermano.", "Lucia, wsiadaj do auta.", "No dobra, jedziemy.",
+                     "Señor García czeka na zewnątrz.", "Jason czeka w Vice City.", "To nie jest takie proste."):
+            self.assertFalse(ge.spanish_sentence(text), text)
+
+    def test_voicestudio_speaks_spanish_sentence_in_spanish(self):
+        names = VoiceStudioNamesTest()
+        spoken = names.spoken_by_voicestudio("Hola, señor García! Vámonos.", with_language=True)
+        self.assertEqual(spoken, ("Hola, señor García! Vámonos.", "es"))
+
+    def test_voicestudio_polish_sentence_stays_polish(self):
+        names = VoiceStudioNamesTest()
+        self.assertEqual(names.spoken_by_voicestudio("Lucia, wsiadaj.", with_language=True), ("Lus'ija, wsiadaj.", "pl"))
 
 
 if __name__ == "__main__":

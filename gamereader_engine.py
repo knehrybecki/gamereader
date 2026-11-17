@@ -2526,6 +2526,30 @@ def _matched_name(match):
     return None
 
 
+_SPANISH_FUNCTION = set("""
+que qué el la los las de del y o por para con sin es son está están estás estoy soy eres sí no yo tú mi mis tu tus te
+me se lo le un una unos ya aquí allí ahora bien muy pero porque como cómo dónde donde cuando cuándo nada nunca también
+hola adiós gracias señor señora señorita vamos vámonos viene ven mira oye amigo amiga hermano hermana todo todos amor
+rápido pasa hay tengo tienes quiero puedo vale claro bueno perdón favor dios mío jefe policía dinero casa
+""".split())
+_POLISH_ONLY = re.compile(r"[ąćęłńśźżĄĆĘŁŃŚŹŻ]")
+_POLISH_FUNCTION = set("nie się jest to że co jak tak na w z do czy już tylko ale mnie ja ty my wy on ona dobra no "
+                       "tu tam jestem mam masz ci go jej mu".split())
+
+
+def spanish_sentence(text):
+    """Zdanie całe po hiszpańsku („Hola, señor García! Vámonos.”) — VoiceStudio mówi je modelem hiszpańskim.
+
+    Polskie litery albo polskie słowo („No dobra”, „Señor García czeka na zewnątrz”) = zdanie polskie."""
+    if _POLISH_ONLY.search(text or ""):
+        return False
+    words = re.findall(r"[A-Za-zÀ-ÿ]+", (text or "").lower())
+    if not words or any(w in _POLISH_FUNCTION and w != "no" for w in words):
+        return False
+    spanish = sum(1 for w in words if w in _SPANISH_FUNCTION or _SPANISH_MARK.search(w))
+    return spanish / len(words) >= 0.5
+
+
 def voicestudio_names(text):
     """Dla OmniVoice: angielskie zostaje w oryginale (powie je po angielsku), hiszpańskie po polsku jak w Supertonic."""
     text = _NAME_RE.sub(lambda m: _name_sub(m) if _matched_name(m) in SPANISH_SPOKEN else m.group(0), text or "")
@@ -3008,7 +3032,7 @@ class OmniVoiceLocal:
         low, high = OMNI_SPEED_RANGE if self.speed_scale != OMNI_SPEED_SCALE else (0.75, 1.2)
         return round(max(low, min(high, rate * self.speed_scale)), 2)
 
-    def synth(self, text, speed=1.0, previous="", voice=None):
+    def synth(self, text, speed=1.0, previous="", voice=None, language="pl"):
         """Mono float32 albo None (model jeszcze się ładuje / padł) — wtedy lektor czyta Supertonic.
         voice: klucz postaci z set_voice() — czyta jej głosem zamiast lektora z voicepacka."""
         if not self.ready or time.monotonic() < self.failed_until:
@@ -3023,6 +3047,8 @@ class OmniVoiceLocal:
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
             out = CACHE_DIR / f"ov_job_{os.getpid()}_{self.voice_session}.wav"
             job = {"text": text, "speed": self.job_speed(speed), "out": str(out)}
+            if language != "pl":
+                job["language"] = language
             if voice:
                 if voice not in self.voice_rev:
                     self.error = f"VoiceStudio: brak gotowego klonu {voice} — ta kwestia Supertonic."
@@ -3759,9 +3785,11 @@ class MaleLektor:
         speed, stretch = lektor_speed_split(pace, text)
         rate = speed * stretch / LEKTOR_SPEED  # 1,0 = zwykłe tempo lektora
         prev, at = self._cloud_prev
-        # angielskie nazwy w oryginale, hiszpańskie spolszczone (Lucia → Lus'ija); polish_pronounce to obejścia Supertonic
+        # zdanie całe po hiszpańsku: oryginalna pisownia i model hiszpański (wybór 18.11); w polskim zdaniu angielskie
+        # nazwy w oryginale, hiszpańskie spolszczone (Lucia → Lus'ija); polish_pronounce to obejścia Supertonic
+        spanish = spanish_sentence(text)
         audio = cloud.synth(
-            voicestudio_names(text), speed=rate,
+            text if spanish else voicestudio_names(text), speed=rate, language="es" if spanish else "pl",
             previous="" if voice else (prev if time.monotonic() - at < 12.0 else ""), voice=voice,
         )
         if audio is None:
