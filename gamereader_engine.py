@@ -5071,6 +5071,13 @@ class WindowsOcr(AppleVisionOcr):
 
 
 
+# Ściszanie gry pod lektorem jak w filmie z lektorem — pomiar 18.11 („Królewska niespodzianka”, „Protektor”):
+# oryginał 11–13 dB pod lektorem, między kwestiami lektora średnio 1,5 s. 75 % = głośność 0,25 = -12 dB;
+# gra wraca dopiero po DUCK_HOLD_SEC ciszy lektora, więc w dialogu nie „pompuje” (było 0,35 s).
+DUCK_AMOUNT_DEFAULT = 75
+DUCK_HOLD_SEC = 1.5
+
+
 class Engine:
     def __init__(self, emit):
         self.emit = emit
@@ -5127,7 +5134,7 @@ class Engine:
         self._controls_logged = 0.0
         # ściszanie gry, gdy mówi lektor (jak prawdziwy lektor w filmie)
         # o ile ściszyć grę, gdy mówi lektor: 0 % = wcale (dźwięku gry nie przejmujemy), 100 % = cisza
-        self.duck_amount = max(0, min(100, int(self.cfg.get("duckAmount", 70))))
+        self.duck_amount = max(0, min(100, int(self.cfg.get("duckAmount", DUCK_AMOUNT_DEFAULT))))
         self._tap = None
         self._win_ducker = None
         self._duck_timer = None
@@ -5273,10 +5280,10 @@ class Engine:
             self._set_game_gain(self.duck_level)
 
     def _duck_release(self):
-        # chwila zapasu: kolejna kwestia zaraz po poprzedniej nie „pompuje” głośności gry
+        # przytrzymanie jak w filmie: kolejna kwestia w ciągu DUCK_HOLD_SEC nie „pompuje” głośności gry
         if self._duck_timer is not None:
             self._duck_timer.cancel()
-        self._duck_timer = threading.Timer(0.35, lambda: self._set_game_gain(1.0))
+        self._duck_timer = threading.Timer(DUCK_HOLD_SEC, lambda: self._set_game_gain(1.0))
         self._duck_timer.daemon = True
         self._duck_timer.start()
 

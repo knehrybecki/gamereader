@@ -110,6 +110,7 @@ final class Ducker {
     private var lastGoal: Float = 1.0
     private var currentGain: Float = 1.0
     private var smoothing: Float = 0.0005
+    private var releaseSmoothing: Float = 0.0001
 
     // odświeżenie dźwięku Remote Play (skompresowany strumień brzmi płasko): +bas, +góra, miękki limiter
     private var enhance = true
@@ -189,8 +190,10 @@ final class Ducker {
         var rateSize = UInt32(MemoryLayout<Float64>.size)
         AudioObjectGetPropertyData(aggregateID, &rateAddr, 0, nil, &rateSize, &rate)
         hop = max(1, Int((rate / 16000).rounded()))
-        // stała czasowa ~90 ms — płynne ściszenie bez trzasków
+        // ściszenie: stała czasowa ~90 ms — szybko, żeby gra nie przykrywała początku lektora, a bez trzasków;
+        // powrót: ~400 ms — łagodnie, jak oryginał wracający po lektorze w filmie
         smoothing = Float(1 - exp(-1 / (0.09 * rate)))
+        releaseSmoothing = Float(1 - exp(-1 / (0.4 * rate)))
         bass = Shelf(high: false, freq: 110, gainDB: 3.5, rate: rate)
         treble = Shelf(high: true, freq: 6500, gainDB: 3.0, rate: rate)
 
@@ -280,7 +283,7 @@ final class Ducker {
             os_unfair_lock_unlock(&gainLock)
         }
         let goal = lastGoal
-        let step = smoothing
+        let step = goal > currentGain ? releaseSmoothing : smoothing
 
         // mono do STT (przed ściszeniem i korekcją — rozpoznawanie ma słyszeć oryginał)
         if inFrames > 0, os_unfair_lock_trylock(&ringLock) {
