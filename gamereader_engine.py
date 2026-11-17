@@ -2442,6 +2442,14 @@ for _name in SPANISH_NAMES:
     for _form in {_name, _name.translate(_ACCENT_FOLD)}:
         if _form not in ENGLISH_NAMES:
             ENGLISH_NAMES[_form] = spanish_spoken(_name)
+# VoiceStudio (OmniVoice) zna angielski i z oryginalnego zapisu mówi „Vice City”, „Jason”, „Ocean Beach” po angielsku;
+# spolszczenie dla Supertonic je psuło („Wajs S'iti” → „wajce ścici”). Spolszczamy mu tylko to, co ma brzmieć
+# po hiszpańsku — imiona z listy i Lucię (Lus'ija, nie angielskie „Lusza”).
+SPANISH_SPOKEN = (
+    {form for name in SPANISH_NAMES for form in (name, name.translate(_ACCENT_FOLD))}
+    | {form for word in SPANISH_WORDS for form in (word, word[:1].upper() + word[1:])}
+    | {"Lucia"}
+)
 
 # Po polsku „si” brzmi jak „ś” (Trejsi → „Trejśi”, Wajs Siti → „Wajs Śiti”, Lusija → „Luśija”), a w imionach
 # angielskich i hiszpańskich „s” jest twarde. Apostrof rozdziela głoski bez pauzy — zmierzone na lektorze:
@@ -2505,6 +2513,22 @@ def _name_sub(match):
 def english_names_pl(text):
     """Angielskie i hiszpańskie imiona/wtrącenia → ich wymowa zapisana po polsku, z zachowaniem odmiany."""
     text = _NAME_RE.sub(_name_sub, text or "")
+    return re.sub(r"[A-Za-zÀ-ÿ]+", _spanish_word, text)
+
+
+def _matched_name(match):
+    for key, value in match.groupdict().items():
+        if value is None:
+            continue
+        if key.startswith("s"):
+            return next(n for n in ENGLISH_NAMES if n[:-1] == value and n[-1:] in "ao" and len(n) >= 5)
+        return value
+    return None
+
+
+def voicestudio_names(text):
+    """Dla OmniVoice: angielskie zostaje w oryginale (powie je po angielsku), hiszpańskie po polsku jak w Supertonic."""
+    text = _NAME_RE.sub(lambda m: _name_sub(m) if _matched_name(m) in SPANISH_SPOKEN else m.group(0), text or "")
     return re.sub(r"[A-Za-zÀ-ÿ]+", _spanish_word, text)
 
 
@@ -3721,9 +3745,9 @@ class MaleLektor:
         speed, stretch = lektor_speed_split(pace, text)
         rate = speed * stretch / LEKTOR_SPEED  # 1,0 = zwykłe tempo lektora
         prev, at = self._cloud_prev
-        # imiona jak w Supertonic (Lucia → Lus'ija, Jason → Dżejson); reszta polish_pronounce to obejścia Supertonic
+        # angielskie nazwy w oryginale, hiszpańskie spolszczone (Lucia → Lus'ija); polish_pronounce to obejścia Supertonic
         audio = cloud.synth(
-            english_names_pl(text), speed=rate,
+            voicestudio_names(text), speed=rate,
             previous="" if voice else (prev if time.monotonic() - at < 12.0 else ""), voice=voice,
         )
         if audio is None:

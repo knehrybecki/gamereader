@@ -198,7 +198,8 @@ class MemoryCapTest(unittest.TestCase):
 
 
 class VoiceStudioNamesTest(unittest.TestCase):
-    """Imiona bohaterów VoiceStudio czyta tak jak Supertonic: „Lucia” brzmi „Lus'ija”, nie tak, jak się pisze."""
+    """VoiceStudio (OmniVoice) mówi angielskie nazwy po angielsku z oryginalnego zapisu — spolszczenie dla Supertonic
+    psuło je („Wajs S'iti” → „wajce ścici”). Lucia i imiona hiszpańskie zostają po hiszpańsku (Lus'ija)."""
 
     def spoken_by_voicestudio(self, text):
         lektor = ge.MaleLektor.__new__(ge.MaleLektor)
@@ -218,12 +219,20 @@ class VoiceStudioNamesTest(unittest.TestCase):
         lektor._synth_cloud(Cloud(), text, "out.wav", 1.0, 0.0)
         return sent[0]
 
-    def test_gta_names_are_pronounced(self):
-        spoken = self.spoken_by_voicestudio("Lucia, wsiadaj. Jason czeka w Vice City.")
-        self.assertEqual(spoken, "Lus'ija, wsiadaj. Dżejson czeka w Wajs S'iti.")
+    def test_english_stays_english_lucia_spanish(self):
+        spoken = self.spoken_by_voicestudio("Lucia, wsiadaj. Jason czeka w Vice City przy Ocean Beach.")
+        self.assertEqual(spoken, "Lus'ija, wsiadaj. Jason czeka w Vice City przy Ocean Beach.")
 
-    def test_declined_name_keeps_its_ending(self):
-        self.assertIn("Lus'iję", self.spoken_by_voicestudio("Lucię już złapali."))
+    def test_declined_names(self):
+        self.assertEqual(self.spoken_by_voicestudio("Lucię już złapali, Jasona szukają."),
+                         "Lus'iję już złapali, Jasona szukają.")
+
+    def test_spanish_names_keep_spanish_pronunciation(self):
+        self.assertEqual(self.spoken_by_voicestudio("García mówi, że policía jedzie."),
+                         ge.english_names_pl("García mówi, że policía jedzie."))
+
+    def test_supertonic_still_respells_english(self):
+        self.assertEqual(ge.english_names_pl("Jason w Vice City."), "Dżejson w Wajs S'iti.")
 
     def test_supertonic_only_tricks_stay_out(self):
         # „staary” to obejście Supertonic (czytał „stery”) — OmniVoice przeciągnąłby „a”
