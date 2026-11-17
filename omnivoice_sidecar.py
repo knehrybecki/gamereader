@@ -280,7 +280,7 @@ def main():
                     del voices[next(iter(voices))]
                 reply({"id": job.get("id"), "ok": True, "secs": round(time.monotonic() - started, 2)})
                 continue
-            speed = max(0.7, min(1.3, float(job.get("speed") or 1.0)))
+            speed = max(0.7, min(1.5, float(job.get("speed") or 1.0)))  # jak OMNI_SPEED_RANGE w silniku
             requested_voice = job.get("voice")
             if requested_voice and requested_voice not in voices:
                 reply({"id": job.get("id"), "ok": False, "voice": None, "error": f"brak aktywnej próbki mówcy {requested_voice}"})
