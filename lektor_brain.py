@@ -43,6 +43,7 @@ BRAIN_IDLE_UNLOAD_SEC = 600.0
 # pamięć podręczna buforów MLX. Domyślny limit MLX to ~1,5× zalecanej pamięci GPU
 # i rośnie aż tam (na tym Macu ~55 GB) — zwolnione tensory ze STT i modelu decyzji zostają w RAM.
 BRAIN_MLX_CACHE_BYTES = 256 * 1024 * 1024
+BRAIN_YIELD_MAX_SEC = 3.0  # najdłużej tyle pytanie do modelu czeka na koniec syntezy lektora
 # sufit aktywnej pamięci MLX: wagi Qwen 4-bit (~3 GB) + Parakeet + aktywacje, z zapasem
 MLX_MEMORY_LIMIT_BYTES = 12 * 1024 * 1024 * 1024
 
@@ -148,6 +149,7 @@ class LektorBrain:
         self._thread = None
         self.ready = False
         self.failed = None
+        self.yield_to = None  # callable: True, gdy lektor VoiceStudio właśnie syntezuje (GPU dla niego)
         self.model = None
         self.tok = None
         self._letters = {}
@@ -193,6 +195,21 @@ class LektorBrain:
                     return None
                 self._cond.wait(left)
 
+    def _wait_for_gpu(self, max_wait=BRAIN_YIELD_MAX_SEC):
+        """Lektor ma pierwszeństwo do GPU: kolejne pytanie do modelu czeka, aż skończy się synteza głosu.
+        18.11: oba modele naraz — synteza kwestii 1,5–3,6 s zamiast ~1 s, lektor nie nadążał za napisami."""
+        check = getattr(self, "yield_to", None)
+        if check is None:
+            return
+        deadline = time.monotonic() + max_wait
+        while time.monotonic() < deadline:
+            try:
+                if not check():
+                    return
+            except Exception:
+                return
+            time.sleep(0.02)
+
     # --- wątek modelu --------------------------------------------------------------------
     def _run(self):
         cap_mlx_cache()
@@ -221,6 +238,7 @@ class LektorBrain:
                 return
             result = None
             try:
+                self._wait_for_gpu()
                 t0 = time.monotonic()
                 if kind == "heard":
                     result = {"radio": self._ask(text, *RADIO_QUESTION)[0], "important": None}
@@ -229,6 +247,7 @@ class LektorBrain:
                 else:
                     result = {"dialog": self._ask(text, *DIALOGUE_QUESTION)[0], "info": None}
                     if result["dialog"] >= INFO_MIN_DIALOGUE:
+                        self._wait_for_gpu()
                         result["info"] = self._ask(text, *INFO_QUESTION)[1]
                 ms = (time.monotonic() - t0) * 1000
                 if ms > 400:

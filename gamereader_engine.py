@@ -5395,6 +5395,8 @@ class Engine:
         self.voice = VoiceActivity()
         # „open jev”: mały model w tle ocenia napisy (dialog czy śmieć z ekranu, czy niesie informację)
         self.brain = LektorBrain(log=log_timing) if LektorBrain is not None and brain_supported() else None
+        if self.brain is not None:
+            self.brain.yield_to = self._voice_synth_busy  # lektor VoiceStudio ma pierwszeństwo do GPU
         self._recurring = RecurringFragments()
         self._junk_logged = ""
         # ostatnie przeczytane kwestie (czas, tekst) — do rozpoznania napisu, który tylko urósł
@@ -5647,6 +5649,12 @@ class Engine:
                                         expects_english=lambda: not self._pl_subs_active)
         else:
             self.speakers = None
+
+    def _voice_synth_busy(self):
+        """Czy lektor VoiceStudio właśnie syntezuje (proces OmniVoice na GPU) — wtedy model decyzji czeka."""
+        cloud = getattr(getattr(self, "lektor", None), "cloud", None)
+        lock = getattr(cloud, "lock", None)
+        return bool(lock is not None and lock.locked())
 
     def _skip_for_player_controls(self):
         """Czy pominąć klatkę, bo odtwarzacz w przeglądarce pokazuje pasek sterowania (na dole tytuł, nie dialog).
