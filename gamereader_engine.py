@@ -1168,6 +1168,8 @@ HEARD_REPEAT_MIN_FOLD = 10
 HEARD_CONVO_SEC = 15.0
 AUDIO_MIN_VOICED = 0.10  # mowa: 0,17 pod szumem 6 dB … 0,35 czysta; szum i wybuchy: 0,00
 # kwestia czekająca w kolejce dłużej niż tyle sekund (a jest już nowsza) — przepada, lektor leci dalej
+# kwestia do tylu znaków (2–3 krótkie zdania, ~2,5 s mowy) nie traci zdań przy skracaniu (18.11: „Są. Przy barze.” → „Są.”)
+SHORT_LINE_KEEP_CHARS = 40
 CATCH_UP_STALE_SEC = 6.0  # było 2,0: lektor czyta kwestię ~4 s, więc wypadała prawie każda poprzednia (18.11)
 # model decyzji (lektor_brain): poniżej tego p(dialog) napis to nie kwestia postaci; napis „podejrzany”
 # wg reguł (menu, przyciski) odpada już przy wyższym progu. Kwestia bez informacji (p < próg) w zrywie
@@ -2916,7 +2918,9 @@ def log_timing(line):
 # Model działa w osobnym procesie Pythonem z VoiceStudio (torch na GPU Maca), ładuje się raz.
 VOICESTUDIO_ROOT = Path(os.environ.get("VOICESTUDIO_ROOT") or Path.home() / "voice-studio-projekty/VoiceStudio")
 VOICEPACK_DIR = CONFIG_PATH.parent / "voicepacks"
-OMNI_STEPS = 8  # z krótkim wzorcem (~3 s) 8 kroków = ~0,6–0,8 s na kwestię
+# 18.11 (prawdziwy proces VoiceStudio, lektor-filmowy, 6 kwestii): 8 kroków 1,72 s / 4 błędne słowa na 33,
+# 6 kroków 1,22 s / 0 na 33, 5 kroków 1,05 s / 2 na 33 — 6 = o 30 % szybciej bez utraty zrozumiałości
+OMNI_STEPS = 6
 OMNI_TIMEOUT = 8.0
 # OmniVoice z natury czyta ~18 zn/s — lektor filmowy ~15–16 zn/s (głosy z opisu, np. lektor-M04: 13,9 liter/s)
 OMNI_SPEED_SCALE = 0.87
@@ -6626,9 +6630,12 @@ class Engine:
             text = condense_polish(text, level=level)
         sentences = re.findall(r"[^.!?…]+(?:[.!?…]+|$)", text or "")
         total_sentences = len(sentences)
+        # krótka kwestia nie traci treści: wycięcie zdania oszczędza ~0,5 s, a niszczy sens („Są. Przy barze.” → „Są.”);
+        # same wtrącenia („Tak.”) dalej mogą wypaść
+        may_drop = len(normalize_text(text or "")) > SHORT_LINE_KEEP_CHARS
         # całe zdania ze starszych kwestii wypadają przy 2+ zaległych napisach — inaczej ginie kontekst
         min_parts = 2 if getattr(self, "catch_up", False) else 3
-        while len(parts or []) >= min_parts and len(sentences) > 1 and self.lektor.overload(" ".join(sentences), seconds) > 1.15:
+        while may_drop and len(parts or []) >= min_parts and len(sentences) > 1 and self.lektor.overload(" ".join(sentences), seconds) > 1.15:
             # najnowsze zdanie zostaje; najpierw wypadają wtrącenia („Dobra.”, „Jadę!”), potem najstarsze
             sentences.pop(next((i for i, s_ in enumerate(sentences[:-1]) if is_interjection(s_)), 0))
         # jedna kwestia z kilku zdań, która się nie mieści: wtrącenia („Tak.”, „Jadę!”) wypadają przed
@@ -6642,7 +6649,7 @@ class Engine:
         # lektor spóźniony, a kwestia wciąż długa: końcowa krótka uwaga („Teraz, to pierwsze wrażenie!”) wypada —
         # jak u lektora w filmie, który pomija dopowiedzenia, żeby zdążyć z treścią
         # (decyduje model decyzji, czy zdanie niesie informację; bez niego — tylko wtrącenie do 2 słów)
-        for _ in range(forced):
+        for _ in range(forced if may_drop else 0):
             if len(sentences) < 2 or not (is_trailing_remark(sentences[-1]) and self._skippable(sentences[-1])):
                 break
             sentences.pop()
