@@ -3618,6 +3618,13 @@ class SpeakerBank:
                 self._forget(loser, cloud, alias=nearest)
 
 
+def decision_model_wanted(cfg):
+    """Model decyzji (Qwen na MLX: „czy to dialog?”, „czy niesie treść?”) — domyślnie wyłączony.
+    18.11: liczył na GPU razem z lektorem VoiceStudio, synteza 1,5–2,5 s zamiast ~1 s i lektor nie nadążał;
+    śmieci odsiewają reguły, skracanie przy spóźnieniu działa na regułach wtrąceń. Włącza cfg „decisionModel”."""
+    return bool((cfg or {}).get("decisionModel", False))
+
+
 # Głosy Jasona i Lucii (przełącznik „heroVoices”): gotowe próbki ze zwiastuna zamiast odkrywania postaci w grze.
 # Próg barwy z pomiaru 18.11 na Trailerze 2: Jason↔Jason 0,53–0,85, strażnik↔Jason 0,16–0,22.
 HEROES_DIR = CONFIG_PATH.parent / "heroes"
@@ -5394,7 +5401,8 @@ class Engine:
         # czy postać teraz mówi (dźwięk gry) — lektor wchodzi chwilę po niej, jak w filmie
         self.voice = VoiceActivity()
         # „open jev”: mały model w tle ocenia napisy (dialog czy śmieć z ekranu, czy niesie informację)
-        self.brain = LektorBrain(log=log_timing) if LektorBrain is not None and brain_supported() else None
+        self.brain = (LektorBrain(log=log_timing) if LektorBrain is not None and brain_supported()
+                      and decision_model_wanted(self.cfg) else None)
         if self.brain is not None:
             self.brain.yield_to = self._voice_synth_busy  # lektor VoiceStudio ma pierwszeństwo do GPU
         self._recurring = RecurringFragments()

@@ -42,5 +42,16 @@ class GpuPriorityTest(unittest.TestCase):
         self.assertFalse(eng._voice_synth_busy())
 
 
+class DecisionModelOffTest(unittest.TestCase):
+    """18.11: nawet z pierwszeństwem lektora synteza 1,5–2,5 s (bez modelu decyzji 0,97 s) — model zaczynał liczyć
+    między kwestiami i lektor startował w trakcie. Domyślnie wyłączony, włącza go cfg „decisionModel”: true."""
+
+    def test_off_by_default(self):
+        self.assertFalse(ge.decision_model_wanted({}))
+
+    def test_can_be_enabled(self):
+        self.assertTrue(ge.decision_model_wanted({"decisionModel": True}))
+
+
 if __name__ == "__main__":
     unittest.main()
