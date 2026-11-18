@@ -1148,7 +1148,7 @@ HEARD_REPEAT_MIN_FOLD = 10
 HEARD_CONVO_SEC = 15.0
 AUDIO_MIN_VOICED = 0.10  # mowa: 0,17 pod szumem 6 dB … 0,35 czysta; szum i wybuchy: 0,00
 # kwestia czekająca w kolejce dłużej niż tyle sekund (a jest już nowsza) — przepada, lektor leci dalej
-CATCH_UP_STALE_SEC = 2.0
+CATCH_UP_STALE_SEC = 6.0  # było 2,0: lektor czyta kwestię ~4 s, więc wypadała prawie każda poprzednia (18.11)
 # model decyzji (lektor_brain): poniżej tego p(dialog) napis to nie kwestia postaci; napis „podejrzany”
 # wg reguł (menu, przyciski) odpada już przy wyższym progu. Kwestia bez informacji (p < próg) w zrywie
 # wypada pierwsza — jak u lektora TV.
@@ -2550,8 +2550,20 @@ hola adiós gracias señor señora señorita vamos vámonos viene ven mira oye a
 rápido pasa hay tengo tienes quiero puedo vale claro bueno perdón favor dios mío jefe policía dinero casa
 """.split())
 _POLISH_ONLY = re.compile(r"[ąćęłńśźżĄĆĘŁŃŚŹŻ]")
+# zwykłe polskie słowa spoza słownika ocr_reading_rank — „A kogo tu stróże prawa przywiali.” odpadało jako śmieć
+_POLISH_COMMON = set("""
+nie się jest to że co jak tak na do czy już tylko ale mnie ja ty my wy on ona ono oni one dobra no tu tam tutaj
+teraz potem jeszcze ten ta te tego tej tym tych mi cię ciebie go jej mu nas was im ich są był była było byli będzie
+może mam masz ma mamy macie kogo kto komu czego gdzie kiedy dlaczego czemu bo żeby też sam sama wszystko coś nic
+nikt od po za dla przez przy bez pod nad przed albo ani więc chyba właśnie bardzo tylko tego temu jestem jesteś
+""".split())
 _POLISH_FUNCTION = set("nie się jest to że co jak tak na w z do czy już tylko ale mnie ja ty my wy on ona dobra no "
                        "tu tam jestem mam masz ci go jej mu".split())
+
+
+def polish_common_words(text):
+    """Ile w tekście zwykłych polskich słów (2+ litery) — odróżnia polszczyznę spoza słownika od śmieci OCR."""
+    return sum(1 for w in re.findall(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]{2,}", (text or "").lower()) if w in _POLISH_COMMON)
 
 
 def spanish_sentence(text):
@@ -6511,6 +6523,17 @@ class Engine:
         # spóźnienie nie skraca budżetu: lektor czyta w tempie napisu, a nie w 65 % tego czasu
         return max(natural, deadline - now, 1.0)
 
+    def _effective_lag(self, parts):
+        """Spóźnienie lektora do skracania i tempa: wygładzone _lag albo — gdy więcej — wiek najstarszego napisu
+        tej kwestii. Samo _lag odejmuje celowe czekanie na postać i 18.11 pokazywało ~1,5 s przy 2,7–4,6 s
+        od napisu do głosu, więc skracanie (od 2 s) i nadganianie się nie włączały."""
+        lag = float(getattr(self, "_lag", 0.0) or 0.0)
+        seen_at = getattr(self, "_seen_at", None) or {}
+        seen = [seen_at.get(p) for p in parts if seen_at.get(p)]
+        if seen:
+            lag = max(lag, time.monotonic() - min(seen))
+        return lag
+
     def _plan_line(self, src, translate, parts=None):
         """Tłumaczenie, podział na zdania i emocja kwestii: (tekst, fragmenty, przejęcie, tempo)."""
         if translate:
@@ -6537,7 +6560,7 @@ class Engine:
         text = self._drop_said_sentences(text)
         # lektor już teraz mówi później niż postać: skracamy nawet kwestię, która „by się zmieściła” —
         # tempo głosu zostaje, a spóźnienie nie narasta kwestia po kwestii
-        lag = getattr(self, "_lag", 0.0)
+        lag = self._effective_lag(parts or [src])
         forced = 2 if lag >= LAG_CONDENSE_STRONG else 1 if lag >= LAG_CONDENSE else 0
         if not translate and parts and len(parts) >= 2 and self.lektor.overload(text, seconds) > 1.0:
             keep = [p for p in parts[:-1] if not self._skippable(p)] + [parts[-1]]
@@ -6883,7 +6906,7 @@ class Engine:
             self._log_junk(src, f"pomijam — zła powtórka przeczytanej kwestii: {src[:70]!r}")
             return
         # „Thy co wedy atak eles.” — zła klatka właśnie przeczytanego napisu, bez ani jednego polskiego słowa
-        if (not should_translate(src) and ocr_reading_rank(src) <= 0
+        if (not should_translate(src) and ocr_reading_rank(src) <= 0 and polish_common_words(src) < 2
                 and len(re.findall(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+", src)) >= 3):
             self._log_junk(src, f"pomijam — odczyt bez polskich słów: {src[:70]!r}")
             return
