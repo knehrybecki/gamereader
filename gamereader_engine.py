@@ -5609,6 +5609,16 @@ class Engine:
         else:
             self.speakers = None
 
+    def _skip_for_player_controls(self):
+        """Czy pominąć klatkę, bo odtwarzacz w przeglądarce pokazuje pasek sterowania (na dole tytuł, nie dialog).
+
+        Ręcznie zaznaczony obszar czytamy zawsze: wykrywanie patrzy na dół CAŁEGO okna Chrome, a przy YouTube nie na
+        pełnym ekranie czerwone elementy strony pod filmem udawały pasek postępu — 18.11 pętla pomijała każdą klatkę
+        przez minuty i lektor milczał przy widocznych napisach."""
+        if self._source_kind() != "chrome" or getattr(self, "lock_region", False):
+            return False
+        return player_controls_visible(self.source_info)
+
     def _pick_voice(self, parts, src, translate):
         """(klucz głosu postaci albo None = lektor, czy pominąć kwestię). Bohaterowie: imię z napisu > barwa > lektor,
         nigdy cisza. Stare klonowanie: tryb ścisły (cfg „cloneOnly”) każe milczeć bez próbki postaci."""
@@ -7092,7 +7102,7 @@ class Engine:
             try:
                 self._sync_remote_band()
                 # przeglądarka: przy widocznym pasku sterowania nie czytaj (tytuł filmu to nie dialog)
-                if self._source_kind() == "chrome" and player_controls_visible(self.source_info):
+                if self._skip_for_player_controls():
                     now = time.monotonic()
                     if now - self._controls_logged > 5.0:
                         self._controls_logged = now
