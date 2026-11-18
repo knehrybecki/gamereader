@@ -5337,12 +5337,11 @@ class Engine:
         self._sync_voice()
         self.translator = ArgosTranslator()
         # klonowanie głosów postaci: tylko z lektorem VoiceStudio (OmniVoice); domyślnie wyłączone, cfg "cloneVoices": true włącza
+        # głosy Jasona i Lucii z gotowych próbek: cfg "heroVoices" (domyślnie wyłączone; wygrywa z klonowaniem)
         self.speakers = None
         self.clone_voices = bool(self.cfg.get("cloneVoices", False))
-        if self.clone_voices:
-            self.speakers = SpeakerBank(lambda: self.lektor.cloud, lambda a: self.stt.transcribe(a), log=log_timing,
-                                    is_lektor=((lambda a, b: self.lektor.speaking_between(a, b)) if os.environ.get("LIVEDUB_SPEAKER_GUARD") else None),
-                                    expects_english=lambda: not self._pl_subs_active)
+        self.hero_voices = bool(self.cfg.get("heroVoices", False))
+        self._rebuild_speakers()
         if LlmTranslator is not None and llm_translate_wanted():
             # slang po polsku zamiast dosłownego Argos; Argos zostaje zapasem (model ładuje się w tle)
             self.translator = LlmTranslator(self.translator, log=log_timing)
@@ -5517,6 +5516,7 @@ class Engine:
             "lektorVoice": self.lektor.voice,
             "omniPack": getattr(self, "omni_pack", ""),
             "cloneVoices": getattr(self, "clone_voices", False),
+            "heroVoices": getattr(self, "hero_voices", False),
             "omniPacks": voicepacks() if voicestudio_python() else [],
         }
 
@@ -5569,6 +5569,7 @@ class Engine:
                 "lektorEngineChosen": getattr(self, "_engine_chosen", False),
                 "omniPack": self.omni_pack,
                 "cloneVoices": self.clone_voices,
+                "heroVoices": self.hero_voices,
             }
         )
 
@@ -5585,19 +5586,56 @@ class Engine:
             self.emit({"event": "status", "text": "Ustawienia zapisane."})
         self.emit({"event": "state", **self.snapshot()})
 
+    def _rebuild_speakers(self):
+        """Bank głosów postaci wg przełączników: bohaterowie (HeroBank) > klonowanie (SpeakerBank) > brak."""
+        want = HeroBank if getattr(self, "hero_voices", False) else (
+            SpeakerBank if getattr(self, "clone_voices", False) else None)
+        old = getattr(self, "speakers", None)
+        if old is not None and type(old) is want:
+            old.reset()
+            return
+        if old is not None:
+            old.close()
+        if want is HeroBank:
+            self.speakers = HeroBank(lambda: self.lektor.cloud, log=log_timing)
+        elif want is SpeakerBank:
+            self.speakers = SpeakerBank(lambda: self.lektor.cloud, lambda a: self.stt.transcribe(a), log=log_timing,
+                                        is_lektor=((lambda a, b: self.lektor.speaking_between(a, b)) if os.environ.get("LIVEDUB_SPEAKER_GUARD") else None),
+                                        expects_english=lambda: not self._pl_subs_active)
+        else:
+            self.speakers = None
+
+    def _pick_voice(self, parts, src, translate):
+        """(klucz głosu postaci albo None = lektor, czy pominąć kwestię). Bohaterowie: imię z napisu > barwa > lektor,
+        nigdy cisza. Stare klonowanie: tryb ścisły (cfg „cloneOnly”) każe milczeć bez próbki postaci."""
+        bank = getattr(self, "speakers", None)
+        cloud = getattr(self.lektor, "cloud", None)
+        seen0 = min((t for t in (self._seen_at.get(part) for part in parts) if t), default=None)
+        if isinstance(bank, HeroBank):
+            if cloud is None or not getattr(cloud, "ready", False):
+                return None, False
+            for part in parts:
+                name = colon_speaker(part)
+                if name:
+                    key = bank.key_for_name(name)
+                    self._timing(f"bohaterowie: imię {name} w napisie → {key.split('_', 1)[1] if key else 'lektor'}")
+                    return key, False
+            voice = bank.voice_for(seen0, wait=HERO_WAIT_SEC, text=None) if seen0 and bank.any_ready() else None
+            if voice:
+                self._timing(f"bohaterowie: kwestia głosem {voice.split('_', 1)[1]}: {parts[-1][:60]!r}")
+            return voice, False
+        voice = None
+        if bank is not None and bank.any_ready() and cloud is not None and seen0:
+            voice = bank.voice_for(seen0, wait=SPEAKER_WAIT_SEC, text=src if translate else None)
+        skip = (bank is not None and not voice and self.cfg.get("cloneOnly", True)
+                and cloud is not None and getattr(cloud, "ready", False))
+        return voice, skip
+
     def configure(self, data):
-        if "cloneVoices" in data:
-            self.clone_voices = bool(data["cloneVoices"])
-            if self.speakers is not None:
-                self.speakers.reset()
-            if self.clone_voices and self.speakers is None:
-                self.speakers = SpeakerBank(lambda: self.lektor.cloud, lambda a: self.stt.transcribe(a), log=log_timing,
-                                    is_lektor=((lambda a, b: self.lektor.speaking_between(a, b)) if os.environ.get("LIVEDUB_SPEAKER_GUARD") else None),
-                                    expects_english=lambda: not self._pl_subs_active)
-            elif not self.clone_voices:
-                if self.speakers is not None:
-                    self.speakers.close()
-                self.speakers = None
+        if "cloneVoices" in data or "heroVoices" in data:
+            self.clone_voices = bool(data.get("cloneVoices", self.clone_voices))
+            self.hero_voices = bool(data.get("heroVoices", self.hero_voices))
+            self._rebuild_speakers()
         if "mode" in data:
             self.mode = normalize_mode(data["mode"])
         if "device" in data:
@@ -6314,19 +6352,12 @@ class Engine:
                 with self._ready_lock:
                     ready = self._ready.pop(src, None)
                 # kto mówi: jeśli rozpoznana postać ma gotowy głos, czytamy nim — zapas z syntezy zwykłym głosem odpada
-                voice = None
-                bank = getattr(self, "speakers", None)
-                if bank is not None and bank.any_ready() and getattr(self.lektor, "cloud", None) is not None:
-                    seen0 = min((t for t in (self._seen_at.get(part) for part in parts) if t), default=None)
-                    if seen0:
-                        voice = bank.voice_for(seen0, wait=SPEAKER_WAIT_SEC, text=src if translate else None)
+                voice, skip = self._pick_voice(parts, src, translate)
                 if voice:
                     ready = None
                 # tryb ścisły (domyślny, cfg „cloneOnly”): bez próbki głosu tej postaci lektor milczy — zwykły głos
                 # domyślny nie czyta za postacie. Działa tylko, gdy klonowanie jest naprawdę dostępne (lektor VoiceStudio).
-                cloud = getattr(self.lektor, "cloud", None)
-                if (bank is not None and not voice and self.cfg.get("cloneOnly", True)
-                        and cloud is not None and getattr(cloud, "ready", False)):
+                if skip:
                     now = time.monotonic()
                     if now - getattr(self, "_clone_wait_note", 0.0) > 20.0:
                         self._clone_wait_note = now

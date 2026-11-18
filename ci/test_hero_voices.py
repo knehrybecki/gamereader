@@ -133,5 +133,89 @@ class ColonSpeakerTest(unittest.TestCase):
         self.assertIsNone(bank.key_for_name("LUCA"))  # inne imię = lektor, nie najbliższy bohater
 
 
+class PickVoiceTest(unittest.TestCase):
+    """Kto czyta kwestię: imię z napisu > barwa głosu > lektor. W trybie bohaterów nigdy cisza."""
+
+    def engine(self, bank, cfg=None):
+        from types import SimpleNamespace
+
+        eng = ge.Engine.__new__(ge.Engine)
+        eng.speakers = bank
+        eng.lektor = SimpleNamespace(cloud=FakeCloud())
+        eng.cfg = dict(cfg or {})
+        eng._seen_at = {}
+        eng._timing = lambda *_a: None
+        eng.emit = lambda *_a: None
+        return eng
+
+    def hero_bank(self, voice=None):
+        tmp = heroes_dir("jason", "lucia")
+        self.addCleanup(tmp.cleanup)
+        bank = ge.HeroBank(lambda: FakeCloud(), heroes_dir=tmp.name)
+        self.addCleanup(bank.close)
+        bank._handle(speech("jason"), 1.0, 4.0, False)
+        bank.any_ready = lambda: True
+        self.calls = []
+
+        def voice_for(t, wait=0.0, text=None):
+            self.calls.append((wait, text))
+            return voice
+
+        bank.voice_for = voice_for
+        return bank
+
+    def test_name_wins_over_voice(self):
+        eng = self.engine(self.hero_bank(voice="hero_lucia"))
+        ge.strip_colon_speaker("JASON: Uciekamy stąd, szybko.")
+        eng._seen_at["Uciekamy stąd, szybko."] = time.monotonic()
+        self.assertEqual(eng._pick_voice(["Uciekamy stąd, szybko."], "Uciekamy stąd, szybko.", False), ("hero_jason", False))
+        self.assertEqual(self.calls, [])
+
+    def test_name_in_one_part_of_line_decides(self):
+        eng = self.engine(self.hero_bank(voice=None))
+        ge.strip_colon_speaker("LUCIA: Gdzie byłeś całą noc?")
+        parts = ["Hej.", "Gdzie byłeś całą noc?"]
+        self.assertEqual(eng._pick_voice(parts, " ".join(parts), False), ("hero_lucia", False))
+
+    def test_other_name_means_lektor(self):
+        eng = self.engine(self.hero_bank(voice="hero_jason"))
+        ge.strip_colon_speaker("LUCA: Don Torrisi czeka na nas.")
+        self.assertEqual(eng._pick_voice(["Don Torrisi czeka na nas."], "Don Torrisi czeka na nas.", False), (None, False))
+
+    def test_voice_match_used_without_name(self):
+        eng = self.engine(self.hero_bank(voice="hero_lucia"))
+        eng._seen_at["Musimy porozmawiać."] = time.monotonic()
+        self.assertEqual(eng._pick_voice(["Musimy porozmawiać."], "Musimy porozmawiać.", False), ("hero_lucia", False))
+        self.assertEqual(self.calls, [(ge.HERO_WAIT_SEC, None)])
+
+    def test_unsure_means_lektor_never_silence(self):
+        eng = self.engine(self.hero_bank(voice=None), cfg={"cloneOnly": True})
+        eng._seen_at["Kto tam?"] = time.monotonic()
+        self.assertEqual(eng._pick_voice(["Kto tam?"], "Kto tam?", False), (None, False))
+
+    def test_old_clone_mode_unchanged(self):
+        bank = ge.SpeakerBank(lambda: FakeCloud(), lambda _a: "")
+        self.addCleanup(bank.close)
+        eng = self.engine(bank, cfg={"cloneOnly": True})
+        self.assertEqual(eng._pick_voice(["Kto tam?"], "Kto tam?", False), (None, True))
+
+    def test_hero_mode_wins_over_clone_mode(self):
+        from types import SimpleNamespace
+
+        eng = ge.Engine.__new__(ge.Engine)
+        eng.speakers = None
+        eng.lektor = SimpleNamespace(cloud=None)
+        eng.clone_voices, eng.hero_voices = True, True
+        eng._rebuild_speakers()
+        self.addCleanup(eng.speakers.close)
+        self.assertIsInstance(eng.speakers, ge.HeroBank)
+        eng.hero_voices = False
+        eng._rebuild_speakers()
+        self.assertIs(type(eng.speakers), ge.SpeakerBank)
+        eng.clone_voices = False
+        eng._rebuild_speakers()
+        self.assertIsNone(eng.speakers)
+
+
 if __name__ == "__main__":
     unittest.main()
