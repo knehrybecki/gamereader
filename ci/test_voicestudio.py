@@ -312,7 +312,7 @@ class VoiceStudioNamesTest(unittest.TestCase):
 
     def test_declined_names(self):
         self.assertEqual(self.spoken_by_voicestudio("Lucię już złapali, Jasona szukają."),
-                         "Lus'iję już złapali, Jasona szukają.")
+                         "Lus'iję już złapali, Dżejsona szukają.")  # 18.11: odmiana z polskiego zapisu wymowy
 
     def test_spanish_names_keep_spanish_pronunciation(self):
         self.assertEqual(self.spoken_by_voicestudio("García mówi, że policía jedzie."),

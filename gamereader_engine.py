@@ -2624,9 +2624,67 @@ def spanish_sentence(text):
     return spanish / len(words) >= 0.5
 
 
+def _vs_name(match):
+    """Imię z listy: samo zostaje w oryginale (OmniVoice powie je po angielsku), odmienione („Brianem”) — z polskiego
+    zapisu wymowy („Brajanem”), bo angielski rdzeń z polską końcówką model czyta jak napisane (18.11)."""
+    name, word = _matched_name(match), match.group(0)
+    if name in SPANISH_SPOKEN:
+        return _name_sub(match)
+    if word == name or word in ENGLISH_NAMES or _is_polish_word(word):
+        return word  # samo imię albo polskie słowo („Macie” to nie odmieniony „Mac”)
+    ending = word[len(os.path.commonprefix([word, name])):].lstrip("'")
+    # imię na -a/-o odmienia się jak Amanda (Amandy, Amandę); na spółgłoskę — Brianem, Briana, nie „Ricky”, „Hoseo”
+    endings = _PL_CASE_ENDINGS_A if name[-1:] in "ao" else _PL_CASE_ENDINGS_MASC
+    return _name_sub(match) if ending in endings else word
+
+
+_PL_CASE_ENDINGS_MASC = {"a", "u", "owi", "em", "ie", "om", "ami", "ach", "ów", "owie", "ego", "emu", "ym"}
+_PL_CASE_ENDINGS_A = _PL_CASE_ENDINGS_MASC | {"y", "i", "ą", "ę", "o", "e"}
+
+
+def _is_polish_word(word):
+    folded = polish_fold(word.lower())
+    return word.lower() in _POLISH_COMMON or folded in _POLISH_BY_FOLD or folded in _pl_diacritics()
+
+
+# imię spoza listy: polska końcówka + rdzeń z cechami angielskiej pisowni (tych połączeń nie ma w polskich słowach)
+_FOREIGN_INFLECTED = re.compile(r"\b([A-Z][a-z]{2,}?)(owie|owi|ami|ach|ego|emu|em|om|ów|ie|ym|a|u|ą|ę)\b")
+_ENGLISH_MARK = re.compile(r"th|sh|ck|oo|ee|ay|ey|oy|igh|ph|[xq]")  # bez „aw”: Warszawa, Sławek
+_EN_TO_PL = (
+    ("igh", "aj"), ("tch", "cz"), ("sh", "sz"), ("ch", "cz"), ("th", "t"), ("ph", "f"), ("ck", "k"), ("ee", "i"),
+    ("ea", "i"), ("oo", "u"), ("aw", "o"), ("ay", "ej"), ("ey", "ej"), ("oy", "oj"), ("ou", "au"), ("x", "ks"),
+    ("qu", "kł"), ("q", "k"), ("w", "ł"), ("j", "dż"),
+)
+
+
+def english_to_polish_spelling(stem):
+    """Przybliżony polski zapis wymowy angielskiego rdzenia imienia („Heath” → „Hit”, „Shawn” → „Szon”)."""
+    out = stem.lower()
+    for en, pl in _EN_TO_PL:
+        out = out.replace(en, pl)
+    out = re.sub(r"c(?=[eiy])", "s", out).replace("c", "k")
+    out = re.sub(r"(?<=[^aeiou])y$", "i", out)
+    out = re.sub(r"y(?=[aeiouąę])", "j", out)
+    return out[:1].upper() + out[1:]
+
+
+def _foreign_inflected(text):
+    def sub(match):
+        before = text[: match.start()].rstrip()
+        if not before or before[-1] in ".!?…:\"„":
+            return match.group(0)  # początek zdania: wielka litera nic nie mówi o imieniu
+        stem, ending = match.group(1), match.group(2)
+        if not _ENGLISH_MARK.search(stem.lower()) or _is_polish_word(match.group(0)):
+            return match.group(0)
+        return english_to_polish_spelling(stem) + ending
+    return _FOREIGN_INFLECTED.sub(sub, text)
+
+
 def voicestudio_names(text):
-    """Dla OmniVoice: angielskie zostaje w oryginale (powie je po angielsku), hiszpańskie po polsku jak w Supertonic."""
-    text = _NAME_RE.sub(lambda m: _name_sub(m) if _matched_name(m) in SPANISH_SPOKEN else m.group(0), text or "")
+    """Dla OmniVoice: angielskie zostaje w oryginale (powie je po angielsku), hiszpańskie po polsku jak w Supertonic;
+    odmienione imiona — polski zapis wymowy (z listy albo, poza nią, z reguł angielskiej pisowni)."""
+    text = _NAME_RE.sub(_vs_name, text or "")
+    text = _foreign_inflected(text)
     return re.sub(r"[A-Za-zÀ-ÿ]+", _spanish_word, text)
 
 
