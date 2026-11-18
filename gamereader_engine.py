@@ -2934,6 +2934,9 @@ VOICEPACK_DIR = CONFIG_PATH.parent / "voicepacks"
 # 18.11 (prawdziwy proces VoiceStudio, lektor-filmowy, 6 kwestii): 8 kroków 1,72 s / 4 błędne słowa na 33,
 # 6 kroków 1,22 s / 0 na 33, 5 kroków 1,05 s / 2 na 33 — 6 = o 30 % szybciej bez utraty zrozumiałości
 OMNI_STEPS = 6
+# menu „Jakość głosu”: Szybka = 6 kroków (~0,7 s na kwestię), Wysoka = 8 (~0,9–1 s, trochę gładszy głos);
+# kolejna kwestia syntezuje się w trakcie czytania poprzedniej, więc różnica czasu zwykle się chowa
+OMNI_QUALITY_STEPS = {"fast": OMNI_STEPS, "high": 8}
 OMNI_TIMEOUT = 8.0
 # OmniVoice z natury czyta ~18 zn/s — lektor filmowy ~15–16 zn/s (głosy z opisu, np. lektor-M04: 13,9 liter/s)
 OMNI_SPEED_SCALE = 0.87
@@ -2990,7 +2993,8 @@ class OmniVoiceLocal:
         except (TypeError, ValueError):
             guidance = 2.0
         # siła dopasowania w kluczu: zmiana w voice.json = nowe nagrania, nie stare z cache
-        self.tag = f"ov1|{self.pack}|{OMNI_STEPS}|{deepen:.2f}|{self.speed_scale:.3f}|{styles_tag}|g{guidance:.1f}"
+        self._tag_rest = f"{deepen:.2f}|{self.speed_scale:.3f}|{styles_tag}|g{guidance:.1f}"
+        self.steps = OMNI_STEPS  # liczba kroków syntezy idzie z każdym zleceniem — zmiana bez przeładowania modelu
         self.error = ""
         self.failed_until = 0.0
         self.ready = False
@@ -3121,6 +3125,11 @@ class OmniVoiceLocal:
         if self.on_ready:
             self.on_ready(self)
 
+    @property
+    def tag(self):
+        """Klucz cache nagrań: voicepack, kroki, pogrubienie, tempo, rejestry, siła dopasowania."""
+        return f"ov1|{self.pack}|{self.steps}|{self._tag_rest}"
+
     def job_speed(self, rate, style=None, voice=None):
         """Tempo lektora (1,0 = zwykłe) → speed dla OmniVoice: głos z pomiarem „lps” mówi ~OMNI_TARGET_LPS liter/s.
         Głos postaci (voice) ma własną próbkę — tempo jak przed kalibracją, niezależne od voicepacka lektora."""
@@ -3144,7 +3153,7 @@ class OmniVoiceLocal:
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
             out = CACHE_DIR / f"ov_job_{os.getpid()}_{self.voice_session}.wav"
             style = style if style in self.styles and not voice else None
-            job = {"text": text, "speed": self.job_speed(speed, style, voice), "out": str(out)}
+            job = {"text": text, "speed": self.job_speed(speed, style, voice), "out": str(out), "steps": self.steps}
             if language != "pl":
                 job["language"] = language
             if style:
@@ -5413,6 +5422,8 @@ class Engine:
         self.speakers = None
         self.clone_voices = bool(self.cfg.get("cloneVoices", False))
         self.hero_voices = bool(self.cfg.get("heroVoices", False))
+        self.voice_quality = "fast"
+        self.set_voice_quality(self.cfg.get("voiceQuality"))
         self._rebuild_speakers()
         if LlmTranslator is not None and llm_translate_wanted():
             # slang po polsku zamiast dosłownego Argos; Argos zostaje zapasem (model ładuje się w tle)
@@ -5592,6 +5603,7 @@ class Engine:
             "omniPack": getattr(self, "omni_pack", ""),
             "cloneVoices": getattr(self, "clone_voices", False),
             "heroVoices": getattr(self, "hero_voices", False),
+            "voiceQuality": getattr(self, "voice_quality", "fast"),
             "omniPacks": voicepacks() if voicestudio_python() else [],
         }
 
@@ -5610,6 +5622,7 @@ class Engine:
                     self._on_cloud_error(b.error if b.error else f"Lektor: VoiceStudio — {b.pack}.")
 
             backend.on_ready = ready
+            backend.steps = OMNI_QUALITY_STEPS[getattr(self, "voice_quality", "fast")]
             self.lektor.set_backend(backend)
         else:
             self.lektor.set_backend(None)
@@ -5645,6 +5658,7 @@ class Engine:
                 "omniPack": self.omni_pack,
                 "cloneVoices": self.clone_voices,
                 "heroVoices": self.hero_voices,
+                "voiceQuality": self.voice_quality,
             }
         )
 
@@ -5724,7 +5738,17 @@ class Engine:
                 and cloud is not None and getattr(cloud, "ready", False))
         return voice, skip
 
+    def set_voice_quality(self, value):
+        """„Jakość głosu” z menu: fast = 6 kroków syntezy VoiceStudio, high = 8; inna wartość nic nie zmienia."""
+        if value in OMNI_QUALITY_STEPS:
+            self.voice_quality = value
+        cloud = getattr(getattr(self, "lektor", None), "cloud", None)
+        if isinstance(cloud, OmniVoiceLocal):
+            cloud.steps = OMNI_QUALITY_STEPS[self.voice_quality]
+
     def configure(self, data):
+        if "voiceQuality" in data:
+            self.set_voice_quality(data["voiceQuality"])
         if "cloneVoices" in data or "heroVoices" in data:
             self.clone_voices = bool(data.get("cloneVoices", self.clone_voices))
             self.hero_voices = bool(data.get("heroVoices", self.hero_voices))

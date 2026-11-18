@@ -333,7 +333,8 @@ def main():
             scale = 2.0 if requested_voice else guidance  # siła dopasowania z voicepacka lektora; głosy postaci domyślnie
             language = job.get("language") if job.get("language") in ("pl", "es") else "pl"  # „es”: zdanie po hiszpańsku
             wav = model.generate(
-                text=job["text"], language=language, voice_clone_prompt=chosen, num_step=steps, speed=speed,
+                text=job["text"], language=language, voice_clone_prompt=chosen, speed=speed,
+                num_step=max(4, min(12, int(job.get("steps") or steps))),  # „Jakość głosu”: 6 albo 8
                 guidance_scale=scale,
             )[0]
             audio = np.clip(wav.squeeze().float().cpu().numpy(), -1.0, 1.0)

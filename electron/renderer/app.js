@@ -116,6 +116,7 @@ function applyState(msg) {
   if (typeof msg.autoStart === "boolean") document.getElementById("autoStart").checked = msg.autoStart;
   if (typeof msg.cloneVoices === "boolean") document.getElementById("cloneVoices").checked = msg.cloneVoices;
   if (typeof msg.heroVoices === "boolean") document.getElementById("heroVoices").checked = msg.heroVoices;
+  if (msg.voiceQuality) document.getElementById("voiceQuality").value = msg.voiceQuality;
   if (Array.isArray(msg.omniPacks)) {
     const engine = document.getElementById("lektorEngine");
     const studio = engine.querySelector('option[value="voicestudio"]');
@@ -137,6 +138,7 @@ function applyState(msg) {
     document.getElementById("omniPackRow").classList.toggle("hidden", msg.lektorEngine !== "voicestudio" || packs < 2);
     document.getElementById("cloneVoicesRow").classList.toggle("hidden", msg.lektorEngine !== "voicestudio");
     document.getElementById("heroVoicesRow").classList.toggle("hidden", msg.lektorEngine !== "voicestudio");
+    document.getElementById("voiceQualityRow").classList.toggle("hidden", msg.lektorEngine !== "voicestudio");
     document.getElementById("stVoiceRow").classList.toggle("hidden", msg.lektorEngine !== "supertonic");
   }
   if (msg.lektorVoice) document.getElementById("stVoice").value = msg.lektorVoice;
@@ -226,6 +228,7 @@ document.getElementById("game").onchange = (e) => send({ cmd: "config", game: e.
 document.getElementById("lektorEngine").onchange = (e) => send({ cmd: "config", lektorEngine: e.target.value });
 document.getElementById("stVoice").onchange = (e) => send({ cmd: "config", lektorVoice: e.target.value });
 document.getElementById("omniPack").onchange = (e) => send({ cmd: "config", omniPack: e.target.value });
+document.getElementById("voiceQuality").onchange = (e) => send({ cmd: "config", voiceQuality: e.target.value });
 document.getElementById("cloneVoices").onchange = (e) => {
   send({ cmd: "config", cloneVoices: e.target.checked });
   window.gr.releaseFocus();

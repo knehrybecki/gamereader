@@ -92,6 +92,13 @@
           <label class="muted" for="omniPack">Voicepack</label>
           <select id="omniPack"></select>
         </div>
+        <div id="voiceQualityRow" class="row hidden">
+          <label class="muted" for="voiceQuality">Jakość głosu</label>
+          <select id="voiceQuality" title="Szybka: 6 kroków syntezy (~0,7 s na kwestię). Wysoka: 8 kroków (~1 s, trochę gładszy głos).">
+            <option value="fast">Szybka (6 kroków)</option>
+            <option value="high">Wysoka (8 kroków)</option>
+          </select>
+        </div>
         <label id="cloneVoicesRow" class="toggle hidden" title="Zbieraj próbki głosów postaci i czytaj nimi dialogi. Dopóki postać nie ma dobrej próbki, lektor milczy (nie czyta głosem domyślnym); rozpoznawanie postaci może opóźnić kwestię.">
           <input id="cloneVoices" type="checkbox" /> Klonuj głosy postaci
         </label>

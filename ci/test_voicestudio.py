@@ -39,6 +39,7 @@ class OmniVoice:
         t = np.arange(int(24000 * 0.05 * len(text))) / 24000
         freq = (150 if voice_clone_prompt == "default" else 300) + (50 if language == "es" else 0)
         freq += 25 if guidance_scale != 2.0 else 0  # atrapa: inna siła dopasowania = inny ton
+        freq += 40 if num_step == 8 else 0  # atrapa: więcej kroków (jakość wysoka) = inny ton
         return [_Wav((np.sin(2 * np.pi * freq * t) * 0.3).astype("float32"))]
 """
 
@@ -130,6 +131,20 @@ class VoiceStudioTest(unittest.TestCase):
         try:
             self.wait_ready(backend)
             self.assertFalse(np.array_equal(plain, backend.synth("Dobrze wam poszło.")))
+        finally:
+            backend.close()
+
+    def test_high_quality_steps_reach_model(self):
+        import numpy as np
+
+        backend = ge.OmniVoiceLocal("lektor")
+        try:
+            self.wait_ready(backend)
+            fast_tag = backend.tag
+            fast = backend.synth("Dobrze wam poszło.")
+            backend.steps = 8  # „Jakość głosu: Wysoka” — bez przeładowania modelu
+            self.assertNotEqual(fast_tag, backend.tag)  # cache nie poda nagrania z 6 kroków
+            self.assertFalse(np.array_equal(fast, backend.synth("Dobrze wam poszło.")))
         finally:
             backend.close()
 
