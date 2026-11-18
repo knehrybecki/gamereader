@@ -98,6 +98,21 @@ class VoiceStudioTest(unittest.TestCase):
         finally:
             backend.close()
 
+    def test_hero_voice_from_sample_file(self):
+        import numpy as np
+
+        sample = Path(self.tmp.name) / "jason.wav"
+        sample.write_bytes(b"RIFF")
+        backend = ge.OmniVoiceLocal("lektor")
+        try:
+            self.wait_ready(backend)
+            default = backend.synth("Wsiadaj.")
+            self.assertIsNotNone(backend.set_voice_file("hero_jason", sample, "I'm here for Lucia."))
+            self.assertFalse(np.array_equal(default, backend.synth("Wsiadaj.", voice="hero_jason")))
+            self.assertTrue(sample.exists())  # próbka bohatera zostaje (to nie plik tymczasowy)
+        finally:
+            backend.close()
+
     def test_lively_register_uses_its_own_sample(self):
         import numpy as np
 

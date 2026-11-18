@@ -3003,6 +3003,20 @@ class OmniVoiceLocal:
         self.voice_rev.pop(key, None)
         self._ask({"op": "forget", "key": key}, 3.0)
 
+    def embed_file(self, wav_path):
+        """Wektor mówcy (znormalizowany) z gotowego pliku próbki albo None."""
+        answer = self._ask({"op": "embed", "wav": str(wav_path)}, 30.0)
+        vec = answer.get("emb") if answer.get("ok") else None
+        return np.asarray(vec, dtype=np.float32) if vec else None
+
+    def set_voice_file(self, key, wav_path, text):
+        """Głos postaci z gotowego pliku próbki w pełnej jakości (bohaterowie: 24 kHz, bez zapisu 16 kHz)."""
+        answer = self._ask({"op": "voice", "key": key, "wav": str(wav_path), "text": text}, 12.0)
+        if answer.get("ok"):
+            self.voice_rev[key] = self.voice_rev.get(key, 0) + 1
+            return float(answer.get("secs") or 0.0)
+        return None
+
     def set_voice(self, key, audio, text):
         """Zapamiętaj głos postaci z próbki; czas przygotowania albo None, gdy się nie udało."""
         path = self._write_wav16(audio, f"voice_{key}")
@@ -3556,6 +3570,110 @@ class SpeakerBank:
                 f"postacie: głos {key} gotowy ({sample.size / SAMPLE_RATE:.1f} s próbki, {took:.1f}s; "
                 f"transkrypcja próbki: {sample_text!r})"
             )
+
+
+# Głosy Jasona i Lucii (przełącznik „heroVoices”): gotowe próbki ze zwiastuna zamiast odkrywania postaci w grze.
+# Próg barwy z pomiaru 18.11 na Trailerze 2: Jason↔Jason 0,53–0,85, strażnik↔Jason 0,16–0,22.
+HEROES_DIR = CONFIG_PATH.parent / "heroes"
+HERO_MIN_SIM = 0.45
+HERO_WAIT_SEC = 0.8  # tyle kwestia czeka na wektor mówcy z gry (~0,1 s liczenia) — dłużej spóźniałby się lektor
+
+
+class HeroBank(SpeakerBank):
+    """Dwie zapisane z góry postacie (heroes/<imię>/sample.wav + sample.txt) — bez odkrywania nowych i bez zbierania
+    próbek z gry. Wypowiedź z gry dostaje bohatera tylko przy podobieństwie ≥ HERO_MIN_SIM; reszta czyta lektor."""
+
+    def __init__(self, cloud_getter, log=None, heroes_dir=None):
+        super().__init__(cloud_getter, lambda _audio: "", log=log)  # sama barwa, bez Parakeeta
+        self.heroes_dir = Path(heroes_dir or HEROES_DIR)
+        self._enrolled_for = None
+
+    def reset(self):
+        with self._cond:
+            super().reset()
+            self._enrolled_for = None  # nowy proces VoiceStudio nie zna głosów bohaterów
+
+    def _enroll(self, cloud):
+        heroes = {}
+        try:
+            folders = sorted(p for p in self.heroes_dir.iterdir() if p.is_dir())
+        except OSError:
+            folders = []
+        for folder in folders:
+            wav, txt = folder / "sample.wav", folder / "sample.txt"
+            if not (wav.is_file() and txt.is_file()):
+                continue
+            key = f"hero_{folder.name}"
+            try:
+                vec = cloud.embed_file(wav)
+                text = txt.read_text(encoding="utf-8").strip()
+                ok = vec is not None and cloud.set_voice_file(key, wav, text) is not None
+            except Exception as exc:
+                self._log(f"bohaterowie: {folder.name} — błąd próbki: {exc}")
+                continue
+            if not ok:
+                self._log(f"bohaterowie: {folder.name} — VoiceStudio nie przyjął próbki")
+                continue
+            vec = np.asarray(vec, dtype=np.float32).reshape(-1)
+            vec = vec / max(float(np.linalg.norm(vec)), 1e-9)
+            heroes[key] = {"centroid": vec, "n": 0.0, "pool": [], "ready": True, "hero": folder.name}
+        with self._cond:
+            self.speakers.clear()
+            self.speakers.update(heroes)
+            self._enrolled_for = cloud
+            self._cond.notify_all()
+        self._log(f"bohaterowie: gotowe głosy {', '.join(sp['hero'] for sp in heroes.values()) or 'żadne'}")
+
+    def _handle(self, audio, start, end, provisional, generation=None):
+        cloud = self._cloud()
+        if cloud is not None and getattr(cloud, "ready", False) and self._enrolled_for is not cloud:
+            self._enroll(cloud)
+        super()._handle(audio, start, end, provisional, generation)
+
+    def _assign(self, vec, seconds, create):
+        best, sim = None, None
+        for key, sp in self.speakers.items():
+            s = float(vec @ sp["centroid"])
+            if sim is None or s > sim:
+                best, sim = key, s
+        if best is None:
+            return None, None
+        hit = sim >= HERO_MIN_SIM
+        if create:  # ostateczny odczyt wypowiedzi — do strojenia progu na YouTube/grze
+            self._log(f"bohaterowie: wypowiedź {seconds:.1f}s, najbliżej {self.speakers[best]['hero']} "
+                      f"podobieństwo {sim:.2f} → {self.speakers[best]['hero'] if hit else 'lektor'}")
+        return (best if hit else None), max(-1.0, min(1.0, sim))
+
+    def _collect(self, key, audio, seconds, cloud, generation, vec=None):
+        return  # bohaterowie mają gotowe próbki
+
+    def key_for_name(self, name):
+        """Klucz bohatera po imieniu z napisu („JASON”, „Lucia”) albo None (inne imię, bohater niegotowy)."""
+        want = polish_fold(name or "").lower().strip()
+        with self._cond:
+            for key, sp in self.speakers.items():
+                if sp.get("ready") and polish_fold(sp.get("hero", "")).lower() == want:
+                    return key
+        return None
+
+    def voice_for(self, t, wait=0.0, text=None):
+        """Bohater mówiący w chwili pojawienia się napisu `t` albo None (ktoś inny / nie wiadomo → lektor)."""
+        deadline = time.monotonic() + max(0.0, wait)
+        if t <= 0 or time.monotonic() - t > SPEAKER_MATCH_TTL:
+            return None
+        with self._cond:
+            while True:
+                if self._closed or self._cloud() is not self._backend:
+                    return None
+                near = [e for e in self.timeline if e["start"] <= t + 0.9 and e["end"] >= t - 0.4]
+                found = min(near, key=lambda e: max(e["start"] - t, t - e["end"], 0.0), default=None)
+                if found is not None or time.monotonic() >= deadline:
+                    break
+                self._cond.wait(max(0.0, deadline - time.monotonic()))
+            key = found["key"] if found else None
+            if key and self.speakers.get(key, {}).get("ready"):
+                return key
+            return None
 
 
 class MaleLektor:
