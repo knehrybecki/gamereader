@@ -113,5 +113,25 @@ class HeroBankTest(unittest.TestCase):
         self.assertIsNone(bank.voice_for(now + 2.5, wait=0.1))
 
 
+class ColonSpeakerTest(unittest.TestCase):
+    """Imię z dwukropkiem przed kwestią („JASON: …”) — pewny sygnał, kto mówi; lektor i tak go nie czyta."""
+
+    def test_name_remembered_when_cut(self):
+        self.assertEqual(ge.strip_colon_speaker("JASON: Wsiadaj do auta."), "Wsiadaj do auta.")
+        self.assertEqual(ge.colon_speaker("Wsiadaj do auta."), "JASON")
+        self.assertEqual(ge.colon_speaker("wsiadaj do auta"), "JASON")  # po normalizacji OCR (wielkość, kropka)
+        self.assertIsNone(ge.colon_speaker("Coś zupełnie innego."))
+
+    def test_hero_key_by_name(self):
+        tmp = heroes_dir("jason", "lucia")
+        self.addCleanup(tmp.cleanup)
+        bank = ge.HeroBank(lambda: FakeCloud(), heroes_dir=tmp.name)
+        self.addCleanup(bank.close)
+        bank._handle(speech("jason"), 1.0, 4.0, False)
+        self.assertEqual(bank.key_for_name("Jason"), "hero_jason")
+        self.assertEqual(bank.key_for_name("LUCIA"), "hero_lucia")
+        self.assertIsNone(bank.key_for_name("LUCA"))  # inne imię = lektor, nie najbliższy bohater
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -13,7 +13,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -4736,8 +4736,30 @@ _COLON_SPEAKER = re.compile(
 )
 
 
+# imię wycięte z napisu → kto mówi (głosy bohaterów); ostatnie napisy, klucz po normalizacji OCR
+_COLON_SPEAKERS = OrderedDict()
+
+
+def _speaker_text_key(text):
+    return re.sub(r"\W+", " ", polish_fold(normalize_text(text or "")).lower()).strip()
+
+
+def colon_speaker(text):
+    """Imię, które strip_colon_speaker wyciął z napisu dającego `text` („JASON”), albo None."""
+    key = _speaker_text_key(text)
+    if not key:
+        return None
+    if key in _COLON_SPEAKERS:
+        return _COLON_SPEAKERS[key]
+    if len(key) >= 8:  # kwestia podzielona na części: część napisu z imieniem
+        for full, name in reversed(_COLON_SPEAKERS.items()):
+            if key in full or full in key:
+                return name
+    return None
+
+
 def strip_colon_speaker(text):
-    """„LUCA: Dlatego…” → „Dlatego…”. Imię z dwukropkiem przed kwestią lektor pomija.
+    """„LUCA: Dlatego…” → „Dlatego…”. Imię z dwukropkiem przed kwestią lektor pomija (zapamiętane: colon_speaker).
     Zostaje, gdy pierwsze słowo to zwykły początek zdania („Słuchaj: …”)."""
     m = _COLON_SPEAKER.match(text or "")
     if not m or len(m.group(1)) > 24 or len(m.group(2)) < 2:
@@ -4747,7 +4769,11 @@ def strip_colon_speaker(text):
         return text
     if any(polish_fold(w) in DIALOGUE_STARTERS for w in re.findall(r"[\wąćęłńóśźżĄĆĘŁŃÓŚŹŻ']+", m.group(1))):
         return text
-    return m.group(2).strip()
+    line = m.group(2).strip()
+    _COLON_SPEAKERS[_speaker_text_key(line)] = m.group(1).strip()
+    while len(_COLON_SPEAKERS) > 64:
+        _COLON_SPEAKERS.popitem(last=False)
+    return line
 
 
 def strip_speaker_label(text):
