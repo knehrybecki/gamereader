@@ -2993,7 +2993,14 @@ class OmniVoiceLocal:
         except (TypeError, ValueError):
             guidance = 2.0
         # siła dopasowania w kluczu: zmiana w voice.json = nowe nagrania, nie stare z cache
-        self._tag_rest = f"{deepen:.2f}|{self.speed_scale:.3f}|{styles_tag}|g{guidance:.1f}"
+        # odcisk plików próbki: nowa (np. oczyszczona z tła) próbka pod tą samą nazwą = nowe nagrania, nie stare z cache
+        sample = hashlib.sha1()
+        for wav in sorted((VOICEPACK_DIR / self.pack).glob("voice*.wav")):
+            try:
+                sample.update(wav.name.encode() + wav.read_bytes())
+            except OSError:
+                pass
+        self._tag_rest = f"{deepen:.2f}|{self.speed_scale:.3f}|{styles_tag}|g{guidance:.1f}|s{sample.hexdigest()[:10]}"
         self.steps = OMNI_STEPS  # liczba kroków syntezy idzie z każdym zleceniem — zmiana bez przeładowania modelu
         self.error = ""
         self.failed_until = 0.0

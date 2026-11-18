@@ -134,6 +134,16 @@ class VoiceStudioTest(unittest.TestCase):
         finally:
             backend.close()
 
+    def test_new_sample_gets_fresh_recordings(self):
+        # 18.11: oczyszczona próbka (bez tła z filmu) pod tą samą nazwą voicepacka — cache oddawał stare nagrania
+        pack = Path(self.tmp.name) / "voicepacks/lektor"
+        before = ge.OmniVoiceLocal("lektor").tag
+        (pack / "voice.wav").write_bytes(b"RIFF-oczyszczona")
+        self.assertNotEqual(before, ge.OmniVoiceLocal("lektor").tag)
+        changed = ge.OmniVoiceLocal("lektor").tag
+        (pack / "voice-zywy.wav").write_bytes(b"RIFF-zywy-oczyszczona")
+        self.assertNotEqual(changed, ge.OmniVoiceLocal("lektor").tag)
+
     def test_high_quality_steps_reach_model(self):
         import numpy as np
 
