@@ -2945,6 +2945,9 @@ FILM_CLEAN_FILTER = (
 # menu „Jakość głosu”: Szybka = 6 kroków (~0,7 s na kwestię), Wysoka = 8 (~0,9–1 s, trochę gładszy głos);
 # kolejna kwestia syntezuje się w trakcie czytania poprzedniej, więc różnica czasu zwykle się chowa
 OMNI_QUALITY_STEPS = {"fast": OMNI_STEPS, "high": 8}
+# 18.11: przy 6 krokach użytkownik słyszał artefakty i ucięte końcówki — domyślnie 8 (różnica czasu chowa się
+# pod czytanie poprzedniej kwestii), „Szybka” zostaje w menu
+VOICE_QUALITY_DEFAULT = "high"
 OMNI_TIMEOUT = 8.0
 # OmniVoice z natury czyta ~18 zn/s — lektor filmowy ~15–16 zn/s (głosy z opisu, np. lektor-M04: 13,9 liter/s)
 OMNI_SPEED_SCALE = 0.87
@@ -3944,6 +3947,11 @@ class MaleLektor:
         a = max(-1.0, min(1.0, float(arousal or 0.0)))
         a = round(a * 5) / 5  # stopnie co 0,2 — cache się powtarza
         params = lektor_voice_params(a)
+        cloud_lektor = (self.cloud is not None and not voice and time.monotonic() >= self.cloud.failed_until)
+        if cloud_lektor:
+            # lektor VoiceStudio równy jak w filmie: emocja nie zmienia tempa ani głośności (18.11: „zbyt duże
+            # różnice głosu zależnie od emocji”; szybsza emocja + nadganianie dawały ×1,6 i ucięte końcówki)
+            params = {**params, "speed": 1.0, "gain": 1.0}
         # tempo całej kwestii przychodzi z line_boost(); bez niego — z długości tego fragmentu
         length_pace = lektor_pace(text) if boost is None else 1.0
         pace = length_pace * float(self.tts_scale or 1.0) / params["speed"]
@@ -3982,7 +3990,8 @@ class MaleLektor:
         t0 = time.monotonic()
         stretch = None
         if not voice_tag.startswith("st"):
-            stretch = self._synth_cloud(cloud, text, raw, pace, pause, voice, None if voice else lektor_style(text, mood, a))
+            # jedna próbka lektora (bez „żywej”): druga barwa w środku sceny brzmiała jak inny lektor (18.11)
+            stretch = self._synth_cloud(cloud, text, raw, pace, pause, voice, None)
             if stretch is None:
                 path = CACHE_DIR / f"{text_key(key.replace(voice_tag, f'st15|{self.voice}', 1))}.wav"
                 if path.exists() and path.stat().st_size >= 64:
@@ -4029,7 +4038,8 @@ class MaleLektor:
         """Lektor z VoiceStudio; None = nie wyszło (lektor czyta Supertonic). Tempo w całości po stronie głosu."""
         # wprost z planu, bez limitów Supertonic (lektor_speed_split zwalniał krótkie i średnie kwestie do ~0,85,
         # bo Supertonic gubi przy nich głoski — OmniVoice nie); granice modelu pilnuje OmniVoiceLocal.job_speed
-        rate = max(0.7, min(1.6, 1.0 / max(0.5, pace)))  # 1,0 = zwykłe tempo lektora
+        # 1,0 = zwykłe tempo lektora; sufit nadganiania: szybciej OmniVoice gubi końcówki („Błagam.”) i robi artefakty
+        rate = max(0.7, min(LEKTOR_CLOUD_MAX_BOOST, 1.0 / max(0.5, pace)))
         prev, at = self._cloud_prev
         # zdanie całe po hiszpańsku: oryginalna pisownia i model hiszpański (wybór 18.11); w polskim zdaniu angielskie
         # nazwy w oryginale, hiszpańskie spolszczone (Lucia → Lus'ija); polish_pronounce to obejścia Supertonic
@@ -5441,7 +5451,7 @@ class Engine:
         self.speakers = None
         self.clone_voices = bool(self.cfg.get("cloneVoices", False))
         self.hero_voices = bool(self.cfg.get("heroVoices", False))
-        self.voice_quality = "fast"
+        self.voice_quality = VOICE_QUALITY_DEFAULT
         self.set_voice_quality(self.cfg.get("voiceQuality"))
         self._rebuild_speakers()
         if LlmTranslator is not None and llm_translate_wanted():
@@ -5622,7 +5632,7 @@ class Engine:
             "omniPack": getattr(self, "omni_pack", ""),
             "cloneVoices": getattr(self, "clone_voices", False),
             "heroVoices": getattr(self, "hero_voices", False),
-            "voiceQuality": getattr(self, "voice_quality", "fast"),
+            "voiceQuality": getattr(self, "voice_quality", VOICE_QUALITY_DEFAULT),
             "omniPacks": voicepacks() if voicestudio_python() else [],
         }
 
@@ -5641,7 +5651,7 @@ class Engine:
                     self._on_cloud_error(b.error if b.error else f"Lektor: VoiceStudio — {b.pack}.")
 
             backend.on_ready = ready
-            backend.steps = OMNI_QUALITY_STEPS[getattr(self, "voice_quality", "fast")]
+            backend.steps = OMNI_QUALITY_STEPS[getattr(self, "voice_quality", VOICE_QUALITY_DEFAULT)]
             self.lektor.set_backend(backend)
         else:
             self.lektor.set_backend(None)

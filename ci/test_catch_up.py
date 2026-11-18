@@ -32,7 +32,8 @@ class CatchUpTest(unittest.TestCase):
         self.assertEqual(lektor(False).line_boost("Chcę to zrobić po cichu.", 3.0, lag=3.0), 1.05)
 
     def test_voicestudio_gets_full_catch_up_tempo(self):
-        # pace 0,8 (tts 0,92 / boost 1,15) → tempo 1,25; limity Supertonic (LEKTOR_MAX_RATE) ucinały do ~1,13
+        # pace 0,8 (tts 0,92 / boost 1,15) → sufit nadganiania 1,15 (18.11: ×1,25+ gubiło końcówki); limity
+        # Supertonic (LEKTOR_MAX_RATE) ucinały do ~1,13
         lk = lektor(True)
         lk._cloud_prev = ("", 0.0)
         lk.on_cloud_error = None
@@ -48,7 +49,7 @@ class CatchUpTest(unittest.TestCase):
                 return ge.np.zeros(2400, dtype=ge.np.float32)
 
         lk._synth_cloud(Cloud(), "Chcę to zrobić po cichu.", "out.wav", 0.8, 0.0)
-        self.assertAlmostEqual(got["speed"], 1.25, places=2)
+        self.assertAlmostEqual(got["speed"], ge.LEKTOR_CLOUD_MAX_BOOST, places=2)
 
 
 if __name__ == "__main__":
