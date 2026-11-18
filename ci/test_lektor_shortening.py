@@ -357,5 +357,20 @@ class LooksPolishTest(unittest.TestCase):
             self.assertFalse(should_translate(text), text)
 
 
+class ShortLineKeptWholeTest(unittest.TestCase):
+    """18.11: przy spóźnieniu reguła bez modelu decyzji wyrzucała końcowe krótkie zdanie, nawet treść —
+    „Są. Przy barze.” → „Są.”, „Łokcie przy sobie. Wypychaj!” → „Łokcie przy sobie.” Krótka kwestia zostaje cała."""
+
+    def plan(self, text):
+        engine = make_engine(FakeTranslator(text), 1.0)
+        engine._lag = 3.0  # lektor spóźniony — skracanie wymuszone
+        engine._seen_at = {}
+        return engine._plan_line(text, False, [text])[0]
+
+    def test_short_line_is_read_whole_even_when_late(self):
+        self.assertEqual(self.plan("Są. Przy barze."), "Są. Przy barze.")
+        self.assertEqual(self.plan("Łokcie przy sobie. Wypychaj!"), "Łokcie przy sobie. Wypychaj!")
+
+
 if __name__ == "__main__":
     unittest.main()
