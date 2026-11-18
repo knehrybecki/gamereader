@@ -72,5 +72,28 @@ class PolishWordsTest(unittest.TestCase):
         self.assertLess(ge.polish_common_words("Thy co wedy atak eles."), 2)
 
 
+class QueueVariantsTest(unittest.TestCase):
+    """Dwa odczyty OCR tego samego napisu w kolejce nie są czytane jako dwie kwestie (18.11: 4,7 s na
+    „e bul o wydarzenie lata dla nas, dzieciaków. e E t wydarzenie lata dla…”, potem 3 kwestie pominięte)."""
+
+    def take(self, texts):
+        eng = engine_with_queue([0.5] * len(texts))
+        eng._queue = [(t, False, t) for t in texts]
+        eng._seen_at = {t: 99.5 for t in texts}
+        with patch.object(ge.time, "monotonic", return_value=100.0):
+            return eng._take_pending()
+
+    def test_garbled_variants_merge_into_best_reading(self):
+        item = self.take(["e E t wydarzenie lata dla nas, dzieciaków.", "e bul o wydarzenie lata dla nas, dzieciaków."])
+        self.assertEqual(item[3], ["e bul o wydarzenie lata dla nas, dzieciaków."])  # lepszy odczyt (więcej słów)
+
+    def test_different_lines_are_both_read(self):
+        item = self.take(["Mieli też przepiękną karuzelę.", "Kiedyś nocą się tam zakradliśmy z kumplem."])
+        self.assertEqual(len(item[3]), 2)
+
+    def test_short_line_is_not_a_variant_of_longer_one(self):
+        self.assertFalse(ge.ocr_variants("Hej.", "Hej. Mam samochód tego Raula i jadę pod wskazany adres."))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -235,6 +235,19 @@ def folds_match(fold_a, fold_b):
     return False
 
 
+def ocr_variants(a, b):
+    """Dwa odczyty OCR tego samego napisu („e bul o wydarzenie lata…” / „e E t wydarzenie lata…”): ten sam albo
+    dłuższy wspólny ciąg pokrywa ≥ 60 % krótszego (min. 12 znaków). Krótka kwestia („Hej.”) nie jest wariantem."""
+    if same_utterance(a, b):
+        return True
+    left, right = polish_fold(normalize_text(a or "").lower()), polish_fold(normalize_text(b or "").lower())
+    short = min(len(left), len(right))
+    if short < 12:
+        return False
+    block = SequenceMatcher(None, left, right, autojunk=False).find_longest_match(0, len(left), 0, len(right)).size
+    return block >= 0.6 * short
+
+
 def same_utterance(a, b):
     left = normalize_text(a or "").lower()
     right = normalize_text(b or "").lower()
@@ -6259,12 +6272,18 @@ class Engine:
             if getattr(self, "speakers", None) is not None and getattr(getattr(self, "lektor", None), "cloud", None) is not None:
                 limit = 1
             while len(parts) < limit and self._queue and self._queue[0][1] == first[1]:
-                parts.append(self._queue.pop(0))
+                item = self._queue.pop(0)
+                # drugi odczyt tego samego napisu nie idzie jako osobna kwestia — zostaje lepszy odczyt
+                twin = next((i for i, p in enumerate(parts) if ocr_variants(p[0], item[0])), None)
+                if twin is None:
+                    parts.append(item)
+                elif ocr_reading_rank(item[0]) > ocr_reading_rank(parts[twin][0]):
+                    parts[twin] = item
             self._prefetch_parts = None
             if not self._queue:
                 self.has_pending.clear()
         if len(parts) == 1:
-            src, translate, full = first
+            src, translate, full = parts[0]  # parts[0], nie first: lepszy odczyt mógł zastąpić pierwszy
             return src, translate, full, [src]
         srcs = [item[0] for item in parts]
         return _join_parts(srcs), first[1], parts[-1][2], srcs
