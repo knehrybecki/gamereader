@@ -2972,7 +2972,12 @@ class OmniVoiceLocal:
                 style_lps = 0.0
             self.styles[str(style)] = OMNI_TARGET_LPS / style_lps if style_lps > 1.0 else self.speed_scale
         styles_tag = ",".join(f"{k}:{v:.3f}" for k, v in sorted(self.styles.items()))
-        self.tag = f"ov1|{self.pack}|{OMNI_STEPS}|{deepen:.2f}|{self.speed_scale:.3f}|{styles_tag}"
+        try:
+            guidance = float(meta.get("guidance") or 2.0)
+        except (TypeError, ValueError):
+            guidance = 2.0
+        # siła dopasowania w kluczu: zmiana w voice.json = nowe nagrania, nie stare z cache
+        self.tag = f"ov1|{self.pack}|{OMNI_STEPS}|{deepen:.2f}|{self.speed_scale:.3f}|{styles_tag}|g{guidance:.1f}"
         self.error = ""
         self.failed_until = 0.0
         self.ready = False

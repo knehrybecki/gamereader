@@ -100,6 +100,17 @@ SHORT_LINE_LOW_TOKENS = 35
 SHORT_LINE_BOOST = 2.5
 
 
+def pack_guidance(pack):
+    """Siła dopasowania do próbki z voice.json („guidance”, domyślnie 2,0 jak w OmniVoice). Zależy od próbki:
+    18.11 lektor-filmowy 3,0 → podobieństwo do lektora 0,643 → 0,683 i szybciej, lektor-filmowy-2 3,0 → gorzej."""
+    try:
+        with open(f"{pack}/voice.json", encoding="utf-8") as handle:
+            value = float(json.load(handle).get("guidance") or 2.0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        value = 2.0
+    return max(1.0, min(4.0, value))
+
+
 def gentler_short_lines(model):
     """Łagodniejsze wydłużanie krótkich kwestii w estymatorze długości (brak estymatora = nic nie robi)."""
     est = getattr(model, "duration_estimator", None)
@@ -271,6 +282,7 @@ def main():
                 print(f"OmniVoice bez kubełków kształtów: {exc}", file=sys.stderr)
         with open(f"{pack}/voice.txt", encoding="utf-8") as handle:
             ref_text = handle.read().strip()
+        guidance = pack_guidance(pack)
         prompt = model.create_voice_clone_prompt(f"{pack}/voice.wav", ref_text)
         # rejestry lektora (voice-zywy.wav + .txt): ta sama osoba w innym tonie, wybierane per kwestia („style”)
         styles = {}
@@ -318,9 +330,11 @@ def main():
                 reply({"id": job.get("id"), "ok": False, "voice": None, "error": f"brak aktywnej próbki mówcy {requested_voice}"})
                 continue
             chosen = voices[requested_voice] if requested_voice else styles.get(job.get("style"), prompt)
+            scale = 2.0 if requested_voice else guidance  # siła dopasowania z voicepacka lektora; głosy postaci domyślnie
             language = job.get("language") if job.get("language") in ("pl", "es") else "pl"  # „es”: zdanie po hiszpańsku
             wav = model.generate(
-                text=job["text"], language=language, voice_clone_prompt=chosen, num_step=steps, speed=speed
+                text=job["text"], language=language, voice_clone_prompt=chosen, num_step=steps, speed=speed,
+                guidance_scale=scale,
             )[0]
             audio = np.clip(wav.squeeze().float().cpu().numpy(), -1.0, 1.0)
             with wave.open(job["out"], "wb") as handle:

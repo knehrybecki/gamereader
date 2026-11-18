@@ -34,10 +34,11 @@ class OmniVoice:
     def create_voice_clone_prompt(self, ref, text):
         assert text, "brak tekstu voicepacka"
         return "default" if ref.endswith("/voice.wav") else "clone"
-    def generate(self, text, language, voice_clone_prompt, num_step, speed=None):
+    def generate(self, text, language, voice_clone_prompt, num_step, speed=None, guidance_scale=2.0):
         assert language in ("pl", "es") and voice_clone_prompt in ("default", "clone")
         t = np.arange(int(24000 * 0.05 * len(text))) / 24000
         freq = (150 if voice_clone_prompt == "default" else 300) + (50 if language == "es" else 0)
+        freq += 25 if guidance_scale != 2.0 else 0  # atrapa: inna siła dopasowania = inny ton
         return [_Wav((np.sin(2 * np.pi * freq * t) * 0.3).astype("float32"))]
 """
 
@@ -110,6 +111,25 @@ class VoiceStudioTest(unittest.TestCase):
             self.assertIsNotNone(backend.set_voice_file("hero_jason", sample, "I'm here for Lucia."))
             self.assertFalse(np.array_equal(default, backend.synth("Wsiadaj.", voice="hero_jason")))
             self.assertTrue(sample.exists())  # próbka bohatera zostaje (to nie plik tymczasowy)
+        finally:
+            backend.close()
+
+    def test_voicepack_guidance_reaches_model(self):
+        import json
+        import numpy as np
+
+        backend = ge.OmniVoiceLocal("lektor")
+        try:
+            self.wait_ready(backend)
+            plain = backend.synth("Dobrze wam poszło.")
+        finally:
+            backend.close()
+        meta = Path(self.tmp.name) / "voicepacks/lektor/voice.json"
+        meta.write_text(json.dumps({**json.loads(meta.read_text()), "guidance": 3.0}))
+        backend = ge.OmniVoiceLocal("lektor")
+        try:
+            self.wait_ready(backend)
+            self.assertFalse(np.array_equal(plain, backend.synth("Dobrze wam poszło.")))
         finally:
             backend.close()
 
