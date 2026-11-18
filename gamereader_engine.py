@@ -5609,6 +5609,8 @@ class Engine:
         """(klucz głosu postaci albo None = lektor, czy pominąć kwestię). Bohaterowie: imię z napisu > barwa > lektor,
         nigdy cisza. Stare klonowanie: tryb ścisły (cfg „cloneOnly”) każe milczeć bez próbki postaci."""
         bank = getattr(self, "speakers", None)
+        if bank is None:
+            return None, False
         cloud = getattr(self.lektor, "cloud", None)
         seen0 = min((t for t in (self._seen_at.get(part) for part in parts) if t), default=None)
         if isinstance(bank, HeroBank):
@@ -5627,7 +5629,7 @@ class Engine:
         voice = None
         if bank is not None and bank.any_ready() and cloud is not None and seen0:
             voice = bank.voice_for(seen0, wait=SPEAKER_WAIT_SEC, text=src if translate else None)
-        skip = (bank is not None and not voice and self.cfg.get("cloneOnly", True)
+        skip = (not voice and self.cfg.get("cloneOnly", True)
                 and cloud is not None and getattr(cloud, "ready", False))
         return voice, skip
 
