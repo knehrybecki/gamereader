@@ -377,7 +377,7 @@ class SpanishLineTest(unittest.TestCase):
     def test_voicestudio_speaks_spanish_sentence_in_spanish(self):
         names = VoiceStudioNamesTest()
         spoken = names.spoken_by_voicestudio("Hola, señor García! Vámonos.", with_language=True)
-        self.assertEqual(spoken, ("Hola, señor García! Vámonos.", "es"))
+        self.assertEqual(spoken, ("Hola, señor García. Vámonos.", "es"))  # pisownia i model hiszpański; „!” równo jak lektor
 
     def test_voicestudio_polish_sentence_stays_polish(self):
         names = VoiceStudioNamesTest()

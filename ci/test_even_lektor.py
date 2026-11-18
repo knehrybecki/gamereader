@@ -70,6 +70,35 @@ class EvenLektorTest(unittest.TestCase):
         lk._synth_cloud(Cloud(), "Piątek rano, napad na bank. Błagam.", "out.wav", 0.5, 0.0)
         self.assertLessEqual(got["speed"], ge.LEKTOR_CLOUD_MAX_BOOST)  # 18.11: ×1,6 gubiło „Błagam.”
 
+    def test_exclamation_and_mood_do_not_change_loudness(self):
+        self.lektor.prepare("Uciekaj stąd!", mood="tense", arousal=0.0, boost=1.0)
+        self.lektor.prepare("Uciekaj stąd.", mood="calm", arousal=0.0, boost=1.0)
+        self.assertEqual(self.gains[0], self.gains[1])
+
+    def _sent_to_model(self, text, voice=None):
+        sent = []
+
+        class Cloud:
+            rate = 24000
+            error = ""
+
+            def synth(self, text, **kwargs):
+                sent.append(text)
+                return ge.np.zeros(2400, dtype=ge.np.float32)
+
+        lk = ge.MaleLektor.__new__(ge.MaleLektor)
+        lk._cloud_prev = ("", 0.0)
+        lk.on_cloud_error = None
+        lk._write_voice = lambda *a: None
+        lk._synth_cloud(Cloud(), text, "out.wav", 1.0, 0.0, voice)
+        return sent[0]
+
+    def test_lektor_reads_exclamations_flat(self):
+        # z „!” OmniVoice zaczyna krzyczeć — lektor filmowy czyta równo; pytanie zostaje pytaniem
+        self.assertEqual(self._sent_to_model("Uciekaj stąd! Szybko!!"), "Uciekaj stąd. Szybko.")
+        self.assertEqual(self._sent_to_model("Co?! Serio?"), "Co? Serio?")
+        self.assertEqual(self._sent_to_model("Uciekaj stąd!", voice="bohater_jason"), "Uciekaj stąd!")
+
     def test_eight_steps_by_default(self):
         self.assertEqual(ge.OMNI_QUALITY_STEPS[ge.VOICE_QUALITY_DEFAULT], 8)
 

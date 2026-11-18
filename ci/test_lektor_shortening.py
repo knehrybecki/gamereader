@@ -110,6 +110,20 @@ class LektorShorteningTest(unittest.TestCase):
         text, _segments, _arousal, _boost = engine._plan_line("Well, we gotta move to the warehouse.", True)
         self.assertEqual(text, "No wiesz, musimy ruszyć do magazynu.")
 
+    def test_slightly_long_line_is_read_whole(self):
+        # 18.11 „za bardzo skraca”: kwestia ~15 % dłuższa niż napis zostaje cała — lektor dociąga, następna
+        # kwestia przygotowuje się w tle; skrót dopiero przy wyraźnym przekroczeniu albo spóźnieniu
+        engine = make_engine(FakeTranslator(""), 1.5)
+        engine._lag = 0.3
+        text, _segments, _arousal, _boost = engine._plan_line("Lu, dawaj. Trzymaj się blisko.", False)
+        self.assertEqual(text, "Lu, dawaj. Trzymaj się blisko.")
+
+    def test_far_too_long_line_is_still_shortened(self):
+        engine = make_engine(FakeTranslator(""), 0.9)
+        engine._lag = 0.3
+        text, _segments, _arousal, _boost = engine._plan_line("Lu, dawaj. Trzymaj się blisko.", False)
+        self.assertNotEqual(text, "Lu, dawaj. Trzymaj się blisko.")
+
     def test_very_late_lektor_drops_interjection_sentences_even_when_they_fit(self):
         engine = make_engine(FakeTranslator("Tak. Musimy ruszyć do magazynu."), 8.0)
         engine._lag = 4.0

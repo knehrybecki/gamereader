@@ -1197,6 +1197,9 @@ FILM_RECENT_VOICE = 0.8
 SUBTITLE_CPS_DEFAULT = 16.0
 # skracanie tekstu: od tylu sekund spóźnienia lektora za napisem (poziom 1 / poziom 2)
 LAG_CONDENSE = 2.0
+# skrót dopiero, gdy kwestia wyraźnie przekracza czas napisu (18.11 „za bardzo skraca”: przy progu 1,0 wypadały
+# imiona, „okej?”, całe krótkie zdania już przy 5–10 % przekroczenia); spóźnienie (LAG_CONDENSE) nadal wymusza skrót
+CONDENSE_TOLERANCE = 1.3
 LAG_CONDENSE_STRONG = 3.5
 # zdanie (3+ słowa), które lektor przed chwilą przeczytał, nie wraca w następnej kwestii — napis wjeżdża
 # po kawałku, a OCR czyta nakładające się linie jako różne warianty
@@ -1441,6 +1444,13 @@ def lektor_voice_params(arousal):
         "gain": 1.0 + (0.32 * a if a > 0 else 0.35 * a),
         "pause": max(0.05, 0.10 - 0.06 * a),
     }
+
+
+def flat_exclamations(text):
+    """Lektor filmowy czyta równo: „!” → „.”, „?!” → „?” (z „!” OmniVoice zaczyna krzyczeć — 18.11 „emocje za bardzo
+    rozbieżne”). Pytanie zostaje pytaniem."""
+    text = re.sub(r"\?[!?]*!+[!?]*|![!?]*\?[!?]*", "?", text or "")
+    return re.sub(r"!+", ".", text)
 
 
 def lektor_style(text, mood="calm", arousal=0.0):
@@ -3957,6 +3967,8 @@ class MaleLektor:
         pace = length_pace * float(self.tts_scale or 1.0) / params["speed"]
         # interpunkcja napisu: „!” głośniej, „…” ciszej, pauza po „?” i „…”
         punct_gain, punct_pause = lektor_punctuation(text, mood)
+        if cloud_lektor:
+            punct_gain = 1.0  # lektor VoiceStudio: „!” i nastrój nie pogłaśniają (równy głos jak w filmie)
         pause = max(params["pause"], punct_pause)
         if text.rstrip().endswith(","):
             pause = 0.0  # fragment ucięty na przecinku — reszta zdania leci od razu
@@ -3981,7 +3993,8 @@ class MaleLektor:
             voice = None
         else:
             voice = None
-        key = f"{voice_tag}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}"
+        key = f"{voice_tag}|{a:.1f}|{text}|{pace:.2f}|{gain:.2f}|{pause:.2f}|{bool(self.ffmpeg)}" + (
+            "|rowny" if cloud_lektor else "")
         path = CACHE_DIR / f"{text_key(key)}.wav"
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         if path.exists() and path.stat().st_size >= 64:
@@ -4044,8 +4057,11 @@ class MaleLektor:
         # zdanie całe po hiszpańsku: oryginalna pisownia i model hiszpański (wybór 18.11); w polskim zdaniu angielskie
         # nazwy w oryginale, hiszpańskie spolszczone (Lucia → Lus'ija); polish_pronounce to obejścia Supertonic
         spanish = spanish_sentence(text)
+        spoken = text if spanish else voicestudio_names(text)
+        if not voice:
+            spoken = flat_exclamations(spoken)
         audio = cloud.synth(
-            text if spanish else voicestudio_names(text), speed=rate, language="es" if spanish else "pl", style=style,
+            spoken, speed=rate, language="es" if spanish else "pl", style=style,
             previous="" if voice else (prev if time.monotonic() - at < 12.0 else ""), voice=voice,
         )
         if audio is None:
@@ -6696,12 +6712,12 @@ class Engine:
         # tempo głosu zostaje, a spóźnienie nie narasta kwestia po kwestii
         lag = self._effective_lag(parts or [src])
         forced = 2 if lag >= LAG_CONDENSE_STRONG else 1 if lag >= LAG_CONDENSE else 0
-        if not translate and parts and len(parts) >= 2 and self.lektor.overload(text, seconds) > 1.0:
+        if not translate and parts and len(parts) >= 2 and self.lektor.overload(text, seconds) > CONDENSE_TOLERANCE:
             keep = [p for p in parts[:-1] if not self._skippable(p)] + [parts[-1]]
             if len(keep) < len(parts):
                 text = strip_fillers(_join_parts(keep)) if len(keep) > 1 else keep[0]
         for level in (1, 2):
-            if not text or (level > forced and self.lektor.overload(text, seconds) <= 1.0):
+            if not text or (level > forced and self.lektor.overload(text, seconds) <= CONDENSE_TOLERANCE):
                 break
             text = condense_polish(text, level=level)
         sentences = re.findall(r"[^.!?…]+(?:[.!?…]+|$)", text or "")
@@ -6711,12 +6727,12 @@ class Engine:
         may_drop = len(normalize_text(text or "")) > SHORT_LINE_KEEP_CHARS
         # całe zdania ze starszych kwestii wypadają przy 2+ zaległych napisach — inaczej ginie kontekst
         min_parts = 2 if getattr(self, "catch_up", False) else 3
-        while may_drop and len(parts or []) >= min_parts and len(sentences) > 1 and self.lektor.overload(" ".join(sentences), seconds) > 1.15:
+        while may_drop and len(parts or []) >= min_parts and len(sentences) > 1 and self.lektor.overload(" ".join(sentences), seconds) > CONDENSE_TOLERANCE:
             # najnowsze zdanie zostaje; najpierw wypadają wtrącenia („Dobra.”, „Jadę!”), potem najstarsze
             sentences.pop(next((i for i, s_ in enumerate(sentences[:-1]) if is_interjection(s_)), 0))
         # jedna kwestia z kilku zdań, która się nie mieści: wtrącenia („Tak.”, „Jadę!”) wypadają przed
         # treścią — inaczej lektor spóźnia się o całe zdanie i nadganianie zjada następny napis
-        fits = 0.0 if forced >= 2 else 1.15
+        fits = 0.0 if forced >= 2 else CONDENSE_TOLERANCE
         while len(sentences) > 1 and self.lektor.overload(" ".join(sentences), seconds) > fits:
             filler = next((i for i, s_ in enumerate(sentences[:-1]) if is_interjection(s_)), None)
             if filler is None:
