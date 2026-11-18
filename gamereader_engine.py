@@ -3586,7 +3586,7 @@ class SpeakerBank:
 # Próg barwy z pomiaru 18.11 na Trailerze 2: Jason↔Jason 0,53–0,85, strażnik↔Jason 0,16–0,22.
 HEROES_DIR = CONFIG_PATH.parent / "heroes"
 HERO_MIN_SIM = 0.45
-HERO_WAIT_SEC = 0.8  # tyle kwestia czeka na wektor mówcy z gry (~0,1 s liczenia) — dłużej spóźniałby się lektor
+HERO_WAIT_SEC = 0.3  # tyle kwestia czeka na wektor mówcy z gry; 0,8 s spóźniało lektora w dialogach (18.11) — brak = lektor
 
 
 class HeroBank(SpeakerBank):

@@ -263,5 +263,11 @@ class ReviewFixesTest(unittest.TestCase):
         self.assertTrue(any("lektor" in line for line in logs), logs)
 
 
+class HeroWaitTest(unittest.TestCase):
+    def test_line_waits_briefly_for_hero_voice(self):
+        # 18.11: przy 0,8 s czekania lektor nie nadążał w dialogach (od napisu ~0,7 s przed syntezą)
+        self.assertLessEqual(ge.HERO_WAIT_SEC, 0.3)
+
+
 if __name__ == "__main__":
     unittest.main()
