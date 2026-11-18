@@ -3063,8 +3063,11 @@ class OmniVoiceLocal:
         if self.on_ready:
             self.on_ready(self)
 
-    def job_speed(self, rate, style=None):
-        """Tempo lektora (1,0 = zwykłe) → speed dla OmniVoice: głos z pomiarem „lps” mówi ~OMNI_TARGET_LPS liter/s."""
+    def job_speed(self, rate, style=None, voice=None):
+        """Tempo lektora (1,0 = zwykłe) → speed dla OmniVoice: głos z pomiarem „lps” mówi ~OMNI_TARGET_LPS liter/s.
+        Głos postaci (voice) ma własną próbkę — tempo jak przed kalibracją, niezależne od voicepacka lektora."""
+        if voice:
+            return round(max(0.75, min(1.2, rate * OMNI_SPEED_SCALE)), 2)
         low, high = OMNI_SPEED_RANGE if self.speed_scale != OMNI_SPEED_SCALE else (0.75, 1.2)
         return round(max(low, min(high, rate * self.styles.get(style, self.speed_scale))), 2)
 
@@ -3083,7 +3086,7 @@ class OmniVoiceLocal:
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
             out = CACHE_DIR / f"ov_job_{os.getpid()}_{self.voice_session}.wav"
             style = style if style in self.styles and not voice else None
-            job = {"text": text, "speed": self.job_speed(speed, style), "out": str(out)}
+            job = {"text": text, "speed": self.job_speed(speed, style, voice), "out": str(out)}
             if language != "pl":
                 job["language"] = language
             if style:
@@ -4745,17 +4748,14 @@ def _speaker_text_key(text):
 
 
 def colon_speaker(text):
-    """Imię, które strip_colon_speaker wyciął z napisu dającego `text` („JASON”), albo None."""
-    key = _speaker_text_key(text)
-    if not key:
+    """Imię, które strip_colon_speaker wyciął z TEGO napisu („JASON”) w ciągu SPEAKER_MATCH_TTL, albo None.
+
+    Tylko dokładna kwestia (po normalizacji OCR): dopasowanie fragmentów dawało głos Lucii każdej kwestii
+    zawierającej „co” po „LUCIA: Co?” (recenzja 18.11), a stara kwestia z imieniem — NPC-owi minuty później."""
+    hit = _COLON_SPEAKERS.get(_speaker_text_key(text))
+    if hit is None or time.monotonic() - hit[1] > SPEAKER_MATCH_TTL:
         return None
-    if key in _COLON_SPEAKERS:
-        return _COLON_SPEAKERS[key]
-    if len(key) >= 8:  # kwestia podzielona na części: część napisu z imieniem
-        for full, name in reversed(_COLON_SPEAKERS.items()):
-            if key in full or full in key:
-                return name
-    return None
+    return hit[0]
 
 
 def strip_colon_speaker(text):
@@ -4770,7 +4770,7 @@ def strip_colon_speaker(text):
     if any(polish_fold(w) in DIALOGUE_STARTERS for w in re.findall(r"[\wąćęłńóśźżĄĆĘŁŃÓŚŹŻ']+", m.group(1))):
         return text
     line = m.group(2).strip()
-    _COLON_SPEAKERS[_speaker_text_key(line)] = m.group(1).strip()
+    _COLON_SPEAKERS[_speaker_text_key(line)] = (m.group(1).strip(), time.monotonic())
     while len(_COLON_SPEAKERS) > 64:
         _COLON_SPEAKERS.popitem(last=False)
     return line
@@ -5623,8 +5623,8 @@ class Engine:
                     self._timing(f"bohaterowie: imię {name} w napisie → {key.split('_', 1)[1] if key else 'lektor'}")
                     return key, False
             voice = bank.voice_for(seen0, wait=HERO_WAIT_SEC, text=None) if seen0 and bank.any_ready() else None
-            if voice:
-                self._timing(f"bohaterowie: kwestia głosem {voice.split('_', 1)[1]}: {parts[-1][:60]!r}")
+            who = voice.split("_", 1)[1] if voice else "lektor (to nie bohater albo niepewne)"
+            self._timing(f"bohaterowie: kwestia → {who}: {parts[-1][:60]!r}")
             return voice, False
         voice = None
         if bank is not None and bank.any_ready() and cloud is not None and seen0:

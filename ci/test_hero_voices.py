@@ -217,5 +217,51 @@ class PickVoiceTest(unittest.TestCase):
         self.assertIsNone(eng.speakers)
 
 
+class ReviewFixesTest(unittest.TestCase):
+    """Poprawki po recenzji całej gałęzi (18.11)."""
+
+    def test_short_named_line_does_not_tag_other_lines(self):
+        ge.strip_colon_speaker("LUCIA: Co?")
+        self.assertIsNone(ge.colon_speaker("Musimy stąd uciekać, coś się dzieje."))
+        ge.strip_colon_speaker("JASON: Tak.")
+        self.assertIsNone(ge.colon_speaker("Nie wiem, jak to zrobić, ale takie jest życie."))
+
+    def test_name_expires(self):
+        from unittest.mock import patch
+
+        ge.strip_colon_speaker("JASON: Dalej, ruszaj się!")
+        later = time.monotonic() + ge.SPEAKER_MATCH_TTL + 1.0
+        with patch.object(ge.time, "monotonic", return_value=later):
+            self.assertIsNone(ge.colon_speaker("Dalej, ruszaj się!"))  # NPC minutę później — nie Jason
+
+    def test_hero_voice_tempo_does_not_follow_lektor_pack(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        (Path(tmp.name) / "glos").mkdir()
+        (Path(tmp.name) / "glos/voice.json").write_text('{"lps": 8.56}')
+        from unittest.mock import patch
+
+        with patch.object(ge, "VOICEPACK_DIR", Path(tmp.name)):
+            ov = ge.OmniVoiceLocal("glos")
+        self.assertAlmostEqual(ov.job_speed(1.0, voice="hero_jason"), ge.OMNI_SPEED_SCALE)
+        self.assertNotAlmostEqual(ov.job_speed(1.0), ge.OMNI_SPEED_SCALE)  # lektor dalej kalibrowany
+
+    def test_voice_miss_is_logged(self):
+        logs = []
+        pv = PickVoiceTest()
+        tmp = heroes_dir("jason")
+        self.addCleanup(tmp.cleanup)
+        bank = ge.HeroBank(lambda: FakeCloud(), heroes_dir=tmp.name)
+        self.addCleanup(bank.close)
+        bank._handle(speech("jason"), 1.0, 4.0, False)
+        bank.any_ready = lambda: True
+        bank.voice_for = lambda t, wait=0.0, text=None: None
+        eng = pv.engine(bank)
+        eng._timing = logs.append
+        eng._seen_at["Kto tam?"] = time.monotonic()
+        eng._pick_voice(["Kto tam?"], "Kto tam?", False)
+        self.assertTrue(any("lektor" in line for line in logs), logs)
+
+
 if __name__ == "__main__":
     unittest.main()
