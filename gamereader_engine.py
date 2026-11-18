@@ -1,6 +1,7 @@
 import copy
 import functools
 import hashlib
+import inspect
 import wave
 import json
 import os
@@ -2797,16 +2798,51 @@ def lektor_pace(text):
     return 1.0
 
 
+def output_device_names(devices):
+    """Nazwy urządzeń wyjściowych (bez mikrofonów i powtórek) — lista „Wyjście” w menu."""
+    names = []
+    for info in devices:
+        if info.get("max_output_channels", 0) > 0 and info["name"] not in names:
+            names.append(info["name"])
+    return names
+
+
+def pick_output_device(name, devices):
+    """Indeks wybranego wyjścia albo None = domyślne wyjście systemu (też gdy wybrane jest odłączone)."""
+    if not name:
+        return None
+    for index, info in enumerate(devices):
+        if info["name"] == name and info.get("max_output_channels", 0) > 0:
+            return index
+    return None
+
+
+def list_output_devices():
+    """Wyjścia dźwięku teraz (osobny proces: świeża lista PortAudio, np. słuchawki podłączone po starcie)."""
+    code = ("import json, sounddevice as sd\n"
+            "print(json.dumps([{'name': d['name'], 'max_output_channels': d['max_output_channels']}"
+            " for d in sd.query_devices()]))")
+    try:
+        out = subprocess.run([sys.executable, "-X", "utf8", "-c", code], capture_output=True, text=True,
+                             encoding="utf-8", timeout=8, **NO_WINDOW).stdout
+        return output_device_names(json.loads(out or "[]"))
+    except Exception:
+        return []
+
+
 # Odtwarzacz w OSOBNYM procesie z ciągle otwartym strumieniem audio: fragment rusza od razu
 # (bez startu afplay przy każdym fragmencie), a praca silnika (OCR, synteza) nie powoduje trzasków.
+# Wyjście: argv[1] / „DEVICE nazwa” (pusto = systemowe). PortAudio pamięta listę urządzeń z chwili startu, więc
+# przy zmianie domyślnego wyjścia Maca (np. połączone słuchawki Bluetooth) strumień otwiera się od nowa (18.11).
 _PLAYER_CODE = r"""
-import sys, threading, queue, wave
+import sys, threading, queue, wave, time
 import numpy as np
 import sounddevice as sd
 SR = 44100
 lock = threading.Lock()
+slock = threading.Lock()
 cur = [None, 0, None]
-done = queue.Queue()
+out_q = queue.Queue()
 def cb(out, frames, _t, _st):
     with lock:
         d = cur[0]
@@ -2819,21 +2855,71 @@ def cb(out, frames, _t, _st):
         out[n:, 0] = 0
         cur[1] = p + n
         if cur[1] >= d.size:
-            done.put(cur[2])
+            out_q.put("DONE %s" % cur[2])
             cur[0] = None
 def writer():
     while True:
-        sys.stdout.write("DONE %s\n" % done.get())
+        sys.stdout.write(out_q.get() + "\n")
         sys.stdout.flush()
-threading.Thread(target=writer, daemon=True).start()
-def open_stream():
-    st = sd.OutputStream(samplerate=SR, channels=1, dtype="float32", blocksize=1024, callback=cb)
+""" + inspect.getsource(pick_output_device) + r"""
+want = [sys.argv[1] if len(sys.argv) > 1 else ""]
+stream = [None]
+def open_stream(refresh):
+    if stream[0] is not None:
+        try:
+            stream[0].stop()
+            stream[0].close()
+        except Exception:
+            pass
+        stream[0] = None
+    if refresh:
+        try:
+            sd._terminate()
+            sd._initialize()
+        except Exception:
+            pass
+    devices = list(sd.query_devices())
+    idx = pick_output_device(want[0], devices)
+    st = sd.OutputStream(device=idx, samplerate=SR, channels=1, dtype="float32", blocksize=1024, callback=cb)
     st.start()
-    return st, sd.query_devices(kind="output")["name"]
-stream, device = open_stream()
+    stream[0] = st
+    out_q.put("OUTPUT %s" % (devices[idx]["name"] if idx is not None else sd.query_devices(kind="output")["name"]))
+def default_output_id():
+    if sys.platform != "darwin":
+        return None
+    try:
+        import ctypes, ctypes.util
+        ca = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreAudio"))
+        class Addr(ctypes.Structure):
+            _fields_ = [("sel", ctypes.c_uint32), ("scope", ctypes.c_uint32), ("elem", ctypes.c_uint32)]
+        addr = Addr(int.from_bytes(b"dOut", "big"), int.from_bytes(b"glob", "big"), 0)
+        dev, size = ctypes.c_uint32(0), ctypes.c_uint32(4)
+        if ca.AudioObjectGetPropertyData(1, ctypes.byref(addr), 0, None, ctypes.byref(size), ctypes.byref(dev)):
+            return None
+        return dev.value
+    except Exception:
+        return None
+def reopen():
+    with slock:
+        try:
+            open_stream(True)
+        except Exception as exc:
+            out_q.put("OUTPUT ? %s" % exc)
+def watch():
+    last = default_output_id()
+    while last is not None:
+        time.sleep(1.0)
+        now = default_output_id()
+        if now is not None and now != last:
+            last = now
+            time.sleep(0.4)  # słuchawki Bluetooth chwilę się zestawiają
+            reopen()
+open_stream(False)
 sys.stdout.write("READY\n"); sys.stdout.flush()
+threading.Thread(target=writer, daemon=True).start()
+threading.Thread(target=watch, daemon=True).start()
 for line in sys.stdin:
-    cmd, _, arg = line.strip().partition(" ")
+    cmd, _, arg = line.rstrip("\n").partition(" ")
     if cmd == "PLAY":
         pid, _, path = arg.partition(" ")
         try:
@@ -2845,17 +2931,20 @@ for line in sys.stdin:
             if sr != SR:
                 d = np.interp(np.arange(0, d.size, sr / SR), np.arange(d.size), d).astype(np.float32)
         except Exception:
-            done.put(pid)
+            out_q.put("DONE %s" % pid)
             continue
         with lock:
             if cur[0] is not None:
-                done.put(cur[2])
+                out_q.put("DONE %s" % cur[2])
             cur[0], cur[1], cur[2] = d, 0, pid
     elif cmd == "STOP":
         with lock:
             if cur[0] is not None:
-                done.put(cur[2])
+                out_q.put("DONE %s" % cur[2])
                 cur[0] = None
+    elif cmd == "DEVICE":
+        want[0] = arg.strip()
+        reopen()
 """
 
 
@@ -2927,6 +3016,14 @@ class PlayerProcess:
         self.handles = {}
         self.counter = 0
         self.failed = False
+        self.device = ""  # wyjście z menu; pusto = systemowe (idzie za domyślnym wyjściem Maca)
+
+    def set_device(self, name):
+        """Wyjście dźwięku lektora z menu; działający odtwarzacz przełącza się od razu."""
+        self.device = name or ""
+        self.failed = False  # nowe wyjście — odtwarzacz dostaje kolejną szansę zamiast afplay
+        if self.alive():
+            self.send(f"DEVICE {self.device}")
 
     def alive(self):
         return self.proc is not None and self.proc.poll() is None
@@ -2934,7 +3031,7 @@ class PlayerProcess:
     def _start(self):
         self.proc = subprocess.Popen(
             # -X utf8: ścieżka do pliku z nazwą użytkownika z polskimi znakami (Windows) przechodzi bez strat
-            [sys.executable, "-X", "utf8", "-u", "-c", _PLAYER_CODE],
+            [sys.executable, "-X", "utf8", "-u", "-c", _PLAYER_CODE, self.device],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
             **NO_WINDOW,
         )
@@ -2949,6 +3046,8 @@ class PlayerProcess:
                 handle = self.handles.pop(line[5:].strip(), None)
                 if handle is not None:
                     handle.done.set()
+            elif line.startswith("OUTPUT "):
+                log_timing(f"lektor gra na: {line[7:].strip()}")
         for handle in list(self.handles.values()):
             handle.done.set()
         self.handles.clear()
@@ -5544,6 +5643,10 @@ class Engine:
         self.hero_voices = bool(self.cfg.get("heroVoices", False))
         self.voice_quality = VOICE_QUALITY_DEFAULT
         self.set_voice_quality(self.cfg.get("voiceQuality"))
+        self.outputs = []
+        self.output_device = ""
+        self.set_output_device(self.cfg.get("outputDevice"))
+        threading.Thread(target=self._refresh_outputs, daemon=True).start()
         self._rebuild_speakers()
         if LlmTranslator is not None and llm_translate_wanted():
             # slang po polsku zamiast dosłownego Argos; Argos zostaje zapasem (model ładuje się w tle)
@@ -5724,6 +5827,8 @@ class Engine:
             "cloneVoices": getattr(self, "clone_voices", False),
             "heroVoices": getattr(self, "hero_voices", False),
             "voiceQuality": getattr(self, "voice_quality", VOICE_QUALITY_DEFAULT),
+            "outputDevice": getattr(self, "output_device", ""),
+            "outputs": getattr(self, "outputs", []),
             "omniPacks": voicepacks() if voicestudio_python() else [],
         }
 
@@ -5779,6 +5884,7 @@ class Engine:
                 "cloneVoices": self.clone_voices,
                 "heroVoices": self.hero_voices,
                 "voiceQuality": self.voice_quality,
+                "outputDevice": getattr(self, "output_device", ""),
             }
         )
 
@@ -5866,7 +5972,24 @@ class Engine:
         if isinstance(cloud, OmniVoiceLocal):
             cloud.steps = OMNI_QUALITY_STEPS[self.voice_quality]
 
+    def set_output_device(self, name):
+        """„Wyjście” z menu: nazwa urządzenia albo pusto = systemowe (domyślne wyjście Maca, także po zmianie)."""
+        self.output_device = name if isinstance(name, str) else ""
+        self.lektor.out.set_device(self.output_device)
+
+    def _refresh_outputs(self):
+        outputs = list_output_devices()
+        if outputs != self.outputs:
+            self.outputs = outputs
+            self.emit({"event": "state", **self.snapshot()})
+
     def configure(self, data):
+        if "outputDevice" in data:
+            self.set_output_device(data["outputDevice"])
+        if data.get("refreshOutputs"):
+            threading.Thread(target=self._refresh_outputs, daemon=True).start()
+            if len(data) <= 2:
+                return  # samo odświeżenie listy (otwarcie menu) — bez zapisu ustawień
         if "voiceQuality" in data:
             self.set_voice_quality(data["voiceQuality"])
         if "cloneVoices" in data or "heroVoices" in data:

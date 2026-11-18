@@ -117,6 +117,16 @@ function applyState(msg) {
   if (typeof msg.cloneVoices === "boolean") document.getElementById("cloneVoices").checked = msg.cloneVoices;
   if (typeof msg.heroVoices === "boolean") document.getElementById("heroVoices").checked = msg.heroVoices;
   if (msg.voiceQuality) document.getElementById("voiceQuality").value = msg.voiceQuality;
+  if (Array.isArray(msg.outputs) || typeof msg.outputDevice === "string") {
+    const sel = document.getElementById("outputDevice");
+    const chosen = typeof msg.outputDevice === "string" ? msg.outputDevice : sel.value;
+    const names = Array.isArray(msg.outputs) ? msg.outputs : [...sel.options].map((o) => o.value).filter(Boolean);
+    const esc = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+    const opts = [`<option value="">Systemowe</option>`].concat(names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`));
+    if (chosen && !names.includes(chosen)) opts.push(`<option value="${esc(chosen)}">${esc(chosen)} (odłączone)</option>`);
+    sel.innerHTML = opts.join("");
+    sel.value = chosen;
+  }
   if (Array.isArray(msg.omniPacks)) {
     const engine = document.getElementById("lektorEngine");
     const studio = engine.querySelector('option[value="voicestudio"]');
@@ -229,6 +239,13 @@ document.getElementById("lektorEngine").onchange = (e) => send({ cmd: "config", 
 document.getElementById("stVoice").onchange = (e) => send({ cmd: "config", lektorVoice: e.target.value });
 document.getElementById("omniPack").onchange = (e) => send({ cmd: "config", omniPack: e.target.value });
 document.getElementById("voiceQuality").onchange = (e) => send({ cmd: "config", voiceQuality: e.target.value });
+const outputDevice = document.getElementById("outputDevice");
+outputDevice.onchange = (e) => {
+  send({ cmd: "config", outputDevice: e.target.value });
+  window.gr.releaseFocus();
+};
+// lista wyjść odświeża się przy otwieraniu menu (słuchawki podłączone po starcie)
+outputDevice.onmousedown = () => send({ cmd: "config", refreshOutputs: true });
 document.getElementById("cloneVoices").onchange = (e) => {
   send({ cmd: "config", cloneVoices: e.target.checked });
   window.gr.releaseFocus();
