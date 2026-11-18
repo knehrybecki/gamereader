@@ -35,6 +35,8 @@ class OmniVoice:
         assert text, "brak tekstu voicepacka"
         return "default" if ref.endswith("/voice.wav") else "clone"
     def generate(self, text, language, voice_clone_prompt, num_step, speed=None, guidance_scale=2.0):
+        import os, time
+        time.sleep(float(os.environ.get("FAKE_OV_DELAY") or 0))  # atrapa: długa synteza
         assert language in ("pl", "es") and voice_clone_prompt in ("default", "clone")
         t = np.arange(int(24000 * 0.05 * len(text))) / 24000
         freq = (150 if voice_clone_prompt == "default" else 300) + (50 if language == "es" else 0)
@@ -114,6 +116,32 @@ class VoiceStudioTest(unittest.TestCase):
             self.assertTrue(sample.exists())  # próbka bohatera zostaje (to nie plik tymczasowy)
         finally:
             backend.close()
+
+    def test_switching_voice_mid_line_lets_the_line_finish(self):
+        """Nagranie 18.11 16:03: zmiana głosu w menu zamknęła proces w trakcie kwestii → „[Errno 9] Bad file
+        descriptor — ta kwestia Supertonic”. Stary proces ma dokończyć kwestię i dopiero wtedy się zamknąć."""
+        import threading
+
+        with patch.dict(os.environ, {"FAKE_OV_DELAY": "0.6"}):  # proces lektora dziedziczy środowisko przy starcie
+            backend = ge.OmniVoiceLocal("lektor")
+            self.wait_ready(backend)
+        self.assertTrue(backend.ready, backend.error)
+        lektor = ge.MaleLektor.__new__(ge.MaleLektor)
+        lektor.cloud = backend
+        result = {}
+        worker = threading.Thread(target=lambda: result.update(audio=backend.synth("Rozbił sobie czaszkę.")))
+        worker.start()
+        time.sleep(0.2)
+        lektor.set_backend(None)  # użytkownik wybrał inny głos
+        worker.join(10)
+        self.assertIsNotNone(result.get("audio"), backend.error)
+        self.assertEqual(backend.error, "")
+        deadline = time.monotonic() + 5
+        while backend.proc is not None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertIsNone(backend.proc)  # po kwestii stary proces zwolniony
+        self.assertIsNone(backend.synth("Wracajmy."))  # odłożony lektor nic już nie czyta
+        self.assertEqual(backend.error, "")  # i nie zgłasza błędu
 
     def test_voicepack_guidance_reaches_model(self):
         import json

@@ -3087,6 +3087,7 @@ class OmniVoiceLocal:
         self.steps = OMNI_STEPS  # liczba kroków syntezy idzie z każdym zleceniem — zmiana bez przeładowania modelu
         self.error = ""
         self.failed_until = 0.0
+        self.retired = False  # odłożony przy zmianie głosu: kończy bieżącą kwestię, potem się zamyka
         self.ready = False
         self.proc = None
         self.lock = threading.Lock()
@@ -3231,6 +3232,8 @@ class OmniVoiceLocal:
     def synth(self, text, speed=1.0, previous="", voice=None, language="pl", style=None):
         """Mono float32 albo None (model jeszcze się ładuje / padł) — wtedy lektor czyta Supertonic.
         voice: klucz postaci z set_voice() — czyta jej głosem zamiast lektora z voicepacka."""
+        if getattr(self, "retired", False):
+            return None  # zmiana głosu w menu: nowy lektor się ładuje — to nie błąd
         if not self.ready or time.monotonic() < self.failed_until:
             return None
         with self.lock:
@@ -3276,6 +3279,17 @@ class OmniVoiceLocal:
                 out.unlink(missing_ok=True)
         self.error = ""
         return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
+
+    def retire(self):
+        """Zmiana głosu w menu: bieżąca kwestia ma się dokończyć, potem proces się zamyka. Zamknięcie potoków
+        w trakcie syntezy dawało „[Errno 9] Bad file descriptor — ta kwestia Supertonic” (18.11 16:03)."""
+        self.retired = True
+
+        def finish():
+            with self.lock:
+                self.close()
+
+        threading.Thread(target=finish, daemon=True).start()
 
     def close(self):
         proc, self.proc = self.proc, None
@@ -3884,8 +3898,11 @@ class MaleLektor:
     def set_backend(self, backend):
         """OmniVoiceLocal albo None (Supertonic). Poprzedni lokalny model zwalnia GPU."""
         old, self.cloud = self.cloud, backend
-        if old is not None and old is not backend and hasattr(old, "close"):
-            old.close()
+        if old is not None and old is not backend:
+            if hasattr(old, "retire"):
+                old.retire()
+            elif hasattr(old, "close"):
+                old.close()
 
     @property
     def backend(self):
