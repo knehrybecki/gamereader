@@ -34,19 +34,19 @@ class SpeakerBankTest(unittest.TestCase):
     def observe(self, start, seconds=1.6, provisional=False):
         self.bank._handle(self.clip(seconds), start, start + seconds, provisional)
 
-    def test_collects_sample_then_switches_to_character_voice(self):
+    def test_voice_is_built_from_the_utterance_being_read_then_reused(self):
+        # nowy przebieg (09.10): wzorcem jest audio TEJ wypowiedzi, nie sklejka z kilku; kolejne kwestie tej osoby go używają
         self.observe(10)
-        self.assertIsNone(self.bank.voice_for(10.1))
-        self.observe(12)
-        self.assertFalse(self.bank.any_ready())
-        self.observe(14)
-        self.assertTrue(self.bank.any_ready())
-        key = self.bank.voice_for(14.1)
+        key = self.bank.voice_for(10.1)
         self.assertIsNotNone(key)
         self.assertEqual(self.cloud.set_voice.call_args.args[0], key)
-        self.assertGreaterEqual(self.transcribe.call_args.args[0].size / ge.SAMPLE_RATE, 4.5)
-        self.assertLessEqual(self.transcribe.call_args.args[0].size / ge.SAMPLE_RATE, 6.5)
-        self.assertEqual(self.bank.speakers[key]["pool"], [])
+        self.assertEqual(self.cloud.set_voice.call_count, 1)
+        sample = self.cloud.set_voice.call_args.args[1]
+        self.assertGreaterEqual(sample.size / ge.SAMPLE_RATE, 1.5)
+        self.assertTrue(self.bank.any_ready())
+        self.observe(14)
+        self.assertEqual(self.bank.voice_for(14.1), key)
+        self.assertEqual(self.cloud.set_voice.call_count, 1)  # druga wypowiedź tej osoby nie robi nowej próbki
 
     def test_two_speakers_get_separate_samples_and_voices(self):
         self.observe(10, 5)
@@ -68,9 +68,10 @@ class SpeakerBankTest(unittest.TestCase):
         self.assertEqual(self.bank.voice_for(20.1), self.bank.voice_for(10.1))
         self.assertEqual(self.cloud.set_voice.call_count, 1)
 
-    def test_long_utterance_is_capped_before_transcribing(self):
+    def test_long_utterance_sample_is_capped(self):
         self.observe(10, 18)
-        self.assertEqual(self.transcribe.call_args.args[0].size, int(6.5 * ge.SAMPLE_RATE))
+        self.assertLessEqual(self.cloud.set_voice.call_args.args[1].size, int(6.5 * ge.SAMPLE_RATE))
+        self.assertLessEqual(self.bank.timeline[-1]["audio"].size, int(8.0 * ge.SAMPLE_RATE))
 
     def test_invalid_embedding_never_becomes_a_character(self):
         for value in ([np.nan, 0.], [0., 0.], [np.inf, 1.]):
@@ -114,10 +115,10 @@ class SpeakerBankTest(unittest.TestCase):
 
     def test_empty_transcript_can_retry_on_next_utterance(self):
         # każdy segment jest transkrybowany raz do osi czasu, a próbka drugi raz — stąd po dwa wywołania na wypowiedź
-        self.transcribe.side_effect = ["", "", "Reference speech.", "Reference speech."]
+        self.transcribe.side_effect = ["", "Reference speech."]
         self.observe(10, 5)
         self.assertFalse(self.bank.any_ready())
-        self.observe(20, 2)
+        self.observe(20, 5)
         self.assertTrue(self.bank.any_ready())
 
 

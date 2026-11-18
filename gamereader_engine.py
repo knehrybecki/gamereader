@@ -3174,9 +3174,10 @@ SPEAKER_SAMPLE_MIN_WORDS = 6  # słów z rozpoznanego tekstu próbki, po odjęci
 SPEAKER_SAMPLE_MIN_VOICED = 0.45  # udział ramek z głosem w próbce
 SPEAKER_CLIP_MIN_SIM = 0.55  # kawałek bardziej niepodobny do środka postaci nie wchodzi do jej próbki (to ktoś inny)
 SPEAKER_SAMPLE_TRIES = 5  # po tylu odrzuconych próbkach postać nie dostaje głosu
+SPEAKER_SAME_PERSON_SIM = 0.70  # dodatek do krótkiej próbki tylko od wypowiedzi o tak podobnym głosie (ta sama osoba)
 SPEAKER_MERGE_DIST = 0.30  # dwa gotowe głosy bliżej siebie niż to = ta sama postać; zostaje lepszy
 SPEAKER_KEEP = 6  # tyle gotowych głosów naraz; nadmiar (najrzadziej używane) jest zapominany
-SPEAKER_WAIT_SEC = 2.2  # poczekaj na stabilniejsze rozpoznanie mówcy z audio
+SPEAKER_WAIT_SEC = 4.0  # tyle czeka kwestia na koniec angielskiej wypowiedzi, z której powstaje wzorzec głosu
 SPEAKER_MATCH_TTL = 10.0  # nie dopasowuj ponownie tego samego napisu do starej wypowiedzi
 # Wypowiedź z dźwięku to „od ciszy do ciszy”, a postacie w szybkim dialogu odpowiadają sobie bez przerwy — w jednej
 # wypowiedzi bywa kilka osób (test 09.10: 7,8 s = trzy postacie → jedna próbka i jedno przypisanie na wszystkie).
@@ -3309,10 +3310,11 @@ class SpeakerBank:
                 break  # rozpoznawanie nie nadąża — pomijamy, następna wypowiedź nadrobi
 
     def voice_for(self, t, wait=0.0, text=None):
-        """Klucz głosu postaci, która mówi napis `text` pojawiający się w chwili `t` (time.monotonic), albo None.
+        """Klucz głosu, którym czytać napis `text` pojawiający się w chwili `t` (time.monotonic), albo None → cisza.
 
-        Z tekstem: szukamy wypowiedzi z dźwięku, której ANGIELSKA transkrypcja pasuje do angielskiego napisu (to
-        wprost mówi, która postać go wypowiada); bez dopasowania tekstu — najbliższa w czasie."""
+        Z tekstem: szukamy wypowiedzi z dźwięku, której ANGIELSKA transkrypcja pasuje do angielskiego napisu — to
+        dokładnie ta wypowiedź, którą czytamy po polsku. Jeśli jej postać ma już dobry głos, czytamy nim; jeśli nie,
+        wzorcem głosu staje się audio TEJ wypowiedzi (po jej zakończeniu), więc głos zawsze pochodzi od właściwej osoby."""
         deadline = time.monotonic() + max(0.0, wait)
         if t <= 0 or time.monotonic() - t > SPEAKER_MATCH_TTL:
             self._log("postacie: pomijam stare dopasowanie głosu")
@@ -3323,11 +3325,15 @@ class SpeakerBank:
                     return None
                 found, how = None, "czas"
                 if text:
-                    scored = [
-                        (speech_text_score(text, e.get("text")), -abs(e["start"] - t), e)
-                        for e in self.timeline if e.get("text") and e["key"] is not None and abs(e["start"] - t) <= 9.0
-                    ]
-                    scored = [item for item in scored if item[0] >= 0.5]
+                    scored = []
+                    for e in self.timeline:
+                        if not e.get("text") or e["key"] is None or abs(e["start"] - t) > 9.0:
+                            continue
+                        # wstępny (urwany) odczyt nie wystarczy, dopóki postać nie ma głosu: czekamy na pełną wypowiedź
+                        if e["provisional"] and not self.speakers.get(self._resolve(e["key"]), {}).get("ready"):
+                            continue
+                        scored.append((speech_text_score(text, e["text"]), -abs(e["start"] - t), e))
+                    scored = [item for item in scored if item[0] >= 0.4]
                     if scored:
                         found, how = max(scored, key=lambda item: (item[0], item[1]))[2], "tekst"
                 if found is None and (not text or time.monotonic() >= deadline):
@@ -3335,22 +3341,94 @@ class SpeakerBank:
                     found = min(candidates, key=lambda e: max(e["start"] - t, t - e["end"], 0.0), default=None)
                     if found is not None and found["key"] is None:
                         found = None
+                    # z tekstem napisu: wypowiedź, której angielski tekst wyraźnie NIE pasuje, to nie ta kwestia — cisza
+                    if found is not None and text and found.get("text") and speech_text_score(text, found["text"]) < 0.2:
+                        found = None
                 if found is not None or time.monotonic() >= deadline:
                     break
                 self._cond.wait(max(0.0, deadline - time.monotonic()))
-            key = found["key"] if found else None
-            for _ in range(3):  # scalona/zapomniana postać → jej następca
-                alias = self.speakers.get(key, {}).get("alias") if key else None
-                if not alias:
-                    break
-                key = alias
-            if key and self.speakers.get(key, {}).get("ready"):
+            key = self._resolve(found["key"]) if found else None
+            ready = bool(key and self.speakers.get(key, {}).get("ready"))
+            if ready:
                 self.speakers[key]["used"] = self.speakers[key].get("used", 0) + 1
                 self._log(f"postacie: dopasowanie {key.split('_')[0]} po {how} (podobieństwo {found.get('similarity') or 0:.2f})")
                 return key
-            if key:
-                self._log(f"postacie: {key.split('_')[0]} rozpoznana po {how}, ale jej głos jeszcze nie jest gotowy")
+        if key and found is not None and not found["provisional"] and found.get("audio") is not None:
+            # postać nie ma jeszcze głosu: wzorzec z tej właśnie wypowiedzi (poza blokadą — to ~0,4 s w OmniVoice)
+            if self._build_from_entry(found, key, how):
+                return key
             return None
+        if key:
+            self._log(f"postacie: {key.split('_')[0]} rozpoznana po {how}, ale jej głos jeszcze nie jest gotowy")
+        return None
+
+    def _resolve(self, key):
+        for _ in range(3):  # scalona/zapomniana postać → jej następca
+            alias = self.speakers.get(key, {}).get("alias") if key else None
+            if not alias:
+                break
+            key = alias
+        return key
+
+    def _build_from_entry(self, entry, key, how, count_failures=False):
+        """Głos postaci z audio jednej wypowiedzi (+ ewentualnie krótki dodatek od TEJ SAMEJ osoby). True, gdy gotowy."""
+        cloud = self._cloud()
+        sp = self.speakers.get(key)
+        if cloud is None or not cloud.ready or sp is None or sp.get("blocked"):
+            return False
+        clips, texts = [entry["audio"]], [entry["text"]]
+        total = clips[0].size / float(SAMPLE_RATE)
+        if total < SPEAKER_SAMPLE_SEC[0]:  # za krótka: dokładamy wcześniejsze wypowiedzi tej samej osoby (po wektorze)
+            with self._cond:
+                others = [e for e in reversed(self.timeline) if e is not entry and not e["provisional"]
+                          and e.get("audio") is not None and e.get("vec") is not None and e.get("text")]
+            for e in others:
+                if total >= SPEAKER_SAMPLE_SEC[0]:
+                    break
+                if entry.get("vec") is not None and float(e["vec"] @ entry["vec"]) >= SPEAKER_SAME_PERSON_SIM:
+                    clips.append(e["audio"])
+                    texts.append(e["text"])
+                    total += e["audio"].size / float(SAMPLE_RATE)
+        limit = int(SPEAKER_SAMPLE_SEC[1] * SAMPLE_RATE)
+        chunks, got = [], 0
+        for clip in clips:
+            if chunks:
+                gap = np.zeros(min(int(0.15 * SAMPLE_RATE), max(0, limit - got)), dtype=np.float32)
+                chunks.append(gap)
+                got += gap.size
+            clip = clip[:max(0, limit - got)]
+            chunks.append(clip)
+            got += clip.size
+            if got >= limit:
+                break
+        sample = np.concatenate(chunks)
+        text = " ".join(texts)
+        if self._expects_english is not None and self._expects_english() and (
+                any(ch in PL_MARK for ch in text) or looks_polish(text)):
+            if count_failures:  # postać złożona z polskiej mowy to wyciek głosu lektora — nie próbujemy dalej
+                with self._cond:
+                    sp["blocked"] = True
+            self._log(f"postacie: wzorzec {key.split('_')[0]} brzmi po polsku — to nie postać z gry")
+            return False
+        quality, why = self._sample_quality(sample, text)
+        if why:
+            if count_failures:  # w tle: po kilku słabych wypowiedziach z rzędu postać dostaje głos dopiero przy własnej kwestii
+                with self._cond:
+                    sp["tries"] = sp.get("tries", 0) + 1
+            self._log(f"postacie: wzorzec {key.split('_')[0]} z tej wypowiedzi odrzucony ({why}): {normalize_text(text)[:50]!r}")
+            return False
+        took = cloud.set_voice(key, sample, text)
+        if took is None:
+            return False
+        with self._cond:
+            sp.update(ready=True, quality=quality, used=1, pool=[])
+            self._cond.notify_all()
+        self._log(
+            f"postacie: głos {key.split('_')[0]} z wypowiedzi napisu (po {how}): {sample.size / SAMPLE_RATE:.1f} s, "
+            f"{took:.1f}s; tekst wzorca: {normalize_text(text)[:60]!r}"
+        )
+        self._prune(key, cloud)
+        return True
 
     # --- wątek rozpoznawania ---------------------------------------------------------------
     def _run(self):
@@ -3394,6 +3472,7 @@ class SpeakerBank:
             self.timeline = deque((e for e in self.timeline if not (e["provisional"] and abs(e["start"] - start) < 0.05)), maxlen=40)
             self.timeline.append({
                 "start": start, "end": end, "key": key, "provisional": provisional, "similarity": similarity, "text": said,
+                "audio": None if provisional else audio[:int(8.0 * SAMPLE_RATE)].copy(), "vec": vec,
             })
             self._cond.notify_all()
         if self._debug is not None:
@@ -3410,7 +3489,14 @@ class SpeakerBank:
                 pass
         if provisional or key is None or seconds < SPEAKER_UTT_SEC:
             return
-        self._collect(key, audio, seconds, cloud, generation, vec)
+        with self._cond:
+            entry = next((e for e in reversed(self.timeline) if e["start"] == start and not e["provisional"]), None)
+            sp = self.speakers.get(key)
+            wanted = (entry is not None and sp is not None and not sp["ready"] and not sp.get("blocked")
+                      and generation == self._generation)
+        if wanted and seconds >= SPEAKER_SAMPLE_SEC[0]:
+            # pełna, dość długa wypowiedź postaci bez głosu: wzorzec z TEJ JEDNEJ wypowiedzi (bez sklejania z innymi)
+            self._build_from_entry(entry, key, "wypowiedź", count_failures=True)
 
     def _assign(self, vec, seconds, create):
         """(klucz, podobieństwo). Krótkie segmenty mają zaszumione wektory: nie zakładają postaci i nie przesuwają jej
@@ -3495,85 +3581,6 @@ class SpeakerBank:
                 self._log(f"postacie: za dużo głosów — zapominam {loser.split('_')[0]} (najrzadziej używany)")
                 self._forget(loser, cloud, alias=nearest)
 
-    def _collect(self, key, audio, seconds, cloud, generation, vec=None):
-        with self._cond:
-            if generation != self._generation:
-                return
-            sp = self.speakers[key]
-        if sp["ready"] or sp.get("blocked"):
-            return
-        audio = audio[:int(SPEAKER_SAMPLE_SEC[1] * SAMPLE_RATE)].copy()
-        if vec is not None and float(vec @ sp["centroid"]) < SPEAKER_CLIP_MIN_SIM:
-            return  # ten kawałek jest dalej od postaci, niż wolno — nie psuje jej próbki
-        sp["pool"].append((audio.size / float(SAMPLE_RATE), audio))
-        sp["pool"].sort(key=lambda item: -item[0])
-        del sp["pool"][4:]
-        total = sum(sec for sec, _a in sp["pool"])
-        if total < SPEAKER_SAMPLE_SEC[0]:
-            return
-        chunks, got = [], 0
-        limit = int(SPEAKER_SAMPLE_SEC[1] * SAMPLE_RATE)
-        for sec, clip in sp["pool"]:
-            if chunks:
-                gap = np.zeros(min(int(0.15 * SAMPLE_RATE), limit - got), dtype=np.float32)
-                chunks.append(gap)
-                got += gap.size
-            clip = clip[:limit - got]
-            chunks.append(clip)
-            got += clip.size
-            if got >= limit:
-                break
-        sample = np.concatenate(chunks)
-        text = self._transcribe(sample)  # Parakeet: OmniVoice potrzebuje transkrypcji wzorca
-        with self._cond:
-            if not text or cloud is not self._cloud() or not cloud.ready or generation != self._generation:
-                return
-        if self._debug is not None:
-            try:
-                pcm = (np.clip(sample, -1.0, 1.0) * 32767.0).astype("<i2")
-                with wave.open(str(self._debug / f"sample_{key.split('_')[0]}.wav"), "wb") as handle:
-                    handle.setnchannels(1)
-                    handle.setsampwidth(2)
-                    handle.setframerate(SAMPLE_RATE)
-                    handle.writeframes(pcm.tobytes())
-                (self._debug / f"sample_{key.split('_')[0]}.txt").write_text(text, encoding="utf-8")
-            except Exception:
-                pass
-        if self._expects_english is not None and self._expects_english() and (
-                any(ch in PL_MARK for ch in text) or looks_polish(text)):
-            # angielska mowa z gry nie zawiera polskich zdań — to przeciekł głos lektora (albo klona): nie klonuj go
-            with self._cond:
-                sp["pool"] = []
-                sp["blocked"] = True
-            self._log(f"postacie: próbka {key.split('_')[0]} brzmi po polsku ({text[:50]!r}) — odrzucona, to nie postać z gry")
-            return
-        quality, why = self._sample_quality(sample, text)
-        if why:
-            # słaba próbka („Mm-hmm.”, „Come on.”): nie klonujemy, zbieramy od nowa — do SPEAKER_SAMPLE_TRIES razy
-            with self._cond:
-                sp["pool"] = []
-                sp["tries"] = sp.get("tries", 0) + 1
-                if sp["tries"] >= SPEAKER_SAMPLE_TRIES:
-                    sp["blocked"] = True
-            self._log(f"postacie: próbka {key.split('_')[0]} odrzucona ({why}): {normalize_text(text)[:50]!r}")
-            return
-        took = cloud.set_voice(key, sample, text)
-        if took is not None:
-            with self._cond:
-                if generation != self._generation or cloud is not self._cloud():
-                    return
-                sp["ready"] = True
-                sp["quality"] = quality
-                sp["used"] = 0
-                sp["pool"].clear()
-                self._cond.notify_all()
-            self._prune(key, cloud)
-            sample_text = normalize_text(text)[:70]
-            self._log(
-                f"postacie: głos {key} gotowy ({sample.size / SAMPLE_RATE:.1f} s próbki, {took:.1f}s; "
-                f"transkrypcja próbki: {sample_text!r})"
-            )
-
 
 # Głosy Jasona i Lucii (przełącznik „heroVoices”): gotowe próbki ze zwiastuna zamiast odkrywania postaci w grze.
 # Próg barwy z pomiaru 18.11 na Trailerze 2: Jason↔Jason 0,53–0,85, strażnik↔Jason 0,16–0,22.
@@ -3646,9 +3653,6 @@ class HeroBank(SpeakerBank):
             self._log(f"bohaterowie: wypowiedź {seconds:.1f}s, najbliżej {self.speakers[best]['hero']} "
                       f"podobieństwo {sim:.2f} → {self.speakers[best]['hero'] if hit else 'lektor'}")
         return (best if hit else None), max(-1.0, min(1.0, sim))
-
-    def _collect(self, key, audio, seconds, cloud, generation, vec=None):
-        return  # bohaterowie mają gotowe próbki
 
     def key_for_name(self, name):
         """Klucz bohatera po imieniu z napisu („JASON”, „Lucia”) albo None (inne imię, bohater niegotowy)."""

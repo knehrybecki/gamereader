@@ -82,11 +82,11 @@ class PolishSampleRejectedTest(unittest.TestCase):
         bank._backend = cloud
         return bank, cloud
 
-    def _feed(self, bank, n=4):
-        tt = np.arange(int(SR * 1.8)) / SR
+    def _feed(self, bank, n=2):
+        tt = np.arange(int(SR * 3.6)) / SR
         speech = (0.2 * np.sin(2 * np.pi * 140 * tt) * (1 + np.sin(2 * np.pi * 4 * tt)) / 2).astype(np.float32)
         for i in range(n):
-            bank._handle(speech, 10.0 + 3 * i, 11.8 + 3 * i, False)
+            bank._handle(speech, 10.0 + 5 * i, 13.6 + 5 * i, False)
 
     def test_sample_that_sounds_polish_is_not_cloned(self):
         bank, cloud = self._bank("Dobrze w nich wyglądasz. Mm-hmm.")
@@ -182,27 +182,17 @@ class SampleQualityTest(unittest.TestCase):
     def test_silence_is_rejected(self):
         self.assertTrue(ge.SpeakerBank._sample_quality(np.zeros(SR * 4, np.float32), "I look good in these, honestly.")[1])
 
-    def test_weak_sample_does_not_create_a_voice_and_collection_restarts(self):
+    def test_weak_sample_does_not_create_a_voice_and_is_counted(self):
         calls = []
         cloud = SimpleNamespace(ready=True, embed=lambda a: np.array([1.0, 0.0], dtype=np.float32),
                                 set_voice=lambda *a: calls.append(a) or 0.0, forget_voice=lambda k: None)
         bank = ge.SpeakerBank(lambda: cloud, lambda a: "Mm-hmm.")
         bank._backend = cloud
-        for i in range(4):
-            bank._handle(self._speech(1.8), 10.0 + 3 * i, 11.8 + 3 * i, False)
+        for i in range(2):
+            bank._handle(self._speech(3.6), 10.0 + 5 * i, 13.6 + 5 * i, False)
         self.assertEqual(calls, [])
         self.assertFalse(bank.any_ready())
-        sp = next(iter(bank.speakers.values()))
-        self.assertGreaterEqual(sp["tries"], 1)
-
-    def test_outlier_clip_does_not_enter_the_sample(self):
-        cloud = SimpleNamespace(ready=True, embed=lambda a: np.array([1.0, 0.0], dtype=np.float32),
-                                set_voice=lambda *a: 0.0, forget_voice=lambda k: None)
-        bank = ge.SpeakerBank(lambda: cloud, lambda a: "x")
-        bank._backend = cloud
-        bank.speakers["s1_x_1"] = {"centroid": np.array([1.0, 0.0], dtype=np.float32), "n": 5.0, "pool": [], "ready": False}
-        bank._collect("s1_x_1", self._speech(2.0), 2.0, cloud, bank._generation, np.array([0.0, 1.0], dtype=np.float32))
-        self.assertEqual(bank.speakers["s1_x_1"]["pool"], [])
+        self.assertGreaterEqual(next(iter(bank.speakers.values()))["tries"], 1)
 
 
 class PruneVoicesTest(unittest.TestCase):
@@ -242,3 +232,70 @@ class PruneVoicesTest(unittest.TestCase):
         bank._prune(f"v{ge.SPEAKER_KEEP}", cloud)
         self.assertEqual(forgotten, ["v0"])
         self.assertNotEqual(bank.speakers["v0"]["alias"], "v0")
+
+
+class VoiceFromTheLineBeingReadTest(unittest.TestCase):
+    """Wzorcem głosu jest audio angielskiej wypowiedzi, która pasuje do czytanego napisu."""
+
+    def setUp(self):
+        from unittest.mock import patch
+        patcher = patch.object(ge, "SPEAKER_MATCH_TTL", 1e9)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _speech(self, seconds, f0=140):
+        t = np.arange(int(SR * seconds)) / SR
+        return (0.2 * np.sin(2 * np.pi * f0 * t) * (1 + np.sin(2 * np.pi * 4 * t)) / 2).astype(np.float32)
+
+    def _bank(self, texts, vecs):
+        calls = []
+        seq = iter(texts)
+        cloud = SimpleNamespace(ready=True, embed=lambda a: np.asarray(next(vecs), dtype=np.float32),
+                                set_voice=lambda key, sample, text: calls.append((key, sample, text)) or 0.0,
+                                forget_voice=lambda k: None)
+        bank = ge.SpeakerBank(lambda: cloud, lambda a: next(seq), expects_english=lambda: True)
+        bank._backend = cloud
+        return bank, calls
+
+    def test_sample_is_the_audio_of_the_matching_utterance_not_the_neighbour(self):
+        vecs = iter([[1, 0], [0, 1]])
+        bank, calls = self._bank(["I always said if aliens land I want them to land in the middle of a race.",
+                                  "Hey wouldn't you two mind driving us down there to the track?"], vecs)
+        a = self._speech(3.6, 140); b = self._speech(3.6, 260)
+        bank._handle(a, 10.0, 13.6, False)
+        bank._handle(b, 14.0, 17.6, False)
+        key = bank.voice_for(14.1, wait=0.0, text="Hey, one of you two mind drivin us down there?")
+        self.assertIsNotNone(key)
+        mine = [c for c in calls if c[0] == key]
+        self.assertEqual(len(mine), 1)
+        self.assertTrue(np.array_equal(mine[0][1][:b.size], b[:mine[0][1].size]))   # próbka = druga wypowiedź
+        self.assertIn("driving us down there", mine[0][2])
+        other = [c for c in calls if c[0] != key]
+        self.assertTrue(all(np.array_equal(c[1][:a.size], a[:c[1].size]) for c in other))  # inna osoba ma własną próbkę
+
+    def test_short_utterance_is_extended_only_with_the_same_person(self):
+        vecs = iter([[1, 0], [0, 1], [1, 0.02]])
+        texts = ["I always said if aliens land I want them to land in the middle of a race.",
+                 "You can't say I don't take you to all the nice places in the world.",
+                 "Hey, Billy! What's up?"]
+        bank, calls = self._bank(texts, vecs)
+        same = self._speech(2.0, 140); other = self._speech(2.0, 300); short = self._speech(1.8, 140)
+        bank._handle(same, 10.0, 12.0, False)
+        bank._handle(other, 14.0, 16.0, False)
+        bank._handle(short, 20.0, 21.8, False)
+        key = bank.voice_for(20.1, text="Hey, Billy! What's up? Yo, what's up?")
+        self.assertIsNotNone(key)
+        _k, sample, text = next(c for c in calls if c[0] == key)
+        self.assertIn("aliens", text)          # dodatek od tej samej osoby
+        self.assertNotIn("nice places", text)  # a nie od innej
+
+    def test_no_matching_utterance_means_silence(self):
+        bank, calls = self._bank(["I always said if aliens land I want them to land in the middle of a race."], iter([[1, 0]]))
+        bank._handle(self._speech(3.6), 10.0, 13.6, False)
+        self.assertIsNone(bank.voice_for(10.1, wait=0.0, text="Completely different words about cars."))
+
+    def test_provisional_reading_is_not_used_to_build_a_voice(self):
+        bank, calls = self._bank(["Hey wouldn't you two mind driving us down there to the track please?"], iter([[1, 0]]))
+        bank._handle(self._speech(1.2), 10.0, 11.2, True)
+        self.assertIsNone(bank.voice_for(10.1, wait=0.0, text="Hey, one of you two mind drivin us down there?"))
+        self.assertEqual(calls, [])
