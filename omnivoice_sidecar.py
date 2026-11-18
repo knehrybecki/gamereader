@@ -93,6 +93,27 @@ class Embedder:
         return (vector / norm).tolist()
 
 
+# Estymator długości OmniVoice wydłuża wypowiedzi krótsze niż 50 tokenów (2 s) krzywą z pierwiastkiem 3. stopnia:
+# „Spoko.” = 1,15 s mowy i lektor nie nadążał w dialogach GTA. 35 / 2,5: krótkie kwestie −23 %, błędy słów bez zmian
+# (Parakeet, 8 kwestii, 18.11; 20 / 2 skracało bardziej, ale model przekręcał słowa — 5/16).
+SHORT_LINE_LOW_TOKENS = 35
+SHORT_LINE_BOOST = 2.5
+
+
+def gentler_short_lines(model):
+    """Łagodniejsze wydłużanie krótkich kwestii w estymatorze długości (brak estymatora = nic nie robi)."""
+    est = getattr(model, "duration_estimator", None)
+    original = getattr(est, "estimate_duration", None)
+    if original is None:
+        return
+
+    def estimate_duration(target_text, ref_text, ref_duration, low_threshold=None, boost_strength=None):
+        return original(target_text, ref_text, ref_duration,
+                        low_threshold=SHORT_LINE_LOW_TOKENS, boost_strength=SHORT_LINE_BOOST)
+
+    est.estimate_duration = estimate_duration
+
+
 def decode_on_gpu(model, device):
     """Dekoder audio (DAC z tokenizera Higgs) na GPU. VoiceStudio trzyma cały tokenizer na CPU, bo jego enkoder nie
     działa na MPS — a dekodowanie długiej kwestii na CPU alokuje ~1 GB buforów, które malloc macOS zostawia w procesie
@@ -241,6 +262,7 @@ def main():
         model = OmniVoice.from_pretrained(
             "k2-fsa/OmniVoice", device_map=device, dtype=torch.float16 if device == "mps" else torch.float32
         )
+        gentler_short_lines(model)
         if device == "mps":
             try:  # inna wersja VoiceStudio bez tych wnętrzności: czytamy dalej, tylko bez oszczędzania pamięci
                 decode_on_gpu(model, device)
