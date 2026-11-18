@@ -128,5 +128,31 @@ class FilmTempoTest(unittest.TestCase):
         self.assertEqual(ge.OMNI_TARGET_LPS, 12.0)
 
 
+class ReadyAudioLookupTest(unittest.TestCase):
+    """Dźwięk zsyntezowany zawczasu (przy pierwszym odczycie OCR) trafia do kwestii także, gdy tekst w kolejce jest
+    wariantem tego samego napisu (18.11: „Czyli jesteśmy w ekipie?” syntezowany od nowa po poprzedniej kwestii)."""
+
+    def engine(self, ready):
+        eng = ge.Engine.__new__(ge.Engine)
+        eng._ready_lock = threading.Lock()
+        eng._ready = dict(ready)
+        eng.logs = []
+        eng._timing = eng.logs.append
+        return eng
+
+    def test_exact_text(self):
+        eng = self.engine({"Chyba tak.": "audio"})
+        self.assertEqual(eng._pop_ready("Chyba tak."), "audio")
+
+    def test_variant_of_same_subtitle(self):
+        eng = self.engine({"Czyli jesteśmy w ekipie": "audio"})
+        self.assertEqual(eng._pop_ready("Czyli jesteśmy w ekipie?"), "audio")
+        self.assertEqual(eng._ready, {})
+
+    def test_other_line_is_not_taken(self):
+        eng = self.engine({"Myślisz, że nam pomoże?": "audio"})
+        self.assertIsNone(eng._pop_ready("Chyba tak."))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -6437,9 +6437,10 @@ class Engine:
                 # ta kwestia właśnie syntezuje się na zapas — poczekaj, zamiast robić ją drugi raz
                 if len(parts) == 1:
                     with self._spec_done:
-                        self._spec_done.wait_for(lambda: self._spec_busy != src, timeout=4.0)
-                with self._ready_lock:
-                    ready = self._ready.pop(src, None)
+                        # ta kwestia (albo wariant jej odczytu) właśnie syntezuje się na zapas — poczekaj, nie rób drugi raz
+                        self._spec_done.wait_for(
+                            lambda: self._spec_busy is None or not ocr_variants(self._spec_busy, src), timeout=4.0)
+                ready = self._pop_ready(src)
                 # kto mówi: jeśli rozpoznana postać ma gotowy głos, czytamy nim — zapas z syntezy zwykłym głosem odpada
                 voice, skip = self._pick_voice(parts, src, translate)
                 if voice:
@@ -6717,6 +6718,19 @@ class Engine:
         except Exception:
             pass
 
+    def _pop_ready(self, src):
+        """Dźwięk przygotowany zawczasu dla tej kwestii — także pod wariantem tekstu tego samego napisu
+        (zapas robi się przy pierwszym odczycie OCR; w kolejce bywa ten sam napis z inną interpunkcją)."""
+        with self._ready_lock:
+            item = self._ready.pop(src, None)
+            if item is None:
+                key = next((k for k in self._ready if ocr_variants(k, src) and not subtitle_extends(k, src)), None)
+                if key is not None:
+                    item = self._ready.pop(key)
+        if item is not None:
+            self._timing(f"zapas trafiony: {src[:50]!r}")
+        return item
+
     def _store_ready(self, src, item):
         with self._ready_lock:
             if len(self._ready) > 8:
@@ -6788,6 +6802,7 @@ class Engine:
                         boost=boost,
                     )
                     self._store_ready(src, (text, segments, arousal, boost, path))
+                    self._timing(f"zapas gotowy (pierwszy odczyt OCR): {src[:50]!r}")
             except Exception:
                 pass
             finally:
