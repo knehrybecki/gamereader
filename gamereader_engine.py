@@ -2934,6 +2934,14 @@ VOICEPACK_DIR = CONFIG_PATH.parent / "voicepacks"
 # 18.11 (prawdziwy proces VoiceStudio, lektor-filmowy, 6 kwestii): 8 kroków 1,72 s / 4 błędne słowa na 33,
 # 6 kroków 1,22 s / 0 na 33, 5 kroków 1,05 s / 2 na 33 — 6 = o 30 % szybciej bez utraty zrozumiałości
 OMNI_STEPS = 6
+# głos z filmu (voice.json „denoise”: true): odszumienie, wyciszenie pauz i ucięcie szumu przed pierwszym słowem
+# w gotowym głosie lektora (18.11: tło sceny z próbki w pauzach i „cichy pisk na początku”); próbka i tempo bez zmian.
+# Poziomy po wyrównaniu w _write_voice (głos RMS 0,1): resztki tła ~27 dB niżej
+FILM_CLEAN_FILTER = (
+    "afftdn=nr=12:nf=-45:tn=1,"
+    "agate=threshold=0.015:ratio=3:attack=5:release=150:range=0.06,"
+    "silenceremove=start_periods=1:start_threshold=-40dB:start_silence=0.06"
+)
 # menu „Jakość głosu”: Szybka = 6 kroków (~0,7 s na kwestię), Wysoka = 8 (~0,9–1 s, trochę gładszy głos);
 # kolejna kwestia syntezuje się w trakcie czytania poprzedniej, więc różnica czasu zwykle się chowa
 OMNI_QUALITY_STEPS = {"fast": OMNI_STEPS, "high": 8}
@@ -2974,6 +2982,9 @@ class OmniVoiceLocal:
         self.pre_filter = (
             f"asetrate={self.rate * deepen:.0f},aresample={self.rate},atempo={1 / deepen:.4f}" if deepen < 0.999 else ""
         )
+        denoise = bool(meta.get("denoise"))
+        if denoise:
+            self.pre_filter = f"{self.pre_filter},{FILM_CLEAN_FILTER}" if self.pre_filter else FILM_CLEAN_FILTER
         try:
             lps = float(meta.get("lps") or 0.0)
         except (TypeError, ValueError):
@@ -3000,7 +3011,8 @@ class OmniVoiceLocal:
                 sample.update(wav.name.encode() + wav.read_bytes())
             except OSError:
                 pass
-        self._tag_rest = f"{deepen:.2f}|{self.speed_scale:.3f}|{styles_tag}|g{guidance:.1f}|s{sample.hexdigest()[:10]}"
+        self._tag_rest = f"{deepen:.2f}|{self.speed_scale:.3f}|{styles_tag}|g{guidance:.1f}|s{sample.hexdigest()[:10]}" + (
+            "|dn" if denoise else "")
         self.steps = OMNI_STEPS  # liczba kroków syntezy idzie z każdym zleceniem — zmiana bez przeładowania modelu
         self.error = ""
         self.failed_until = 0.0
