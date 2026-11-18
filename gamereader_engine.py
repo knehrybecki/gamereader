@@ -235,6 +235,13 @@ def folds_match(fold_a, fold_b):
     return False
 
 
+def subtitle_extends(short, longer):
+    """„Hej.” → „Hej. Mam samochód…”: OCR złapał napis w połowie, a chwilę później w całości."""
+    a = re.sub(r"\s+", " ", polish_fold(normalize_text(short or "").lower())).strip()
+    b = re.sub(r"\s+", " ", polish_fold(normalize_text(longer or "").lower())).strip()
+    return bool(a) and len(b) > len(a) + 3 and b.startswith(a)
+
+
 def ocr_variants(a, b):
     """Dwa odczyty OCR tego samego napisu („e bul o wydarzenie lata…” / „e E t wydarzenie lata…”): ten sam albo
     dłuższy wspólny ciąg pokrywa ≥ 60 % krótszego (min. 12 znaków). Krótka kwestia („Hej.”) nie jest wariantem."""
@@ -2916,7 +2923,7 @@ OMNI_SPEED_SCALE = 0.87
 # Głos z nagrania kopiuje tempo próbki (lektor-filmowy-1/2/3: 5,6–8 liter/s w grze), więc dostaje własny pomiar
 # „lps” w voice.json (tools/voicepack_tempo.py) i speed dobrany do tempa lektora filmowego: zmierzone 18.11
 # „Królewska niespodzianka” 10,9 i „Protektor” 9,8 liter/s (mediana kwestii lektora).
-OMNI_TARGET_LPS = 11.0
+OMNI_TARGET_LPS = 12.0  # 18.11: przy 11 lektor „nie wyrabia” w dialogach GTA; lektor-filmowy do ~14,7 l/s bez bełkotu
 OMNI_SPEED_RANGE = (0.7, 1.5)  # klony z nagrań: 0 błędów słów aż do 1,5 (Parakeet, 6 zdań GTA, 18.11)
 
 
@@ -6266,6 +6273,9 @@ class Engine:
                     self._queue[:] = keep
                     self._prefetch_parts = None
             first = self._queue.pop(0)
+            # napis, który urósł („Hej.” → „Hej. Mam samochód…”): czytamy od razu pełną wersję
+            while self._queue and self._queue[0][1] == first[1] and subtitle_extends(first[0], self._queue[0][0]):
+                first = self._queue.pop(0)
             parts = [first]
             # przygotowane zawczasu: weź dokładnie ten zestaw, dla którego dźwięk już czeka
             limit = len(self._prefetch_parts) if self._prefetch_parts and self._prefetch_parts[0] == first[0] else 99
@@ -6287,6 +6297,11 @@ class Engine:
             return src, translate, full, [src]
         srcs = [item[0] for item in parts]
         return _join_parts(srcs), first[1], parts[-1][2], srcs
+
+    def _grown_version(self, src):
+        """Czy w kolejce czeka pełniejsza wersja tego napisu (18.11: „Hej.”, a zaraz „Hej. Mam samochód…”)."""
+        with self.pending_lock:
+            return any(subtitle_extends(src, item[0]) for item in self._queue)
 
     def _log_junk(self, text, message):
         """Jeden wpis na napis (OCR czyta ten sam napis kilka razy na sekundę)."""
@@ -6437,6 +6452,10 @@ class Engine:
                 odd = self._pl_subs_active and not looks_polish(parts[0])
                 if len(parts) == 1 and self._brain_junk(parts[0], wait=BRAIN_ODD_WAIT if odd else 0.15):
                     self._mark_spoken(parts[0])
+                    continue
+                if self._grown_version(src):
+                    # w czasie syntezy przyszła pełna wersja tego napisu — krótka nie idzie, żeby nie czytać dwa razy
+                    self._timing(f"napis urósł — czytam pełną wersję zamiast {src[:50]!r}")
                     continue
                 with self.pending_lock:
                     newer = self.pending

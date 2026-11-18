@@ -95,5 +95,38 @@ class QueueVariantsTest(unittest.TestCase):
         self.assertFalse(ge.ocr_variants("Hej.", "Hej. Mam samochód tego Raula i jadę pod wskazany adres."))
 
 
+class GrowingSubtitleTest(unittest.TestCase):
+    """Napis, który OCR złapał w połowie („Hej.”), a chwilę później w całości („Hej. Mam samochód…”), lektor
+    czyta raz — od razu pełną wersję (18.11: „Hej.” i zaraz „Hej. Mam samochód tego Raula…”)."""
+
+    def test_longer_version_replaces_short_one(self):
+        eng = engine_with_queue([0.6, 0.2])
+        texts = ["Mam samochód Raula.", "Mam samochód Raula. Jadę pod wskazany adres."]
+        eng._queue = [(t, False, t) for t in texts]
+        eng._seen_at = {texts[0]: 99.4, texts[1]: 99.8}
+        eng._prefetch_parts = [texts[0]]  # zsyntezowany zawczasu sam początek — i tak ustępuje pełnej wersji
+        with patch.object(ge.time, "monotonic", return_value=100.0):
+            item = eng._take_pending()
+        self.assertEqual(item[3], [texts[1]])
+
+    def test_grown_version_waiting_before_playback(self):
+        eng = engine_with_queue([0.2])
+        full = "Hej. Mam samochód tego Raula i jadę pod wskazany adres."
+        eng._queue = [(full, False, full)]
+        self.assertTrue(eng._grown_version("Hej."))
+        self.assertFalse(eng._grown_version("Super. Jestem w drodze."))
+
+    def test_extends_needs_real_prefix(self):
+        self.assertTrue(ge.subtitle_extends("Hej.", "Hej. Mam samochód tego Raula."))
+        self.assertFalse(ge.subtitle_extends("Uwaga!", "Skoczyłem, kurwa."))
+        self.assertFalse(ge.subtitle_extends("Hej.", "Hej."))
+
+
+class FilmTempoTest(unittest.TestCase):
+    def test_game_lektor_target_is_a_bit_faster_than_film(self):
+        # filmy z lektorem 9,8–10,9 liter/s; dialogi GTA szybsze — 18.11 lektor „nie wyrabia” przy 11
+        self.assertEqual(ge.OMNI_TARGET_LPS, 12.0)
+
+
 if __name__ == "__main__":
     unittest.main()

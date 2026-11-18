@@ -302,7 +302,9 @@ class VoiceStudioTempoTest(unittest.TestCase):
         self.assertIn(f"{ge.OMNI_TARGET_LPS / 10.4:.3f}", ov.tag)  # inne tempo = inne nagrania w cache
 
     def test_fast_voice_is_slowed_down(self):
-        self.assertLess(self.pack('{"lps": 13.1}').job_speed(1.0), 0.9)
+        speed = self.pack('{"lps": 13.1}').job_speed(1.0)
+        self.assertLess(speed, 1.0)
+        self.assertAlmostEqual(speed, round(ge.OMNI_TARGET_LPS / 13.1, 2))
 
     def test_voice_without_measurement_keeps_old_scale(self):
         self.assertAlmostEqual(self.pack('{"deepen": 1.0}').job_speed(1.0), ge.OMNI_SPEED_SCALE)
