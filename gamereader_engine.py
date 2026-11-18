@@ -2588,6 +2588,19 @@ def polish_common_words(text):
     return sum(1 for w in re.findall(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]{2,}", (text or "").lower()) if w in _POLISH_COMMON)
 
 
+def scene_text_junk(text):
+    """Napis z kadru, nie kwestia: szyld, naklejka („DA VES”, „LAY CHEE!” z SPRAY CHEESE) — same wielkie
+    litery bez polskich znaków i słów — albo strzęp znaków („: / :łął”). Krzyk w napisach („NIE!”,
+    „STÓJ!”) zostaje: ma polskie słowo albo polską literę."""
+    chars = re.sub(r"\s", "", text or "")
+    letters = re.findall(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]", chars)
+    if not chars or polish_common_words(text) > 0:
+        return False
+    if len(letters) * 2 <= len(chars):
+        return True
+    return not re.search(r"[a-ząćęłńóśźż]", text) and not re.search(r"[ĄĆĘŁŃÓŚŹŻ]", text)
+
+
 def spanish_sentence(text):
     """Zdanie całe po hiszpańsku („Hola, señor García! Vámonos.”) — VoiceStudio mówi je modelem hiszpańskim.
 
@@ -6256,6 +6269,10 @@ class Engine:
             if not self.no_barge_in:
                 self._tts_interrupt.set()
                 self.lektor.stop()
+            else:
+                # synteza od razu, w trakcie czytania bieżącej — po niej lektor wchodzi bez czekania
+                # (18.11: „Chyba tak.” czekało 0,5 s na koniec poprzedniej i jeszcze 0,7 s na syntezę)
+                self._speculate(src, translate)
             return
         self._enqueue((src, translate, src))
 
@@ -6710,6 +6727,9 @@ class Engine:
         with self._ready_lock:
             if src in self._ready:
                 return
+        busy = getattr(self, "_spec_busy", None)
+        if busy and ocr_variants(busy, src):
+            return  # ta kwestia już się syntezuje w tle (od chwili, gdy przyszła)
         try:
             text, segments, arousal, boost = self._plan_line(src, translate, parts)
             if not segments:
@@ -6990,6 +7010,9 @@ class Engine:
         if (not should_translate(src) and ocr_reading_rank(src) <= 0 and polish_common_words(src) < 2
                 and len(re.findall(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+", src)) >= 3):
             self._log_junk(src, f"pomijam — odczyt bez polskich słów: {src[:70]!r}")
+            return
+        if not should_translate(src) and scene_text_junk(src):
+            self._log_junk(src, f"pomijam — napis z kadru: {src[:70]!r}")
             return
         if screen_junk_level(src) == "junk":
             self._log_junk(src, f"pomijam — to nie dialog (reguła): {src[:70]!r}")
