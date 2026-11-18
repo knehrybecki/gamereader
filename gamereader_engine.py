@@ -1376,6 +1376,10 @@ LEKTOR_MAX_RATE = 1.60
 LEKTOR_MAX_STRETCH = 1.20
 # gdy w kolejce czeka już następny napis: kolejne fragmenty syntezują się szybciej, bez pauz
 LEKTOR_CATCHUP_RATE = 1.08
+# lektor VoiceStudio spóźniony za napisem przyspiesza najwyżej tyle (zasada użytkownika: nie szybciej niż ×1,15);
+# sufit Supertonic (LEKTOR_MAX_RATE przy profilu gry tts 0,92) dawał tylko ×1,04 — 18.11 lektor 3,6 s za napisem
+# czytał „tempo x1.05” i pomijał zaległe kwestie
+LEKTOR_CLOUD_MAX_BOOST = 1.15
 # tempo dopasowane do napisów: lektor ma się zmieścić w czasie, w którym napis wisi na ekranie
 LEKTOR_CPS_PRIOR = 15.0  # znaki/s lektora przy speed=1 — potem uczy się z własnych syntez
 # nastrój z napisu (słowa i interpunkcja): tylko głośność i pauza — bez domieszki innego głosu
@@ -3826,8 +3830,10 @@ class MaleLektor:
         else:
             by_length = 1.16
         needed = len(text) / (self.cps1 * max(0.6, seconds * 0.92)) / base if seconds and seconds > 0 else 1.0
-        boost = max(1.0, by_length, min(LEKTOR_MAX_RATE / base, needed))
-        cap = LEKTOR_MAX_RATE / base
+        cloud = getattr(self, "cloud", None)
+        voicestudio = cloud is not None and time.monotonic() >= getattr(cloud, "failed_until", 0.0)
+        cap = LEKTOR_CLOUD_MAX_BOOST if voicestudio else LEKTOR_MAX_RATE / base
+        boost = max(1.0, by_length, min(cap, needed))
         late = min(1.0, max(0.0, (float(lag or 0.0) - 1.0) / 1.5))
         boost = min(max(boost, 1.0 + late * (cap - 1.0)), cap)
         return round(boost * 20) / 20  # stopnie co 0,05 — cache się powtarza
@@ -3932,8 +3938,9 @@ class MaleLektor:
 
     def _synth_cloud(self, cloud, text, path, pace, pause, voice=None, style=None):
         """Lektor z VoiceStudio; None = nie wyszło (lektor czyta Supertonic). Tempo w całości po stronie głosu."""
-        speed, stretch = lektor_speed_split(pace, text)
-        rate = speed * stretch / LEKTOR_SPEED  # 1,0 = zwykłe tempo lektora
+        # wprost z planu, bez limitów Supertonic (lektor_speed_split zwalniał krótkie i średnie kwestie do ~0,85,
+        # bo Supertonic gubi przy nich głoski — OmniVoice nie); granice modelu pilnuje OmniVoiceLocal.job_speed
+        rate = max(0.7, min(1.6, 1.0 / max(0.5, pace)))  # 1,0 = zwykłe tempo lektora
         prev, at = self._cloud_prev
         # zdanie całe po hiszpańsku: oryginalna pisownia i model hiszpański (wybór 18.11); w polskim zdaniu angielskie
         # nazwy w oryginale, hiszpańskie spolszczone (Lucia → Lus'ija); polish_pronounce to obejścia Supertonic
