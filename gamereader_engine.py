@@ -2648,6 +2648,38 @@ def _is_polish_word(word):
     return word.lower() in _POLISH_COMMON or folded in _POLISH_BY_FOLD or folded in _pl_diacritics()
 
 
+LEKTOR_VERIFY = True  # nagranie lektora VoiceStudio sprawdzane rozpoznawaniem mowy (Parakeet, ~0,15 s, ~1 GB)
+LOST_WORD_WINDOW = 6
+LOST_WORD_MATCH = 0.6  # podobieństwo słowa usłyszanego do napisanego, od którego uznajemy, że padło
+
+
+def lost_words(text, heard):
+    """Słowa kwestii, których nie słychać w nagraniu lektora (heard = rozpoznana mowa), po kolei jak w zdaniu.
+    Pomija słówka krótsze niż 3 litery i imiona (wielka litera w środku zdania, angielskie imię na początku),
+    bo rozpoznawanie mowy myli je i bez błędu lektora (Dobbs → „dobrze”). Za mało słów do oceny → []."""
+    got = [polish_fold(w) for w in re.findall(r"\w+", heard or "")]
+    judged, lost, start, pos = 0, [], True, 0
+    for tok in re.findall(r"\w+|[.!?…]", text or ""):
+        if tok in ".!?…":
+            start = True
+            continue
+        at_start, start = start, False
+        if len(tok) < 3 or tok.isdigit():
+            continue
+        if tok[0].isupper() and (not at_start or tok in ENGLISH_NAMES or _ENGLISH_MARK.search(tok.lower())):
+            continue
+        judged += 1
+        folded = polish_fold(tok)
+        # dopasowanie po kolei: kilka słów naprzód (pominięte imiona i krótkie słówka też są w rozpoznanym tekście)
+        hit = next((i for i in range(pos, min(len(got), pos + LOST_WORD_WINDOW))
+                    if SequenceMatcher(None, folded, got[i]).ratio() >= LOST_WORD_MATCH), None)
+        if hit is None:
+            lost.append(folded)
+        else:
+            pos = hit + 1
+    return lost if judged >= 2 else []
+
+
 # imię spoza listy: polska końcówka + rdzeń z cechami angielskiej pisowni (tych połączeń nie ma w polskich słowach)
 _FOREIGN_INFLECTED = re.compile(r"\b([A-Z][a-z]{2,}?)(owie|owi|ami|ach|ego|emu|em|om|ów|ie|ym|a|u|ą|ę)\b")
 _ENGLISH_MARK = re.compile(r"th|sh|ck|oo|ee|ay|ey|oy|igh|ph|[xq]")  # bez „aw”: Warszawa, Sławek
@@ -3979,6 +4011,7 @@ class MaleLektor:
         self.out = PlayerProcess()
         self.ffmpeg = which_bin("ffmpeg") or bundled_ffmpeg()
         self.cloud = None  # OmniVoiceLocal, gdy wybrany lektor z VoiceStudio
+        self.verify = None  # rozpoznawanie mowy (nagranie 16 kHz → tekst albo None) do łapania zgubionych słów
         self._cloud_prev = ("", 0.0)
         self.on_cloud_error = None
 
@@ -4234,18 +4267,45 @@ class MaleLektor:
         spoken = text if spanish else voicestudio_names(text)
         if not voice:
             spoken = flat_exclamations(spoken)
-        audio = cloud.synth(
-            spoken, speed=rate, language="es" if spanish else "pl", style=style,
-            previous="" if voice else (prev if time.monotonic() - at < 12.0 else ""), voice=voice,
-        )
+        def synth():
+            return cloud.synth(
+                spoken, speed=rate, language="es" if spanish else "pl", style=style,
+                previous="" if voice else (prev if time.monotonic() - at < 12.0 else ""), voice=voice,
+            )
+
+        audio = synth()
         if audio is None:
             if cloud.error and self.on_cloud_error:
                 self.on_cloud_error(cloud.error)
             return None
+        if not voice and not spanish and getattr(self, "verify", None) is not None:
+            audio = self._without_lost_words(audio, cloud.rate, text, synth)
         if not voice:
             self._cloud_prev = (text, time.monotonic())
         self._write_voice(audio, cloud.rate, text, max(0.5, rate * LEKTOR_SPEED), path, pause)
         return 1.0
+
+    def _heard_lost(self, audio, sr, text):
+        """Zgubione słowa wg rozpoznawania mowy; None = nie da się ocenić (model jeszcze się ładuje, błąd)."""
+        try:
+            pcm16 = np.interp(np.arange(0, audio.size, sr / SAMPLE_RATE), np.arange(audio.size), audio)
+            heard = self.verify(pcm16.astype(np.float32))
+        except Exception:
+            return None
+        return None if heard is None else lost_words(text, heard)
+
+    def _without_lost_words(self, audio, sr, text, synth):
+        """OmniVoice losowo gubi słowa (19.11: „Świetnie!”, „tobie”, całe drugie zdanie) — ta sama kwestia drugi
+        raz zwykle wychodzi cała. Jedna powtórka; zostaje nagranie z mniejszą liczbą zgubionych słów."""
+        lost = self._heard_lost(audio, sr, text)
+        if not lost:
+            return audio
+        again = synth()
+        lost2 = self._heard_lost(again, sr, text) if again is not None else None
+        better = lost2 is not None and len(lost2) < len(lost)
+        log_timing(f"lektor zgubił {', '.join(lost)} — powtórka {'cała' if better and not lost2 else 'lepsza' if better else 'nie lepsza'}"
+                   f" | {text[:50]!r}")
+        return again if better else audio
 
     def _write_voice(self, audio, sr, text, speed, path, pause):
         # przytnij ciszę na brzegach (szybszy start), dodaj pauzę zależną od nastroju
@@ -5653,6 +5713,12 @@ class Engine:
             self.translator = LlmTranslator(self.translator, log=log_timing)
             self.translator.start()
         self.stt = ParakeetSTT()
+
+        def verify(audio):
+            # dopiero gdy model wczytany (wczytuje go _warmup_voice) — pierwsza kwestia nie czeka 4 s
+            return self.stt.transcribe(audio) if self.stt.model is not None else None
+
+        self.lektor.verify = verify if LEKTOR_VERIFY else None
         self.prosody = ProsodyMeter()
         # czy postać teraz mówi (dźwięk gry) — lektor wchodzi chwilę po niej, jak w filmie
         self.voice = VoiceActivity()
@@ -5794,6 +5860,11 @@ class Engine:
             self.emit({"event": "status", "text": f"Lektor gotowy (Supertonic {self.lektor.voice}, {self.lektor.device_label})."})
         except Exception as exc:
             self.emit({"event": "status", "text": f"Lektor nie wstaje: {exc}"})
+        if LEKTOR_VERIFY:
+            try:
+                self.stt.warmup()  # sprawdzanie zgubionych słów lektora VoiceStudio
+            except Exception as exc:
+                log_timing(f"rozpoznawanie mowy nie wstaje: {exc}")
         if self.brain is not None:
             self.brain.start()  # po lektorze: pierwszy głos nie czeka na wczytanie modelu decyzji
 
