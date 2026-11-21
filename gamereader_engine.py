@@ -2,6 +2,7 @@ import copy
 import functools
 import hashlib
 import inspect
+import itertools
 import wave
 import json
 import os
@@ -637,6 +638,61 @@ def _pl_diacritics():
     return _PL_DIACRITICS
 
 
+_PL_WORDS = None
+# model łaciński PaddleOCR czyta polskie ogonki jako czeskie/słowackie („tež”, „že”, „Každa”)
+_LATIN_TO_PL = str.maketrans({
+    "ž": "ż", "Ž": "Ż", "š": "ś", "Š": "Ś", "č": "ć", "Č": "Ć", "ě": "ę", "Ě": "Ę", "ň": "ń", "Ň": "Ń",
+    "ĺ": "ł", "Ĺ": "Ł", "ľ": "ł", "Ľ": "Ł", "ř": "r", "Ř": "R", "ů": "u", "Ů": "U",
+})
+
+
+def _pl_words():
+    """~290 tys. słów z napisów: forma bez ogonków → jedyna forma z ogonkami albo '' (pl_words.tsv obok silnika)."""
+    global _PL_WORDS
+    if _PL_WORDS is None:
+        table = {}
+        try:
+            with open(Path(__file__).resolve().with_name("pl_words.tsv"), encoding="utf-8") as handle:
+                for line in handle:
+                    if line.startswith("#"):
+                        continue
+                    fold, _tab, word = line.rstrip("\n").partition("\t")
+                    if fold:
+                        table[fold] = word
+        except OSError:
+            pass
+        _PL_WORDS = table
+    return _PL_WORDS
+
+
+def latin_ocr_polish(text):
+    """Odczyt PaddleOCR (model łaciński) → polskie litery: czeskie znaki na polskie, a słowo spoza słownika z „t”
+    w miejscu „ł” („odpalita”, „Zatóżmy”) — na słowo ze słownika. Znane słowa i imiona zostają bez zmian."""
+    text = (text or "").translate(_LATIN_TO_PL)
+    words = _pl_words()
+    if not words:
+        return text
+
+    def fix(match):
+        token = match.group(0)
+        fold = polish_fold(token)
+        if len(fold) < 3 or len(fold) != len(token) or fold in words or "t" not in fold:
+            return token
+        spots = [i for i, ch in enumerate(fold) if ch == "t"]
+        for count in (1, 2):
+            for picked in itertools.combinations(spots, count):
+                variant = "".join("l" if i in picked else ch for i, ch in enumerate(fold))
+                form = words.get(variant)
+                if form is None:
+                    continue
+                if form:
+                    return _preserve_case(token, form)
+                return "".join(("Ł" if ch.isupper() else "ł") if i in picked else ch for i, ch in enumerate(token))
+        return token
+
+    return re.sub(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+", fix, text)
+
+
 def _restore_from_dict(token):
     """Uzupełnij zgubione ogonki („blędy”, „bledy” → „błędy”), jeśli reszta liter się zgadza."""
     word = _pl_diacritics().get(polish_fold(token))
@@ -1206,7 +1262,9 @@ LAG_CONDENSE_STRONG = 3.5
 # po kawałku, a OCR czyta nakładające się linie jako różne warianty
 SENTENCE_REPEAT_SEC = 12.0
 # ile kwestii może czekać w kolejce (więcej = najstarsza przepada)
-SPEECH_QUEUE_MAX = 4
+SPEECH_QUEUE_MAX = 12  # 21.11: było 4 — w szybkiej rozmowie najstarsza kwestia przepadała
+# lektor czyta każdą kwestię w całości: bez skrótów, bez wyrzucania wtrąceń i zaległych kwestii (21.11)
+READ_EVERY_LINE = True
 # najdłużej tyle lektor czeka na syntezę „na zapas” tej samej kwestii (z powtórką po zgubionym słowie bywa ~3 s)
 SPEC_WAIT_MAX = 4.0
 # polskie napisy + angielski dźwięk: przez tyle sekund od ostatniego polskiego napisu dźwięku
@@ -4992,9 +5050,12 @@ _UI_DIALOGUE_WORDS = None
 # („Wróć do domu, Franklin.” to dialog, „WRÓĆ” to przycisk)
 _HUD_PROMPTS = re.compile(
     r"(?<!\w)(?:(?i:pierwsza osoba|trzecia osoba|ruszaj kamerą|obróć kamerę|zmień widok|ukryj menu|pokaż menu"
-    r"|powr[oóö]t do menu g[łl]\w*)"
+    r"|powr[oóö]t do menu g[łl]\w*|dodaj znacznik|wybierz cel podróży|widok 2d)"
     # menu pauzy przerywnika pod napisem: „WZNÓW  POWRÓT  POMIŃ” (OCR: POWRÖT, GL)
-    r"|ZOOM|PRZEGLĄDAJ|WRÓĆ|WYBIERZ|KUP|ZAMONTUJ|OBRÓĆ|WZN[OÓ]W|POMI[NŃ]|POWR[OÓÖ]T)(?!\w)"
+    r"|ZOOM|PRZEGLĄDAJ|WRÓĆ|WYBIERZ|KUP|ZAMONTUJ|OBRÓĆ|WZN[OÓ]W|POMI[NŃ]|POWR[OÓÖ]T"
+    # 21.11: mapa („WYŚRODKUJ  WIDOK 2D  DODAJ ZNACZNIK  WYJDŹ”; OCR: „DODA.”, „DODAJ…”), menu pauzy
+    # („STUDIO FOTOGRAFICZNE • WYBIERZ”), skaner pojazdu nad napisem („NADAJNIK  WARTOŚĆ … KOSZT REJESTRACJI”), sklep
+    r"|DODA[JĆ]?|WYŚRODKUJ|WYJDŹ|STUDIO FOTOGRAFICZNE|NADAJNIK|WARTOŚĆ|KOSZT REJESTRACJI|ZAŁÓŻ|POKAŻ)(?!\w)"
 )
 _SHORT_PL = {
     "a", "i", "o", "u", "w", "z", "ze", "we", "na", "do", "to", "ta", "te", "ty", "tu", "ja", "mi", "ci", "go",
@@ -5217,6 +5278,8 @@ def drop_detached_last(lines):
 
 
 class AppleVisionOcr:
+    SECOND_PASS_SCORE = 14  # słaby odczyt kolorowego kadru → druga próba na obrazie maski
+
     def __init__(self):
         self.boost = 2.4
         self.skip_yellow_speaker = False
@@ -5587,12 +5650,146 @@ class AppleVisionOcr:
             primary, secondary = color, mask
         lum = np.asarray(color.convert("L"), dtype=np.float32)
         raw = self._text_on_ink(primary, ink, lum)
-        if self._score(raw) < 14:
+        if self._score(raw) < self.SECOND_PASS_SCORE:
             other = self._text_on_ink(secondary, ink, lum)
             if self._score(other) > self._score(raw):
                 raw = other
         best = strip_colon_speaker(repair_polish_ocr(raw))
         return best if usable_ocr(best) else ""
+
+
+# PaddleOCR: krótszy bok obrazu do wykrywania tekstu. Domyślne 736 powiększało pasek 145 px pięciokrotnie (150 ms
+# na klatkę); 416 ≈ 80 ms przy tej samej trafności, niżej model gubi całe linie (pomiar 21.11, 9 klatek GTA).
+PADDLE_DET_SIDE = 416
+PADDLE_THREADS = 4
+
+
+class PaddleOcr(AppleVisionOcr):
+    """Napisy przez PaddleOCR (PP-OCRv5: wykrywanie + rozpoznawanie łacińskie) na onnxruntime, bez OCR systemu.
+    21.11: Vision pod presją pamięci zwracał pustkę i wczytywał model od nowa po 14–37 s — lektor czytał i milkł,
+    choć napisy leciały. Użytkownik: „nie używaj systemowego”, jak GameReader (ten sam PaddleOCR). Ten sam wybór
+    odczytu, maska napisu i poprawki PL co przy Vision; Vision tylko awaryjnie, gdy PaddleOCR się nie wczyta."""
+
+    def __init__(self):
+        super().__init__()
+        self._paddle = None
+        self._paddle_lock = threading.Lock()
+        self.error = ""
+
+    def _rapid(self):
+        if self._paddle is None:
+            with self._paddle_lock:
+                if self._paddle is None:
+                    from rapidocr import LangDet, LangRec, ModelType, OCRVersion, RapidOCR
+
+                    self._paddle = RapidOCR(params={
+                        "Global.use_cls": False,
+                        "Global.log_level": "error",
+                        "Det.ocr_version": OCRVersion.PPOCRV5,
+                        "Det.model_type": ModelType.MOBILE,
+                        "Det.lang_type": LangDet.CH,
+                        # skalę ustawia _run_items (wycinek z literami × PADDLE_DET_SIDE / wysokość paska)
+                        "Det.limit_type": "max",
+                        "Det.limit_side_len": 4096,
+                        "Rec.ocr_version": OCRVersion.PPOCRV5,
+                        "Rec.model_type": ModelType.MOBILE,
+                        "Rec.lang_type": LangRec.LATIN,
+                        "EngineConfig.onnxruntime.intra_op_num_threads": PADDLE_THREADS,
+                        "EngineConfig.onnxruntime.inter_op_num_threads": 1,
+                    })
+        return self._paddle
+
+    def warmup(self):
+        """Wczytaj modele (pierwszy raz pobiera ~15 MB) i rozgrzej je, zanim przyjdzie pierwszy napis."""
+        try:
+            self._rapid()(Image.new("RGB", (640, 96), (0, 0, 0)))
+            self.error = ""
+            return True
+        except Exception as exc:
+            self.error = str(exc)[:200]
+            return False
+
+    # druga próba na obrazie maski tylko, gdy kolorowy kadr nic nie dał (Vision potrzebował jej przy słabym wyniku,
+    # PaddleOCR czyta kadr dobrze — druga próba podwajała czas klatki)
+    SECOND_PASS_SCORE = 0
+
+    def _text_on_ink(self, image, ink, lum=None):
+        """Wykrywanie tekstu tylko w wycinku, gdzie maska widzi litery (pasek 145 px to zwykle 1–2 linie po ~35 px)."""
+        rows, cols = np.flatnonzero(ink.any(axis=1)), np.flatnonzero(ink.any(axis=0))
+        self._crop = None
+        if rows.size and cols.size:
+            height, width = ink.shape
+            pad = max(8, height // 10)
+            self._crop = (max(0, int(cols[0]) - pad), max(0, int(rows[0]) - pad),
+                          min(width, int(cols[-1]) + 1 + pad), min(height, int(rows[-1]) + 1 + pad))
+        try:
+            return super()._text_on_ink(image, ink, lum)
+        finally:
+            self._crop = None
+
+    def _run_items(self, image, framework="vision", recognition_level="accurate", languages=None):
+        try:
+            img = image.convert("RGB") if hasattr(image, "convert") else Image.fromarray(np.asarray(image))
+            left, top = 0, 0
+            crop = getattr(self, "_crop", None)
+            if crop:
+                img = img.crop(crop)
+                left, top = crop[0], crop[1]
+            # napis ~30 px w pasku 145 px model wykrywa dopiero w powiększeniu ~×2,9 (jak PADDLE_DET_SIDE / pasek)
+            scale = max(1.0, PADDLE_DET_SIDE / max(1, image.size[1]))
+            if scale > 1.05:
+                img = img.resize((max(8, int(img.width * scale)), max(8, int(img.height * scale))),
+                                 Image.Resampling.BILINEAR)
+            result = self._rapid()(img)
+        except Exception as exc:
+            if not self.error:
+                self.error = str(exc)[:200]
+                log_timing(f"PaddleOCR nie działa ({self.error}) — awaryjnie OCR systemu")
+            return super()._run_items(image, framework, recognition_level, languages)
+        pieces = []
+        for box, text, score in zip(result.boxes if result.boxes is not None else [], result.txts or (),
+                                    result.scores or ()):
+            text = str(text).strip()
+            if not text:
+                continue
+            xs = [left + float(p[0]) / scale for p in box]
+            ys = [top + float(p[1]) / scale for p in box]
+            pieces.append((min(xs), min(ys), max(xs), max(ys), text, float(score)))
+        return self._rows_to_items(self._join_lines(pieces), image)
+
+    @staticmethod
+    def _join_lines(pieces):
+        """PaddleOCR oddaje linię napisu w kawałkach („Jezu” | „Chryste, jeszcze kogoś” | „zabijesz!”) o trochę
+        różnej wysokości — złóż je w linie (jak Vision), od lewej do prawej, zanim kolejność ustali wysokość."""
+        lines = []
+        for piece in sorted(pieces, key=lambda p: (p[1] + p[3]) / 2):
+            mid, height = (piece[1] + piece[3]) / 2, piece[3] - piece[1]
+            line = lines[-1] if lines else None
+            if line and abs(mid - line["mid"]) <= 0.5 * max(height, line["height"]):
+                line["parts"].append(piece)
+            else:
+                lines.append({"mid": mid, "height": height, "parts": [piece]})
+        rows = []
+        for line in lines:
+            parts = sorted(line["parts"])
+            left, top = min(p[0] for p in parts), min(p[1] for p in parts)
+            right, bottom = max(p[2] for p in parts), max(p[3] for p in parts)
+            text = latin_ocr_polish(normalize_text(" ".join(p[4] for p in parts)))
+            score = min(p[5] for p in parts)
+            rows.append((text, score, [int(left), int(top), max(2, int(right - left)), max(2, int(bottom - top))]))
+        return rows
+
+
+def make_mac_ocr(choice=None):
+    """PaddleOCR domyślnie; cfg „ocrEngine”: „apple” wraca do OCR systemu. Bez rapidocr — OCR systemu."""
+    if str(choice or "paddle").lower() != "apple":
+        try:
+            import rapidocr  # noqa: F401
+
+            return PaddleOcr()
+        except Exception as exc:
+            log_timing(f"PaddleOCR niedostępny ({exc}) — czytam OCR systemu")
+    return AppleVisionOcr()
 
 
 class WindowsOcr(AppleVisionOcr):
@@ -5684,7 +5881,9 @@ class Engine:
         self._last_win_sync = 0.0
         self.ps_window = None
         self._region_key_cur = None
-        self.ocr = WindowsOcr() if IS_WIN else AppleVisionOcr()
+        self.ocr = WindowsOcr() if IS_WIN else make_mac_ocr(self.cfg.get("ocrEngine"))
+        if hasattr(self.ocr, "warmup"):
+            threading.Thread(target=self.ocr.warmup, daemon=True).start()
         self._ocr_lang_warned = False
         self.lektor = MaleLektor()
         voice = str(self.cfg.get("lektorVoice") or DEFAULT_SUPERTONIC_VOICE).strip().upper()
@@ -6658,7 +6857,7 @@ class Engine:
             if not self._queue:
                 self.has_pending.clear()
                 return None
-            if getattr(self, "catch_up", False) and len(self._queue) > 1:
+            if getattr(self, "catch_up", False) and not READ_EVERY_LINE and len(self._queue) > 1:
                 # zaległości: kwestia, której napis zniknął dawno temu, i nadmiar ponad limit przepadają —
                 # lektor przeskakuje do tego, co jest teraz na ekranie (jak lektor w filmie)
                 now = time.monotonic()
@@ -7003,43 +7202,46 @@ class Engine:
         # lektor już teraz mówi później niż postać: skracamy nawet kwestię, która „by się zmieściła” —
         # tempo głosu zostaje, a spóźnienie nie narasta kwestia po kwestii
         lag = self._effective_lag(parts or [src])
-        forced = 2 if lag >= LAG_CONDENSE_STRONG else 1 if lag >= LAG_CONDENSE else 0
-        if not translate and parts and len(parts) >= 2 and self.lektor.overload(text, seconds) > CONDENSE_TOLERANCE:
-            keep = [p for p in parts[:-1] if not self._skippable(p)] + [parts[-1]]
-            if len(keep) < len(parts):
-                text = strip_fillers(_join_parts(keep)) if len(keep) > 1 else keep[0]
-        for level in (1, 2):
-            if not text or (level > forced and self.lektor.overload(text, seconds) <= CONDENSE_TOLERANCE):
-                break
-            text = condense_polish(text, level=level)
-        sentences = re.findall(r"[^.!?…]+(?:[.!?…]+|$)", text or "")
-        total_sentences = len(sentences)
-        # krótka kwestia nie traci treści: wycięcie zdania oszczędza ~0,5 s, a niszczy sens („Są. Przy barze.” → „Są.”);
-        # same wtrącenia („Tak.”) dalej mogą wypaść
-        may_drop = len(normalize_text(text or "")) > SHORT_LINE_KEEP_CHARS
-        # całe zdania ze starszych kwestii wypadają przy 2+ zaległych napisach — inaczej ginie kontekst
-        min_parts = 2 if getattr(self, "catch_up", False) else 3
-        while may_drop and len(parts or []) >= min_parts and len(sentences) > 1 and self.lektor.overload(" ".join(sentences), seconds) > CONDENSE_TOLERANCE:
-            # najnowsze zdanie zostaje; najpierw wypadają wtrącenia („Dobra.”, „Jadę!”), potem najstarsze
-            sentences.pop(next((i for i, s_ in enumerate(sentences[:-1]) if is_interjection(s_)), 0))
-        # jedna kwestia z kilku zdań, która się nie mieści: wtrącenia („Tak.”, „Jadę!”) wypadają przed
-        # treścią — inaczej lektor spóźnia się o całe zdanie i nadganianie zjada następny napis
-        fits = 0.0 if forced >= 2 else CONDENSE_TOLERANCE
-        while len(sentences) > 1 and self.lektor.overload(" ".join(sentences), seconds) > fits:
-            filler = next((i for i, s_ in enumerate(sentences[:-1]) if is_interjection(s_)), None)
-            if filler is None:
-                break
-            sentences.pop(filler)
-        # lektor spóźniony, a kwestia wciąż długa: końcowa krótka uwaga („Teraz, to pierwsze wrażenie!”) wypada —
-        # jak u lektora w filmie, który pomija dopowiedzenia, żeby zdążyć z treścią
-        # (decyduje model decyzji, czy zdanie niesie informację; bez niego — tylko wtrącenie do 2 słów)
-        for _ in range(forced if may_drop else 0):
-            if len(sentences) < 2 or not (is_trailing_remark(sentences[-1]) and self._skippable(sentences[-1])):
-                break
-            sentences.pop()
-        if (len(sentences) > 1 or len(sentences) < total_sentences
-                or (sentences and self.lektor.overload(text, seconds) > 1.0)):
-            text = normalize_text(" ".join(s.strip() for s in sentences))
+        # 21.11 użytkownik: „nie może być tak, że pomija — musi czytać wszystko i szybko, jak GameReader” —
+        # bez skrótów i wyrzucania zdań; zaległości nadrabia tylko tempo (×1,20 dla następnej kwestii)
+        if not READ_EVERY_LINE:
+            forced = 2 if lag >= LAG_CONDENSE_STRONG else 1 if lag >= LAG_CONDENSE else 0
+            if not translate and parts and len(parts) >= 2 and self.lektor.overload(text, seconds) > CONDENSE_TOLERANCE:
+                keep = [p for p in parts[:-1] if not self._skippable(p)] + [parts[-1]]
+                if len(keep) < len(parts):
+                    text = strip_fillers(_join_parts(keep)) if len(keep) > 1 else keep[0]
+            for level in (1, 2):
+                if not text or (level > forced and self.lektor.overload(text, seconds) <= CONDENSE_TOLERANCE):
+                    break
+                text = condense_polish(text, level=level)
+            sentences = re.findall(r"[^.!?…]+(?:[.!?…]+|$)", text or "")
+            total_sentences = len(sentences)
+            # krótka kwestia nie traci treści: wycięcie zdania oszczędza ~0,5 s, a niszczy sens („Są. Przy barze.” → „Są.”);
+            # same wtrącenia („Tak.”) dalej mogą wypaść
+            may_drop = len(normalize_text(text or "")) > SHORT_LINE_KEEP_CHARS
+            # całe zdania ze starszych kwestii wypadają przy 2+ zaległych napisach — inaczej ginie kontekst
+            min_parts = 2 if getattr(self, "catch_up", False) else 3
+            while may_drop and len(parts or []) >= min_parts and len(sentences) > 1 and self.lektor.overload(" ".join(sentences), seconds) > CONDENSE_TOLERANCE:
+                # najnowsze zdanie zostaje; najpierw wypadają wtrącenia („Dobra.”, „Jadę!”), potem najstarsze
+                sentences.pop(next((i for i, s_ in enumerate(sentences[:-1]) if is_interjection(s_)), 0))
+            # jedna kwestia z kilku zdań, która się nie mieści: wtrącenia („Tak.”, „Jadę!”) wypadają przed
+            # treścią — inaczej lektor spóźnia się o całe zdanie i nadganianie zjada następny napis
+            fits = 0.0 if forced >= 2 else CONDENSE_TOLERANCE
+            while len(sentences) > 1 and self.lektor.overload(" ".join(sentences), seconds) > fits:
+                filler = next((i for i, s_ in enumerate(sentences[:-1]) if is_interjection(s_)), None)
+                if filler is None:
+                    break
+                sentences.pop(filler)
+            # lektor spóźniony, a kwestia wciąż długa: końcowa krótka uwaga („Teraz, to pierwsze wrażenie!”) wypada —
+            # jak u lektora w filmie, który pomija dopowiedzenia, żeby zdążyć z treścią
+            # (decyduje model decyzji, czy zdanie niesie informację; bez niego — tylko wtrącenie do 2 słów)
+            for _ in range(forced if may_drop else 0):
+                if len(sentences) < 2 or not (is_trailing_remark(sentences[-1]) and self._skippable(sentences[-1])):
+                    break
+                sentences.pop()
+            if (len(sentences) > 1 or len(sentences) < total_sentences
+                    or (sentences and self.lektor.overload(text, seconds) > 1.0)):
+                text = normalize_text(" ".join(s.strip() for s in sentences))
         if text != before:
             self._timing(f"skrót (na {seconds:.1f}s): {before[:70]!r} -> {text[:70]!r}")
             segments = self.lektor.plan(text)
@@ -7365,7 +7567,9 @@ class Engine:
         if unhud != normalize_text(src):
             self._log_junk(src, f"wycinam podpowiedzi przycisków: {src[:70]!r} -> {unhud[:70]!r}")
             src = trim_ocr_edges(unhud)
-            if not usable_ocr(src) or not re.search(r"[a-ząćęłńóśźż]{2}", src):
+            # po wycięciu przycisków zostały same okruchy („DODAJ.isi itiz.ii…” → „itiz.ii…”) — to nie kwestia
+            if (not usable_ocr(src) or not re.search(r"[a-ząćęłńóśźż]{2}", src)
+                    or (not looks_polish(src) and polish_common_words(src) == 0 and not should_translate(src))):
                 return
         lead = getattr(self, "_lead_junk", None)
         if lead is None:
@@ -7544,6 +7748,18 @@ class Engine:
         if len(old.split()) < 2 or not looks_polish(old) or self._is_current(old) or self._recently_spoken(old):
             return
         age = now - getattr(self, "_ocr_started", now)
+        fold_old, fold_new = polish_fold(old), polish_fold(src)
+        short, long_ = sorted((fold_old, fold_new), key=len)
+        # „to” mieści się w „niewarto”, ale to inny odczyt — część musi pokrywać choć 40 % dłuższego tekstu
+        related = len(short) >= 0.4 * len(long_) and (short in long_ or SequenceMatcher(
+            None, fold_old, fold_new, autojunk=False).ratio() >= 0.5)
+        # 21.11 15:07: „Nie warto.” zastąpił śmieciowy odczyt „TO” — czysta, zamknięta kwestia idzie do lektora,
+        # zamiast przepaść (ucięty odczyt tego samego napisu jest „related” i niczego nie dubluje)
+        if READ_EVERY_LINE and not related and re.search(r"[.!?…]$", old) and not ocr_reading_unsettled(old):
+            self._log_junk(old, f"czytam napis sprzed zmiany odczytu ({self._ocr_candidate_n} odczyt., {age:.2f}s): "
+                                f"{old[:60]!r} -> {src[:40]!r}")
+            self._offer_line(old, should_translate(old))
+            return
         self._log_junk(old, f"napis przepadł przed potwierdzeniem ({self._ocr_candidate_n} odczyt., {age:.2f}s): "
                             f"{old[:60]!r} -> {src[:40]!r}")
 

@@ -8,6 +8,8 @@ pyobjc-core>=12.0
 pyobjc-framework-Cocoa>=12.0
 pyobjc-framework-Quartz>=12.0
 pyobjc-framework-Vision>=12.0
+# napisy: PaddleOCR PP-OCRv5 na onnxruntime (Apache-2.0), modele ~15 MB pobierają się przy pierwszym uruchomieniu
+rapidocr>=3.10
 
 # lektor: Supertonic 3 (kod MIT, model OpenRAIL-M) na GPU przez CoreML
 supertonic>=1.3

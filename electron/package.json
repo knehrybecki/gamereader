@@ -56,6 +56,10 @@
       {
         "from": "../pl_diacritics.tsv",
         "to": "engine/pl_diacritics.tsv"
+      },
+      {
+        "from": "../pl_words.tsv",
+        "to": "engine/pl_words.tsv"
       }
     ],
     "mac": {

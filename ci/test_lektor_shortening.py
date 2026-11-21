@@ -2,7 +2,7 @@
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
@@ -48,6 +48,12 @@ def make_engine(translator, seconds):
 
 
 class LektorShorteningTest(unittest.TestCase):
+    def setUp(self):
+        # dawne skracanie/wyrzucanie (do 21.11): logika została, domyślnie wyłączona przez READ_EVERY_LINE
+        patcher = patch("gamereader_engine.READ_EVERY_LINE", False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_mm_hmm_never_reaches_the_translator(self):
         # Argos zrobił z „Mm-hmm.” czytane na głos „Min-hamm.” (5 razy w jednej sesji)
         translator = FakeTranslator("Chodź. Jesteś na miejscu?")
@@ -232,6 +238,12 @@ class DetachedLineTest(unittest.TestCase):
 
 
 class TrailingRemarkTest(unittest.TestCase):
+    def setUp(self):
+        # dawne skracanie/wyrzucanie (do 21.11): logika została, domyślnie wyłączona przez READ_EVERY_LINE
+        patcher = patch("gamereader_engine.READ_EVERY_LINE", False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     LONG = "Zawsze mówiłem, że jeśli kosmici wylądują, chcę, żeby wylądowali w środku wyścigu TMC. Teraz, to pierwsze wrażenie!"
 
     def _engine(self, lag, info):
@@ -384,6 +396,18 @@ class ShortLineKeptWholeTest(unittest.TestCase):
     def test_short_line_is_read_whole_even_when_late(self):
         self.assertEqual(self.plan("Są. Przy barze."), "Są. Przy barze.")
         self.assertEqual(self.plan("Łokcie przy sobie. Wypychaj!"), "Łokcie przy sobie. Wypychaj!")
+
+
+
+class ReadEveryLineTest(unittest.TestCase):
+    """21.11 użytkownik: „nie może być tak, że pomija — musi czytać wszystko”: domyślnie nic nie wypada."""
+
+    def test_late_lektor_reads_the_whole_line(self):
+        engine = make_engine(FakeTranslator(""), 1.0)
+        engine._lag = 5.0
+        line = "Hej. Tak. Musimy natychmiast ruszyć do magazynu przy porcie."
+        text, _segments, _arousal, _boost = engine._plan_line(line, False, ["Dobra.", line])
+        self.assertIn("Hej. Tak.", text)
 
 
 if __name__ == "__main__":

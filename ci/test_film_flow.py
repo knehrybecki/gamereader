@@ -30,6 +30,12 @@ def engine_with_queue(ages, now=100.0):
 
 
 class CatchUpQueueTest(unittest.TestCase):
+    def setUp(self):
+        # dawne skracanie/wyrzucanie (do 21.11): logika została, domyślnie wyłączona przez READ_EVERY_LINE
+        patcher = patch("gamereader_engine.READ_EVERY_LINE", False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_line_from_few_seconds_ago_is_still_read(self):
         eng = engine_with_queue([3.5, 0.5])
         with patch.object(ge.time, "monotonic", return_value=100.0):
