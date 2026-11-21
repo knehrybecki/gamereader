@@ -230,11 +230,17 @@ function isLiveDubBundle(dir) {
 
 // macOS: kopie LiveDub zostawione przez wcześniejsze aktualizacje („LiveDub.app.old”, „LiveDub 2.app”,
 // druga LiveDub.app w ~/Applications albo /Applications) — do Kosza. Zostaje tylko uruchomiona.
+// Sprząta wyłącznie kopia zainstalowana w Aplikacjach: 20.11 build deweloperski z electron/dist wyrzucił
+// do Kosza /Applications/LiveDub.app i po opróżnieniu Kosza LiveDub zniknął z Aplikacji.
 async function cleanupOldCopies({ log }) {
   if (!app.isPackaged || process.platform !== "darwin") return 0;
   const bundle = currentBundle();
   if (!bundle) return 0;
-  const dirs = [...new Set([path.dirname(bundle), "/Applications", path.join(os.homedir(), "Applications")])];
+  const dirs = ["/Applications", path.join(os.homedir(), "Applications")];
+  if (!dirs.includes(path.dirname(bundle))) {
+    log(`cleanup-skip ${bundle} (poza Aplikacjami)`);
+    return 0;
+  }
   let moved = 0;
   for (const dir of dirs) {
     let names = [];
