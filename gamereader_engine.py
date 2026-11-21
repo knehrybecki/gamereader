@@ -1207,6 +1207,8 @@ LAG_CONDENSE_STRONG = 3.5
 SENTENCE_REPEAT_SEC = 12.0
 # ile kwestii może czekać w kolejce (więcej = najstarsza przepada)
 SPEECH_QUEUE_MAX = 4
+# najdłużej tyle lektor czeka na syntezę „na zapas” tej samej kwestii (z powtórką po zgubionym słowie bywa ~3 s)
+SPEC_WAIT_MAX = 4.0
 # polskie napisy + angielski dźwięk: przez tyle sekund od ostatniego polskiego napisu dźwięku
 # nie rozpoznajemy ani nie tłumaczymy — służy tylko do emocji i ściszania gry
 PL_SUBS_HOLD_SEC = 600.0
@@ -1402,10 +1404,15 @@ LEKTOR_MAX_RATE = 1.60
 LEKTOR_MAX_STRETCH = 1.20
 # gdy w kolejce czeka już następny napis: kolejne fragmenty syntezują się szybciej, bez pauz
 LEKTOR_CATCHUP_RATE = 1.08
-# lektor VoiceStudio spóźniony za napisem przyspiesza najwyżej tyle (zasada użytkownika: nie szybciej niż ×1,15);
-# sufit Supertonic (LEKTOR_MAX_RATE przy profilu gry tts 0,92) dawał tylko ×1,04 — 18.11 lektor 3,6 s za napisem
-# czytał „tempo x1.05” i pomijał zaległe kwestie
-LEKTOR_CLOUD_MAX_BOOST = 1.15
+# lektor VoiceStudio spóźniony za napisem przyspiesza najwyżej tyle; sufit Supertonic (LEKTOR_MAX_RATE przy profilu
+# gry tts 0,92) dawał tylko ×1,04 — 18.11 lektor 3,6 s za napisem czytał „tempo x1.05” i pomijał zaległe kwestie.
+# 18.11 zasada użytkownika ×1,15; 21.11 użytkownik pokazał ustawienia GameReadera (bazowa ×1,00, każda następna
+# kwestia ×1,20) i kazał dostosować tak — sufit ×1,20 (~14,4 l/s, lektor-filmowy zrozumiały do ~14,7)
+LEKTOR_CLOUD_MAX_BOOST = 1.20
+# kwestia, która przyszła, gdy lektor czytał poprzednią (dialog zmienia się w trakcie mowy) — „każda następna
+# kwestia” z GameReadera; pierwsza kwestia w serii zostaje w tempie bazowym ×1,00
+LEKTOR_NEXT_LINE_BOOST = 1.20
+SERIES_MEMORY_SEC = 30.0
 # tempo dopasowane do napisów: lektor ma się zmieścić w czasie, w którym napis wisi na ekranie
 LEKTOR_CPS_PRIOR = 15.0  # znaki/s lektora przy speed=1 — potem uczy się z własnych syntez
 # nastrój z napisu (słowa i interpunkcja): tylko głośność i pauza — bez domieszki innego głosu
@@ -4120,14 +4127,15 @@ class MaleLektor:
         # sufit łącznego tempa lektora (nie samego modelu) — przy ×1,15 skrót wchodzi, zanim narośnie spóźnienie
         return len(text or "") / (self.cps1 * max(0.6, seconds * 0.92)) / LEKTOR_MAX_RATE
 
-    def line_boost(self, text, seconds, lag=0.0):
+    def line_boost(self, text, seconds, lag=0.0, series=False):
         """Przyspieszenie CAŁEJ kwestii (jedno dla wszystkich jej fragmentów).
 
         Dłuższa kwestia = szybciej (napis i tak zniknie), a do tego lektor ma się zmieścić
         w `seconds` — czasie, przez jaki gra pokazuje taki napis. `lag` = o ile sekund lektor jest
         już spóźniony za napisem: budżet z tempa napisów (z pauzami między replikami) bywa za luźny
         i bez tego lektor czytał ×1,00 mimo narastającej kolejki — od 1 s spóźnienia dochodzi tempo,
-        przy 2,5 s jest już sufit."""
+        przy 2,5 s jest już sufit. `series` = kwestia przyszła w trakcie czytania poprzedniej —
+        czytana w tempie LEKTOR_NEXT_LINE_BOOST (w granicach sufitu głosu)."""
         base = LEKTOR_SPEED / max(0.5, float(self.tts_scale or 1.0))
         n = len(text or "")
         if n <= 60:
@@ -4145,6 +4153,8 @@ class MaleLektor:
         boost = max(1.0, by_length, min(cap, needed))
         late = min(1.0, max(0.0, (float(lag or 0.0) - 1.0) / 1.5))
         boost = min(max(boost, 1.0 + late * (cap - 1.0)), cap)
+        if series:
+            boost = max(boost, min(cap, LEKTOR_NEXT_LINE_BOOST))
         return round(boost * 20) / 20  # stopnie co 0,05 — cache się powtarza
 
     def _style(self, blend):
@@ -6561,6 +6571,8 @@ class Engine:
     def _enqueue(self, item):
         """Dodaj kwestię na koniec kolejki. Nic nie przepada, dopóki kolejka się nie przepełni."""
         src = item[0]
+        if getattr(self, "speaking_text", "") or getattr(self, "_speaking_parts", None):
+            self._mark_series(src)  # dialog zmienia się w trakcie mowy — następna kwestia w serii
         with self.pending_lock:
             for index, queued in enumerate(self._queue):
                 if not same_utterance(src, queued[0]):
@@ -6578,6 +6590,19 @@ class Engine:
                 self._queue.pop(0)  # lektor zupełnie nie nadąża — najstarsza kwestia przepada
                 self._lag = max(self._lag, LAG_CONDENSE_STRONG)
             self.has_pending.set()
+
+    def _mark_series(self, src):
+        now = time.monotonic()
+        marks = getattr(self, "_series_at", None)
+        if marks is None or len(marks) > 32:
+            marks = self._series_at = {k: at for k, at in (marks or {}).items() if now - at < SERIES_MEMORY_SEC}
+        marks[src] = now
+
+    def _in_series(self, parts):
+        """Czy któraś część kwestii przyszła, gdy lektor czytał poprzednią (także jako wariant OCR)."""
+        now = time.monotonic()
+        marks = [s for s, at in (getattr(self, "_series_at", None) or {}).items() if now - at < SERIES_MEMORY_SEC]
+        return any(p == s or same_utterance(p, s) for p in parts for s in marks)
 
     def _offer_tail(self, tail, full):
         """Dopisana końcówka napisu — przeczytaj ją po bieżącej kwestii."""
@@ -6796,10 +6821,7 @@ class Engine:
                 t0 = time.monotonic()
                 # ta kwestia właśnie syntezuje się na zapas — poczekaj, zamiast robić ją drugi raz
                 if len(parts) == 1:
-                    with self._spec_done:
-                        # ta kwestia (albo wariant jej odczytu) właśnie syntezuje się na zapas — poczekaj, nie rób drugi raz
-                        self._spec_done.wait_for(
-                            lambda: self._spec_busy is None or not ocr_variants(self._spec_busy, src), timeout=4.0)
+                    self._await_spec(src)
                 ready = self._pop_ready(src)
                 # kto mówi: jeśli rozpoznana postać ma gotowy głos, czytamy nim — zapas z syntezy zwykłym głosem odpada
                 voice, skip = self._pick_voice(parts, src, translate)
@@ -6897,6 +6919,7 @@ class Engine:
                     self._mark_spoken(full)
                     self.last_full = full
             except Exception as exc:
+                self._timing(f"błąd lektora, kwestia przepada: {exc!r} | {src[:50]!r}")
                 self.emit({"event": "status", "text": f"Błąd głosu: {exc}"})
             finally:
                 self.lektor.busy_until = 0.0
@@ -6927,7 +6950,7 @@ class Engine:
 
     def _is_current(self, src):
         """Czy ten napis właśnie czyta lektor (także jako część połączonej wypowiedzi)."""
-        return same_utterance(src, self.speaking_text) or any(
+        return same_utterance(src, getattr(self, "speaking_text", "")) or any(
             same_utterance(src, part) for part in getattr(self, "_speaking_parts", ())
         )
 
@@ -7020,7 +7043,10 @@ class Engine:
         if text != before:
             self._timing(f"skrót (na {seconds:.1f}s): {before[:70]!r} -> {text[:70]!r}")
             segments = self.lektor.plan(text)
-        boost = self.lektor.line_boost(text, seconds, lag)
+        if self._in_series(parts or [src]):
+            boost = self.lektor.line_boost(text, seconds, lag, series=True)
+        else:
+            boost = self.lektor.line_boost(text, seconds, lag)
         return text, segments, float(arousal or 0.0), boost
 
     def _said_fold(self, sentence):
@@ -7110,7 +7136,7 @@ class Engine:
             return
         # zlepek („altanval Jebany silniki”) albo gorsza powtórka właśnie czytanej kwestii („Z blisko!”
         # po „Za blisko!”) — synteza poszłaby do kosza
-        if ocr_junk_count(src) or self._like_spoken(key):
+        if ocr_junk_count(src) or self._like_spoken(key) or self._is_current(key):
             return
         rank = ocr_reading_rank(src)
         if rank < self._spec_rank or self._spec_redo >= 2:
@@ -7143,6 +7169,17 @@ class Engine:
         self._spec_item = (src, translate)
         self._spec_event.set()
 
+    def _await_spec(self, src):
+        """Ta kwestia (albo wariant jej odczytu) właśnie syntezuje się na zapas — poczekaj, nie rób drugi raz.
+        Czeka tylko na syntezę, która trwa w tej chwili: 20–21.11 OCR podsyłał kolejne warianty tego samego
+        napisu („łodzi”/„fodzi”/„todzi”), każdy zajmował syntezę od nowa i lektor stał do limitu 4 s."""
+        with self._spec_done:
+            busy, job = self._spec_busy, getattr(self, "_spec_job", 0)
+            if busy is None or not ocr_variants(busy, src):
+                return
+            self._spec_done.wait_for(
+                lambda: self._spec_busy is None or getattr(self, "_spec_job", 0) != job, timeout=SPEC_WAIT_MAX)
+
     def _spec_loop(self):
         while True:
             self._spec_event.wait()
@@ -7154,9 +7191,12 @@ class Engine:
             with self._ready_lock:
                 if src in self._ready:
                     continue
-            if same_utterance(src, self.speaking_text) or self._recently_spoken(src):
+            # lektor już wziął tę kwestię (czyta albo czeka na start) — kolejny odczyt OCR jej nie syntezuje drugi raz
+            if self._is_current(src) or self._recently_spoken(src):
                 continue
-            self._spec_busy = src
+            with self._spec_done:
+                self._spec_busy = src
+                self._spec_job = getattr(self, "_spec_job", 0) + 1
             try:
                 text, segments, arousal, boost = self._plan_line(src, translate)
                 if segments and self._spec_item is None:  # nowszy odczyt = ten już nieaktualny
@@ -7433,6 +7473,7 @@ class Engine:
             self._ocr_candidate_n += 1
             samples.append(src)
         else:
+            self._note_dropped_candidate(src, now)
             samples = [src]
             self._ocr_candidate = src
             self._ocr_candidate_n = 1
@@ -7492,6 +7533,19 @@ class Engine:
                 )
             self._pl_subs_at = now
         self._offer_line(src, translate)
+
+    def _note_dropped_candidate(self, src, now):
+        """Do logu: czekający napis z kwestią zastąpił inny, zanim lektor go potwierdził — przepada bez głosu.
+        21.11 „Coś podać?” i „Jezu Chryste, jeszcze kogoś zabijesz!” miały gotowy zapas, a lektor ich nie
+        przeczytał i log nie mówił dlaczego — ten wpis ma pokazać, czy giną właśnie tutaj."""
+        old = self._ocr_candidate
+        if not old or same_utterance(old, src) or extends_utterance(old, src):
+            return
+        if len(old.split()) < 2 or not looks_polish(old) or self._is_current(old) or self._recently_spoken(old):
+            return
+        age = now - getattr(self, "_ocr_started", now)
+        self._log_junk(old, f"napis przepadł przed potwierdzeniem ({self._ocr_candidate_n} odczyt., {age:.2f}s): "
+                            f"{old[:60]!r} -> {src[:40]!r}")
 
     def _strip_known_prefix(self, src):
         """Śmieć z kadru doklejony przed kwestią, którą OCR już widział czysto — wycięty. Gdy to czekający

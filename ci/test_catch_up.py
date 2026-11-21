@@ -1,4 +1,5 @@
-"""Spóźniony lektor VoiceStudio przyspiesza do ×1,15 (zasada użytkownika: nie szybciej niż ×1,15).
+"""Spóźniony lektor VoiceStudio przyspiesza do sufitu ×1,20 (18.11 zasada ×1,15; 21.11 użytkownik: tempo jak
+w GameReaderze — każda następna kwestia ×1,20).
 
 18.11: sufit nadganiania liczony pod Supertonic (LEKTOR_MAX_RATE / (LEKTOR_SPEED / tts)) przy profilu gry tts 0,92
 wynosił ×1,04 — lektor 3,6 s za napisem czytał „tempo x1.05” i pomijał zaległe kwestie."""
@@ -20,9 +21,9 @@ def lektor(cloud_ready):
 
 
 class CatchUpTest(unittest.TestCase):
-    def test_late_voicestudio_lektor_speeds_up_to_115(self):
+    def test_late_voicestudio_lektor_speeds_up_to_120(self):
         self.assertEqual(lektor(True).line_boost("Chcę to zrobić po cichu.", 3.0, lag=3.0), ge.LEKTOR_CLOUD_MAX_BOOST)
-        self.assertEqual(ge.LEKTOR_CLOUD_MAX_BOOST, 1.15)
+        self.assertEqual(ge.LEKTOR_CLOUD_MAX_BOOST, 1.20)
 
     def test_on_time_voicestudio_lektor_keeps_normal_pace(self):
         self.assertEqual(lektor(True).line_boost("Chcę to zrobić po cichu.", 3.0, lag=0.0), 1.0)
@@ -32,7 +33,7 @@ class CatchUpTest(unittest.TestCase):
         self.assertEqual(lektor(False).line_boost("Chcę to zrobić po cichu.", 3.0, lag=3.0), 1.05)
 
     def test_voicestudio_gets_full_catch_up_tempo(self):
-        # pace 0,8 (tts 0,92 / boost 1,15) → sufit nadganiania 1,15 (18.11: ×1,25+ gubiło końcówki); limity
+        # pace 0,8 (tts 0,92 / boost 1,15) → sufit nadganiania ×1,20 (18.11: ×1,25+ gubiło końcówki); limity
         # Supertonic (LEKTOR_MAX_RATE) ucinały do ~1,13
         lk = lektor(True)
         lk._cloud_prev = ("", 0.0)
