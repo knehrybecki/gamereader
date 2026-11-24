@@ -4,6 +4,7 @@ sprawdzane rozpoznawaniem mowy, a przy zgubionym słowie synteza idzie jeszcze r
 import sys
 import unittest
 from pathlib import Path
+from collections import Counter
 from unittest.mock import Mock
 
 import numpy as np
@@ -71,6 +72,39 @@ class RetryTest(unittest.TestCase):
         lektor.verify = None
         lektor._synth_cloud(cloud, "Świetnie! Wreszcie mogę to chapnąć.", Path("x.wav"), 1.0, 0.1)
         self.assertIs(lektor._write_voice.call_args.args[0], first)
+
+    # 24.11: 213 z 404 powtórek niczego nie poprawiło (log silnika), a każda to ~1 s spóźnienia lektora
+    def test_no_retry_when_next_line_is_waiting(self):
+        lektor, cloud, first, _second = self._lektor(["Wreszcie mogę to chapnąć."])
+        lektor._synth_cloud(cloud, "Świetnie! Wreszcie mogę to chapnąć.", Path("x.wav"), 1.0, 0.1, hurry=True)
+        self.assertEqual(cloud.synth.call_count, 1)
+        self.assertIs(lektor._write_voice.call_args.args[0], first)
+
+    def test_word_whose_retries_keep_failing_is_not_retried_again(self):
+        # „Jot” (J. z GTA VI): lektor mówi dobrze, rozpoznawanie słyszy co innego — 32 nieudane powtórki w logu
+        text = "Jot, chodźcie tu szybciutko!"
+        score = Counter()
+        for _ in range(ge.LOST_RETRY_SKIP_AFTER):
+            lektor, cloud, _first, _second = self._lektor(["chodźcie tu szybciutko", "chodźcie tu szybciutko"])
+            lektor._lost_score = score
+            lektor._synth_cloud(cloud, text, Path("x.wav"), 1.0, 0.1)
+            self.assertEqual(cloud.synth.call_count, 2)
+        lektor, cloud, first, _second = self._lektor(["chodźcie tu szybciutko"])
+        lektor._lost_score = score
+        lektor._synth_cloud(cloud, text, Path("x.wav"), 1.0, 0.1)
+        self.assertEqual(cloud.synth.call_count, 1)
+        self.assertIs(lektor._write_voice.call_args.args[0], first)
+
+    def test_word_that_sometimes_comes_back_keeps_being_retried(self):
+        text = "Świetnie! Wreszcie mogę to chapnąć."
+        score = Counter()
+        # porażka, sukces, porażka — bilans 1, słowo dalej powtarzane
+        for heard in (["Wreszcie mogę.", "Wreszcie mogę."], ["Wreszcie mogę.", "Świetnie. Wreszcie mogę."],
+                      ["Wreszcie mogę.", "Wreszcie mogę."]):
+            lektor, cloud, _first, _second = self._lektor(heard)
+            lektor._lost_score = score
+            lektor._synth_cloud(cloud, text, Path("x.wav"), 1.0, 0.1)
+            self.assertEqual(cloud.synth.call_count, 2)
 
 
 if __name__ == "__main__":

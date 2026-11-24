@@ -82,7 +82,7 @@ class VoiceStudioPauseTest(unittest.TestCase):
         lektor.voice = "M1"
         got = {}
 
-        def synth_cloud(cloud, text, raw, pace, pause, voice, style):
+        def synth_cloud(cloud, text, raw, pace, pause, voice, style, **_kw):
             got["pause"] = pause
             return 1.0
 

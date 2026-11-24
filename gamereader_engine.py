@@ -15,7 +15,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections import OrderedDict, deque
+from collections import Counter, OrderedDict, deque
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -1577,6 +1577,32 @@ def _sentence_mood(sentence):
     return "calm"
 
 
+# czas syntezy fragmentu lektora VoiceStudio (OmniVoice + kontrola Parakeet), 5439 fragmentów z logu 24.11
+SYNTH_FIXED_SEC = 0.74
+SYNTH_PER_CHAR_SEC = 0.0085
+SYNTH_GAP_MARGIN_SEC = 0.3
+# krótsze zdanie czytane osobno brzmi sztucznie (ta sama granica co przy sklejaniu zdań)
+SEGMENT_MIN_CHARS = 25
+
+
+def _split_first_sentences(head, mood):
+    """Pierwszy fragment z kilku zdań → najkrótszy początek z pełnych zdań, po którym lektor może ruszyć (24.11: synteza
+    to ~0,74 s + 8,5 ms/znak, więc krótszy początek = szybszy start). Obie części ≥ SEGMENT_MIN_CHARS, a początek czytany
+    dłużej (LEKTOR_CPS_PRIOR zn/s), niż trwa synteza reszty z zapasem — inaczej między fragmentami byłaby dziura."""
+    sentences = [normalize_text(p) for p in re.findall(r"[^.!?…]+(?:[.!?…]+|$)", head)]
+    sentences = [s for s in sentences if s]
+    for i in range(1, len(sentences)):
+        start, rest = " ".join(sentences[:i]), " ".join(sentences[i:])
+        if len(start) < SEGMENT_MIN_CHARS:
+            continue
+        if len(rest) < SEGMENT_MIN_CHARS:
+            break
+        reading = len(start) / LEKTOR_CPS_PRIOR
+        if reading >= SYNTH_FIXED_SEC + SYNTH_PER_CHAR_SEC * len(rest) + SYNTH_GAP_MARGIN_SEC:
+            return [(start, mood), (rest, mood)]
+    return [(head, mood)]
+
+
 def lektor_segments(text):
     """Dzieli kwestię na zdania i skleja sąsiednie o tym samym nastroju: [(tekst, nastrój), …]."""
     pieces = [normalize_text(p) for p in re.findall(r"[^.!?…]+(?:[.!?…]+|$)", normalize_text(text or ""))]
@@ -1598,6 +1624,7 @@ def lektor_segments(text):
             groups.append((piece, mood))
     if not groups:
         return [(normalize_text(text), "calm")] if _speakable(text) else []
+    groups[0:1] = _split_first_sentences(*groups[0])
     # długi początek tnij na przecinku — lektor rusza szybciej, reszta syntezuje się w trakcie
     head, mood = groups[0]
     # (tylko bardzo długi: każdy podział to słyszalna przerwa między plikami audio)
@@ -2751,6 +2778,7 @@ def _is_polish_word(word):
 
 LEKTOR_VERIFY = True  # nagranie lektora VoiceStudio sprawdzane rozpoznawaniem mowy (Parakeet, ~0,15 s, ~1 GB)
 LOST_WORD_WINDOW = 6
+LOST_RETRY_SKIP_AFTER = 2  # bilans nieudanych minus udanych powtórek słowa, od którego go nie powtarzamy (24.11)
 LOST_WORD_MATCH = 0.6  # podobieństwo słowa usłyszanego do napisanego, od którego uznajemy, że padło
 
 
@@ -4316,7 +4344,7 @@ class MaleLektor:
         stretch = None
         if not voice_tag.startswith("st"):
             # jedna próbka lektora (bez „żywej”): druga barwa w środku sceny brzmiała jak inny lektor (18.11)
-            stretch = self._synth_cloud(cloud, text, raw, pace, pause, voice, None)
+            stretch = self._synth_cloud(cloud, text, raw, pace, pause, voice, None, hurry=hurry)
             if stretch is None:
                 path = CACHE_DIR / f"{text_key(key.replace(voice_tag, f'st15|{self.voice}', 1))}.wav"
                 if path.exists() and path.stat().st_size >= 64:
@@ -4359,8 +4387,9 @@ class MaleLektor:
         self._write_voice(np.asarray(wav, dtype=np.float32).reshape(-1), int(self.model.sample_rate), text, speed, path, pause)
         return stretch
 
-    def _synth_cloud(self, cloud, text, path, pace, pause, voice=None, style=None):
-        """Lektor z VoiceStudio; None = nie wyszło (lektor czyta Supertonic). Tempo w całości po stronie głosu."""
+    def _synth_cloud(self, cloud, text, path, pace, pause, voice=None, style=None, hurry=False):
+        """Lektor z VoiceStudio; None = nie wyszło (lektor czyta Supertonic). Tempo w całości po stronie głosu.
+        hurry: następna kwestia już czeka — bez kontroli rozpoznawaniem mowy i bez powtórki (~0,15 s, a z powtórką ~1 s)."""
         # wprost z planu, bez limitów Supertonic (lektor_speed_split zwalniał krótkie i średnie kwestie do ~0,85,
         # bo Supertonic gubi przy nich głoski — OmniVoice nie); granice modelu pilnuje OmniVoiceLocal.job_speed
         # 1,0 = zwykłe tempo lektora; sufit nadganiania: szybciej OmniVoice gubi końcówki („Błagam.”) i robi artefakty
@@ -4383,7 +4412,7 @@ class MaleLektor:
             if cloud.error and self.on_cloud_error:
                 self.on_cloud_error(cloud.error)
             return None
-        if not voice and not spanish and getattr(self, "verify", None) is not None:
+        if not voice and not spanish and not hurry and getattr(self, "verify", None) is not None:
             audio = self._without_lost_words(audio, cloud.rate, text, synth)
         if not voice:
             self._cloud_prev = (text, time.monotonic())
@@ -4401,13 +4430,25 @@ class MaleLektor:
 
     def _without_lost_words(self, audio, sr, text, synth):
         """OmniVoice losowo gubi słowa (19.11: „Świetnie!”, „tobie”, całe drugie zdanie) — ta sama kwestia drugi
-        raz zwykle wychodzi cała. Jedna powtórka; zostaje nagranie z mniejszą liczbą zgubionych słów."""
+        raz zwykle wychodzi cała. Jedna powtórka; zostaje nagranie z mniejszą liczbą zgubionych słów.
+
+        24.11: 213 z 404 powtórek niczego nie poprawiło — to głównie słowa, które lektor mówi dobrze, a rozpoznawanie
+        słyszy inaczej („Jot” ×32, „Dre” ×13). Słowo, przy którym powtórki częściej zawodzą, niż pomagają (bilans
+        LOST_RETRY_SKIP_AFTER w tej sesji), nie wywołuje już powtórki (~1 s spóźnienia lektora)."""
         lost = self._heard_lost(audio, sr, text)
         if not lost:
+            return audio
+        score = getattr(self, "_lost_score", None)
+        if score is None:
+            score = self._lost_score = Counter()
+        if all(score[word] >= LOST_RETRY_SKIP_AFTER for word in lost):
+            log_timing(f"lektor zgubił {', '.join(lost)} — bez powtórki (rozpoznawanie myli te słowa) | {text[:50]!r}")
             return audio
         again = synth()
         lost2 = self._heard_lost(again, sr, text) if again is not None else None
         better = lost2 is not None and len(lost2) < len(lost)
+        for word in lost:
+            score[word] += -1 if better else 1
         log_timing(f"lektor zgubił {', '.join(lost)} — powtórka {'cała' if better and not lost2 else 'lepsza' if better else 'nie lepsza'}"
                    f" | {text[:50]!r}")
         return again if better else audio
