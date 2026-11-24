@@ -24,6 +24,23 @@ class LatinToPolishTest(unittest.TestCase):
         self.assertEqual(latin_ocr_polish("X Dobra. Zatóžmy, že chcę jedna z tych bryk."),
                          "X Dobra. Załóżmy, że chcę jedna z tych bryk.")
 
+    def test_lost_or_wrong_ogonki_from_dictionary(self):
+        # 24.11 z logu: model łaciński gubi ogonki albo myli „ź” z „ż” — słownik zna jedyną poprawną formę
+        self.assertEqual(latin_ocr_polish("Oho, gliny się angażuja."), "Oho, gliny się angażują.")
+        self.assertEqual(latin_ocr_polish("Oho, gliny się angazuja."), "Oho, gliny się angażują.")
+        self.assertEqual(latin_ocr_polish("Nie przyjażnimy się."), "Nie przyjaźnimy się.")
+        self.assertEqual(latin_ocr_polish("nowy strój przy stoisku z gadzetami."),
+                         "nowy strój przy stoisku z gadżetami.")
+        self.assertEqual(latin_ocr_polish("DODAJ DO BAGAZNIKA"), "DODAJ DO BAGAŻNIKA")
+        self.assertEqual(latin_ocr_polish("Weż to i chodż."), "Weź to i chodź.")
+        # odczytany ogonek zostaje: „zęby” (w słowniku pod „zeby” jest tylko „żeby”) to inne słowo
+        self.assertEqual(latin_ocr_polish("Umyj zęby."), "Umyj zęby.")
+
+    def test_english_text_keeps_letters(self):
+        # „zone” w słowniku to „żonę” — angielskiego tekstu (idzie do tłumaczenia) nie ruszamy
+        for text in ("Stay in the zone, man.", "We made it to the city."):
+            self.assertEqual(latin_ocr_polish(text), text)
+
     def test_real_words_and_names_stay(self):
         for text in ("Mam kota.", "Tata tu był.", "Ci Watkins", "Jason, to twoja fura?", "Trzeba to zrobić."):
             self.assertEqual(latin_ocr_polish(text), text)

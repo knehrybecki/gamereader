@@ -667,16 +667,30 @@ def _pl_words():
 
 def latin_ocr_polish(text):
     """Odczyt PaddleOCR (model łaciński) → polskie litery: czeskie znaki na polskie, a słowo spoza słownika z „t”
-    w miejscu „ł” („odpalita”, „Zatóżmy”) — na słowo ze słownika. Znane słowa i imiona zostają bez zmian."""
+    w miejscu „ł” („odpalita”, „Zatóżmy”) — na słowo ze słownika. Zgubione albo pomylone ogonki („angazuja”,
+    „przyjażnimy”) — na jedyną formę ze słownika, tylko w polskim tekście („zone” to nie „żonę”). Słowa bez ogonków
+    albo z kilkoma formami i imiona zostają bez zmian."""
     text = (text or "").translate(_LATIN_TO_PL)
     words = _pl_words()
     if not words:
         return text
+    polish = not should_translate(text)
 
     def fix(match):
         token = match.group(0)
         fold = polish_fold(token)
-        if len(fold) < 3 or len(fold) != len(token) or fold in words or "t" not in fold:
+        if len(fold) < 3 or len(fold) != len(token):
+            return token
+        if fold in words:
+            form = words[fold]
+            # odczytany ogonek zostaje („zęby” to nie „żeby”); wolno tylko dodać brakujący albo zamienić ż↔ź
+            if polish and form and len(form) == len(token) and all(
+                have == want or have not in PL_MARK or {have, want} == {"ż", "ź"}
+                for have, want in zip(token.lower(), form)
+            ):
+                return _preserve_case(token, form)
+            return token
+        if "t" not in fold:
             return token
         spots = [i for i, ch in enumerate(fold) if ch == "t"]
         for count in (1, 2):
