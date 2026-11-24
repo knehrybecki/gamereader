@@ -58,8 +58,8 @@
         "to": "engine/pl_diacritics.tsv"
       },
       {
-        "from": "../pl_words.tsv",
-        "to": "engine/pl_words.tsv"
+        "from": "../pl_lex.sqlite",
+        "to": "engine/pl_lex.sqlite"
       }
     ],
     "mac": {

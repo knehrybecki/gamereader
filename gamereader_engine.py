@@ -10,6 +10,7 @@ import queue
 import re
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -638,73 +639,172 @@ def _pl_diacritics():
     return _PL_DIACRITICS
 
 
-_PL_WORDS = None
+_PL_LEXICON = None
+_PL_LEXICON_LOCK = threading.Lock()
 # model łaciński PaddleOCR czyta polskie ogonki jako czeskie/słowackie („tež”, „že”, „Každa”)
 _LATIN_TO_PL = str.maketrans({
     "ž": "ż", "Ž": "Ż", "š": "ś", "Š": "Ś", "č": "ć", "Č": "Ć", "ě": "ę", "Ě": "Ę", "ň": "ń", "Ň": "Ń",
     "ĺ": "ł", "Ĺ": "Ł", "ľ": "ł", "Ľ": "Ł", "ř": "r", "Ř": "R", "ů": "u", "Ů": "U",
 })
+# litery, które PaddleOCR czyta zamiast polskich: „cate”/„cafy” (ł), „wyobraśni” (ź), „zakorczone” (ń); „ś” i „r”
+# zamieniamy tylko w słowie spoza słownika — „śle” i „dar” to prawdziwe słowa, a „źle” i „dań” są tylko częstsze
+_OCR_LOOKALIKE = {"t": "ł", "f": "ł", "ś": "ź", "r": "ń"}
+_OCR_LOOKALIKE_KNOWN = {"t": "ł", "f": "ł"}
+# litery, które PaddleOCR potrafi zgubić całkiem: „spónić”, „cięko”
+_OCR_DROPPED = "źżę"
+_PL_WORD_RE = re.compile(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+")
+OCR_LOOKALIKE_RATIO = 30  # słowo z podmienioną literą musi być tyle razy częstsze od odczytanego („byt” → „był”)
+OCR_LOOKALIKE_MIN = 50  # i występować w napisach co najmniej tyle razy (odczyt spoza słownika — dowolne słowo)
+OCR_FORM_SHARE = 0.9  # brakujące ogonki bez pomocy sąsiadów — tylko gdy jedna forma ma taki udział
 
 
-def _pl_words():
-    """~290 tys. słów z napisów: forma bez ogonków → jedyna forma z ogonkami albo '' (pl_words.tsv obok silnika)."""
-    global _PL_WORDS
-    if _PL_WORDS is None:
-        table = {}
-        try:
-            with open(Path(__file__).resolve().with_name("pl_words.tsv"), encoding="utf-8") as handle:
-                for line in handle:
-                    if line.startswith("#"):
-                        continue
-                    fold, _tab, word = line.rstrip("\n").partition("\t")
-                    if fold:
-                        table[fold] = word
-        except OSError:
-            pass
-        _PL_WORDS = table
-    return _PL_WORDS
+class PlLexicon:
+    """pl_lex.sqlite obok silnika (tools/build_pl_lexicon.py, napisy filmowe OpenSubtitles): ile razy padło każde
+    słowo i którą formę wybierają sąsiedzi („z dzisiejsza” → „dzisiejszą”). Czytany z dysku — w pamięci prawie nic."""
+
+    def __init__(self, path):
+        uri = Path(path).resolve().as_uri() + "?mode=ro&immutable=1"
+        self.db = sqlite3.connect(uri, uri=True, check_same_thread=False)
+        self.lock = threading.Lock()
+        self.forms = functools.lru_cache(maxsize=8192)(self._forms)
+        self.context = functools.lru_cache(maxsize=8192)(self._context)
+
+    def _forms(self, fold):
+        """Wszystkie formy o tej postaci bez ogonków z liczbą wystąpień: „woda” → {„woda”: 15115, „wodą”: 6856}."""
+        with self.lock:
+            return dict(self.db.execute("SELECT w, n FROM w WHERE f = ?", (fold,)).fetchall())
+
+    def count(self, word):
+        return self.forms(polish_fold(word)).get(word, 0)
+
+    def _context(self, key):
+        with self.lock:
+            row = self.db.execute("SELECT form FROM ctx WHERE k = ?", (key,)).fetchone()
+        return row[0] if row else None
+
+
+def _pl_lexicon():
+    global _PL_LEXICON
+    with _PL_LEXICON_LOCK:
+        if _PL_LEXICON is None:
+            path = Path(__file__).resolve().with_name("pl_lex.sqlite")
+            try:
+                _PL_LEXICON = PlLexicon(path) if path.is_file() else False
+            except sqlite3.Error as exc:
+                log_timing(f"słownik OCR niedostępny ({exc})")
+                _PL_LEXICON = False
+        return _PL_LEXICON or None
+
+
+def _keeps_read_marks(read, form):
+    """Forma pasuje do odczytu, jeśli tylko dodaje brakujące ogonki — odczytany ogonek zostaje („zęby” to nie „żeby”),
+    wolno jedynie pomylić ż, ź i ś."""
+    return len(read) == len(form) and all(
+        have == want or have not in PL_MARK or {have, want} <= {"ż", "ź", "ś"} for have, want in zip(read, form)
+    )
+
+
+def _completions(lex, read):
+    """Formy ze słownika, które tylko dopisują ogonki odczytowi (bez niego samego), z liczbą wystąpień."""
+    return {form: n for form, n in lex.forms(polish_fold(read)).items() if form != read and _keeps_read_marks(read, form)}
+
+
+def _lookalike_variants(low, swaps):
+    """Odczyt z podmienioną jedną lub dwiema literami, które OCR myli z polskimi („cate” → „całe”)."""
+    spots = [i for i, ch in enumerate(low) if ch in swaps]
+    for count in (1, 2):
+        for picked in itertools.combinations(spots, count):
+            yield "".join(swaps[ch] if i in picked else ch for i, ch in enumerate(low))
+
+
+def _dropped_variants(low):
+    for i in range(1, len(low) + 1):
+        for ch in _OCR_DROPPED:
+            yield low[:i] + ch + low[i:]
+
+
+def _fix_ocr_word(lex, token, polish, name_like):
+    """Jedno słowo bez sąsiadów: brakujące ogonki (gdy forma jest jedna) i litery pomylone przez OCR."""
+    low = token.lower()
+    if len(low) < 3 or len(polish_fold(low)) != len(low):
+        return token
+    seen = lex.count(low)
+    if polish:
+        options = _completions(lex, low)
+        total = sum(options.values()) + seen
+        if options:
+            form, n = max(options.items(), key=lambda item: item[1])
+            if n >= OCR_FORM_SHARE * total:
+                return _preserve_case(token, form)
+    if seen and (name_like or not polish):
+        return token  # „Cate” w środku zdania to imię; angielskiego tekstu nie poprawiamy na polskie słowa
+    best, best_n = None, 0
+    variants = list(_lookalike_variants(low, _OCR_LOOKALIKE_KNOWN if seen else _OCR_LOOKALIKE))
+    if not seen and polish:
+        variants += _dropped_variants(low)
+    for variant in variants:
+        exact = lex.count(variant)
+        options = {variant: exact} if exact else _completions(lex, variant)
+        for form, n in options.items():
+            if n > best_n:
+                best, best_n = form, n
+    if best and (not seen or best_n >= max(OCR_LOOKALIKE_MIN, OCR_LOOKALIKE_RATIO * seen)):
+        return _preserve_case(token, best)
+    return token
+
+
+def _fix_by_neighbours(lex, words, i):
+    """Obie formy poprawne („woda”/„wodą”, „ze”/„że”) — wybór z sąsiadów: „z dzisiejsza” → „z dzisiejszą”."""
+    low = words[i].lower()
+    fold = polish_fold(low)
+    if len(fold) != len(low) or not _completions(lex, low):
+        return words[i]
+    picks = set()
+    if i:
+        picks.add(lex.context(f"L|{words[i - 1].lower()}|{fold}"))
+    if i + 1 < len(words):
+        picks.add(lex.context(f"R|{fold}|{words[i + 1].lower()}"))
+    picks.discard(None)
+    if len(picks) == 1:
+        form = picks.pop()
+        # „ł” sąsiad nie dopisuje: OCR nie czyta go jako „l”, a „na laskę” to nie „na łaskę”
+        if form != low and _keeps_read_marks(low, form) and form.count("ł") == low.count("ł"):
+            return _preserve_case(words[i], form)
+    return words[i]
 
 
 def latin_ocr_polish(text):
-    """Odczyt PaddleOCR (model łaciński) → polskie litery: czeskie znaki na polskie, a słowo spoza słownika z „t”
-    w miejscu „ł” („odpalita”, „Zatóżmy”) — na słowo ze słownika. Zgubione albo pomylone ogonki („angazuja”,
-    „przyjażnimy”) — na jedyną formę ze słownika, tylko w polskim tekście („zone” to nie „żonę”). Słowa bez ogonków
-    albo z kilkoma formami i imiona zostają bez zmian."""
+    """Odczyt PaddleOCR (model łaciński) → polskie litery: czeskie znaki na polskie, potem słownik z napisów
+    filmowych: zgubione ogonki („angazuja” → „angażują”), litery pomylone przez OCR („cate”, „cafy” → „całe”, „cały”;
+    „wyobraśni”, „spónić”) i forma wybrana z sąsiadów („z dzisiejsza młodzieżą”, „wiem, ze” → „że”). Angielski
+    tekst (idzie do tłumaczenia) zostaje — „zone” to nie „żonę”. Imiona w środku zdania też."""
     text = (text or "").translate(_LATIN_TO_PL)
-    words = _pl_words()
-    if not words:
+    lex = _pl_lexicon()
+    if lex is None:
         return text
     polish = not should_translate(text)
-
-    def fix(match):
+    matches = list(_PL_WORD_RE.finditer(text))
+    if not matches:
+        return text
+    words = []
+    for i, match in enumerate(matches):
         token = match.group(0)
-        fold = polish_fold(token)
-        if len(fold) < 3 or len(fold) != len(token):
-            return token
-        if fold in words:
-            form = words[fold]
-            # odczytany ogonek zostaje („zęby” to nie „żeby”); wolno tylko dodać brakujący albo zamienić ż↔ź
-            if polish and form and len(form) == len(token) and all(
-                have == want or have not in PL_MARK or {have, want} == {"ż", "ź"}
-                for have, want in zip(token.lower(), form)
-            ):
-                return _preserve_case(token, form)
-            return token
-        if "t" not in fold:
-            return token
-        spots = [i for i, ch in enumerate(fold) if ch == "t"]
-        for count in (1, 2):
-            for picked in itertools.combinations(spots, count):
-                variant = "".join("l" if i in picked else ch for i, ch in enumerate(fold))
-                form = words.get(variant)
-                if form is None:
-                    continue
-                if form:
-                    return _preserve_case(token, form)
-                return "".join(("Ł" if ch.isupper() else "ł") if i in picked else ch for i, ch in enumerate(token))
-        return token
-
-    return re.sub(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+", fix, text)
+        before = text[matches[i - 1].end():match.start()] if i else ""
+        after = matches[i + 1].group(0) if i + 1 < len(matches) else ""
+        capital = token[:1].isupper() and not token.isupper()
+        # imię: wielka litera w środku zdania albo przed kolejnym słowem z wielkiej („Cate Blanchett”)
+        name_like = capital and ((bool(i) and not re.search(r"[.!?…]", before))
+                                 or (after[:1].isupper() and not after.isupper()))
+        words.append(_fix_ocr_word(lex, token, polish, name_like))
+    if polish:
+        words = [_fix_by_neighbours(lex, words, i) for i in range(len(words))]
+    out, last = [], 0
+    for match, word in zip(matches, words):
+        out.append(text[last:match.start()])
+        out.append(word)
+        last = match.end()
+    out.append(text[last:])
+    return "".join(out)
 
 
 def _restore_from_dict(token):
