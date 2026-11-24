@@ -38,8 +38,6 @@ def make_engine(translator, seconds):
     engine = Engine.__new__(Engine)
     engine.translator = translator
     engine.lektor = FakeLektor()
-    engine.prosody = Mock(recent=Mock(return_value=0.0))
-    engine._heard_arousal = {}
     engine.catch_up = False
     engine._screen_budget = Mock(return_value=seconds)
     engine._timing = Mock()

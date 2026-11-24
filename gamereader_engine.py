@@ -1481,6 +1481,8 @@ LEKTOR_CATCHUP_RATE = 1.08
 # 18.11 zasada użytkownika ×1,15; 21.11 użytkownik pokazał ustawienia GameReadera (bazowa ×1,00, każda następna
 # kwestia ×1,20) i kazał dostosować tak — sufit ×1,20 (~14,4 l/s, lektor-filmowy zrozumiały do ~14,7)
 LEKTOR_CLOUD_MAX_BOOST = 1.20
+# cisza po fragmencie lektora VoiceStudio — stała jak u lektora w filmie; dłuższe zostają tylko po „…” i „?”
+LEKTOR_CLOUD_PAUSE = 0.05
 # kwestia, która przyszła, gdy lektor czytał poprzednią (dialog zmienia się w trakcie mowy) — „każda następna
 # kwestia” z GameReadera; pierwsza kwestia w serii zostaje w tempie bazowym ×1,00
 LEKTOR_NEXT_LINE_BOOST = 1.20
@@ -1544,6 +1546,26 @@ def lektor_style(text, mood="calm", arousal=0.0):
     if mood == "lively" or end.endswith(("?", "!")) or float(arousal or 0.0) >= 0.4:
         return "zywy"
     return None
+
+
+def text_arousal(text):
+    """Przejęcie kwestii z samego tekstu, -1 (szept) … +1 (krzyk): „?!”/„!!” 0,6, „!” 0,4, słowo żywe („uciekaj”,
+    „gliny”) dokłada 0,2 (samo 0,3), wielokropek albo słowo miękkie („przepraszam”, „kocham”) odejmuje 0,4.
+    Same reguły, bez modelu: model na tekście trafiał emocję w 9–10/15 (zwykłe kwestie brał za szept albo krzyk)."""
+    t = normalize_text(text or "")
+    if not t:
+        return 0.0
+    low = t.lower()
+    score = 0.0
+    if re.search(r"[!?]{2,}", t):
+        score = 0.6
+    elif "!" in t:
+        score = 0.4
+    if any(w in low for w in _LIVELY_WORDS):
+        score = score + 0.2 if score else 0.3
+    if "…" in t or "..." in t or any(w in low for w in _SOFT_WORDS):
+        score -= 0.4
+    return round(max(-1.0, min(1.0, score)), 1)
 
 
 def _sentence_mood(sentence):
@@ -4250,7 +4272,8 @@ class MaleLektor:
         if cloud_lektor:
             # lektor VoiceStudio równy jak w filmie: emocja nie zmienia tempa ani głośności (18.11: „zbyt duże
             # różnice głosu zależnie od emocji”; szybsza emocja + nadganianie dawały ×1,6 i ucięte końcówki)
-            params = {**params, "speed": 1.0, "gain": 1.0}
+            # 24.11: także stała, krótka pauza po fragmencie (było 0,05–0,16 s zależnie od emocji)
+            params = {**params, "speed": 1.0, "gain": 1.0, "pause": LEKTOR_CLOUD_PAUSE}
         # tempo całej kwestii przychodzi z line_boost(); bez niego — z długości tego fragmentu
         length_pace = lektor_pace(text) if boost is None else 1.0
         pace = length_pace * float(self.tts_scale or 1.0) / params["speed"]
@@ -4639,36 +4662,15 @@ class ParakeetSTT:
 
 
 class ProsodyMeter:
-    """Jak mówi postać: głośność, melodia i tempo względem typowej mowy w tej grze → „przejęcie” -1…1."""
+    """Jak mówi postać: głośność, melodia i tempo względem typowej mowy w tej grze. Od 24.11 emocja lektora idzie
+    z tekstu (text_arousal) — miernik zostaje do odsiewania cichej mowy w tle (is_quiet) i uczy się mowy w grze."""
 
     FRAME = 512  # 32 ms przy 16 kHz
 
     def __init__(self):
-        self.ring = np.zeros(int(SAMPLE_RATE * 3.0), dtype=np.float32)
-        self.ring_n = 0
-        self.ring_t = 0.0
-        self.lock = threading.Lock()
         # bazowe statystyki mowy w grze (średnia/odchylenie z wygaszaniem)
         self.stats = {}
         self.count = 0
-
-    def feed(self, mono):
-        if mono is None or mono.size == 0:
-            return
-        with self.lock:
-            n = min(mono.size, self.ring.size)
-            self.ring = np.roll(self.ring, -n)
-            self.ring[-n:] = mono[-n:]
-            self.ring_n = min(self.ring.size, self.ring_n + n)
-            self.ring_t = time.monotonic()
-
-    def recent(self, window=1.6):
-        """Przejęcie z ostatnich sekund dźwięku gry (dla napisów); None gdy brak świeżej mowy."""
-        with self.lock:
-            if time.monotonic() - self.ring_t > 2.0 or self.ring_n < SAMPLE_RATE * 0.5:
-                return None
-            audio = self.ring[-int(SAMPLE_RATE * window) :].copy()
-        return self.analyze(audio, learn=False)
 
     def _features(self, audio):
         frame = self.FRAME
@@ -5956,7 +5958,6 @@ class Engine:
         self._spoken_recent = deque(maxlen=8)
         # kiedy ostatnio gra pokazała napis — wtedy dialogi bierzemy tylko z napisów
         self._last_subtitle_seen = 0.0
-        self._heard_arousal = {}
         self._pl_subs_at = None
         # tempo napisów: ile znaków na sekundę gra pokazuje (z czasu między kolejnymi napisami)
         self._sub_cps = None
@@ -7202,10 +7203,6 @@ class Engine:
             text = src
         text = strip_fillers(text)
         segments = self.lektor.plan(text) if text else []
-        # dźwięk: cała wypowiedź postaci; napisy: ostatnie ~1,6 s tego, co postać mówi
-        arousal = self._heard_arousal.pop(text_key(src), None) if translate else None
-        if arousal is None:
-            arousal = self.prosody.recent()
         # jak w filmie: wypowiedź ma się zmieścić, zanim zniknie napis z ekranu.
         # Kolejno: szybsze tempo → skrót (wtrącenia, powtórzenia) → mocniejszy skrót →
         # najstarsze zdania wypadają (pierwszeństwo ma to, co jest teraz na ekranie).
@@ -7263,7 +7260,8 @@ class Engine:
             boost = self.lektor.line_boost(text, seconds, lag, series=True)
         else:
             boost = self.lektor.line_boost(text, seconds, lag)
-        return text, segments, float(arousal or 0.0), boost
+        # emocja z tekstu, który lektor przeczyta — nie z głosu postaci (24.11: „wolę emocje z tekstu, nie z dźwięku”)
+        return text, segments, text_arousal(text), boost
 
     def _said_fold(self, sentence):
         words = re.findall(r"[\wÀ-ž]+", sentence or "")
@@ -7446,9 +7444,10 @@ class Engine:
     def _on_heard(self, heard, audio=None, start=None):
         if not heard or heard.lower() in JUNK_HEARD:
             return
-        # jak postać to powiedziała — liczone zawsze, żeby miernik uczył się mowy w tej grze
+        # miernik uczy się mowy w tej grze (próg cichego tła) — zawsze, emocja lektora idzie z tekstu
         quiet = audio is not None and self.prosody.is_quiet(audio)
-        arousal = self.prosody.analyze(audio) if audio is not None else None
+        if audio is not None:
+            self.prosody.analyze(audio)
         # „Napisy + dźwięk”: wypowiedź bez napisu (sprawdzone w pętli dźwięku) — tylko pełne zdania
         if self.mode != "audio" and not is_full_sentence(heard):
             return
@@ -7472,10 +7471,6 @@ class Engine:
         if not heard:
             return
         self.emit({"event": "heard", "text": heard})
-        if arousal is not None:
-            if len(self._heard_arousal) > 64:
-                self._heard_arousal.clear()
-            self._heard_arousal[text_key(strip_fillers(heard))] = arousal
         if time.monotonic() < self.subtitle_until:
             return
         if text_key(heard) == self.last_key or self._recently_spoken(heard):
@@ -7959,7 +7954,6 @@ class Engine:
                     if dead:
                         raise RuntimeError(tap.message or "Źródło dźwięku się rozłączyło.")
                     continue
-                self.prosody.feed(chunk)
                 self.voice.feed(chunk)
                 bank = getattr(self, "speakers", None) if self.lektor.cloud is not None else None
                 if live is None and bank is None:
@@ -7979,7 +7973,7 @@ class Engine:
                     if self._unsubtitled_speech(audio, start, end):
                         live.submit(audio, start=start)
                     elif not self.prosody.is_quiet(audio):
-                        # dialog z napisem: nie rozpoznajemy (GPU dla lektora), tylko miernik emocji się uczy
+                        # dialog z napisem: nie rozpoznajemy (GPU dla lektora), tylko miernik mowy się uczy (próg tła)
                         self.prosody.analyze(audio)
         except PermissionError as exc:
             self.emit({"event": "perm", "text": str(exc)})
