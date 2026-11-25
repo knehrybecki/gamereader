@@ -1,5 +1,5 @@
 """21.11 — tempo jak w ustawieniach GameReadera, które pokazał użytkownik: pierwsza kwestia w serii ×1,00,
-każda następna (dialog zmienia się w trakcie mowy lektora) ×1,20; 25.11 „za wolny, przyspiesz”: ×1,10 i ×1,35. Do tego log napisu, który przepadł przed
+każda następna (dialog zmienia się w trakcie mowy lektora) ×1,20; 25.11 „za wolny, przyspiesz”: ×1,10 i ×1,35, potem „jeszcze trochę”: ×1,20 i ×1,45. Do tego log napisu, który przepadł przed
 potwierdzeniem (21.11 „Coś podać?” i „Jezu Chryste, jeszcze kogoś zabijesz!” zniknęły bez śladu w logu)."""
 import sys
 import threading
@@ -26,14 +26,14 @@ class SeriesBoostTest(unittest.TestCase):
     LINE = "Powiedziała, że możesz mi pomóc z autem."
 
     def test_first_line_of_series_reads_at_base_tempo(self):
-        self.assertEqual(voicestudio_lektor().line_boost(self.LINE, 4.0, lag=0.0), 1.10)
+        self.assertEqual(voicestudio_lektor().line_boost(self.LINE, 4.0, lag=0.0), 1.20)
 
-    def test_next_line_in_series_reads_at_135(self):
-        self.assertEqual(ge.LEKTOR_NEXT_LINE_BOOST, 1.35)
-        self.assertEqual(voicestudio_lektor().line_boost(self.LINE, 4.0, lag=0.0, series=True), 1.35)
+    def test_next_line_in_series_reads_at_145(self):
+        self.assertEqual(ge.LEKTOR_NEXT_LINE_BOOST, 1.45)
+        self.assertEqual(voicestudio_lektor().line_boost(self.LINE, 4.0, lag=0.0, series=True), 1.45)
 
     def test_series_tempo_is_the_ceiling(self):
-        self.assertEqual(voicestudio_lektor().line_boost(self.LINE, 1.0, lag=5.0, series=True), 1.40)
+        self.assertEqual(voicestudio_lektor().line_boost(self.LINE, 1.0, lag=5.0, series=True), 1.50)
 
 
 def queue_engine():
@@ -88,11 +88,18 @@ class DroppedCandidateLogTest(unittest.TestCase):
         engine._timing = Mock()
         return engine
 
-    def test_replaced_line_is_logged(self):
-        engine = self.engine("Jezu Chryste, jeszcze kogoś zabijesz!")
+    def test_replaced_unfinished_line_is_logged(self):
+        engine = self.engine("Jezu Chryste, jeszcze kogoś")
         engine._note_dropped_candidate("Ci Watkins", 10.3)
         engine._timing.assert_called_once()
         self.assertIn("przepadł", engine._timing.call_args[0][0])
+
+    def test_replaced_complete_line_is_read(self):
+        # 25.11: ze słownikiem napisów „Jezu Chryste, jeszcze kogoś zabijesz!” to pewny odczyt — idzie do lektora
+        engine = self.engine("Jezu Chryste, jeszcze kogoś zabijesz!")
+        engine._offer_line = Mock()
+        engine._note_dropped_candidate("Ci Watkins", 10.3)
+        engine._offer_line.assert_called_once_with("Jezu Chryste, jeszcze kogoś zabijesz!", False)
 
     def test_grown_line_is_not_a_loss(self):
         engine = self.engine("Coś podać?")

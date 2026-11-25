@@ -566,6 +566,9 @@ def ocr_reading_rank(text):
     return score
 
 
+OCR_SETTLED_WORD_COUNT = 100  # tyle wystąpień w napisach filmowych = zwykłe polskie słowo, nie zlepek OCR
+
+
 def ocr_reading_unsettled(text):
     """Długa klatka z obcymi literami albo zlepkami („spontanfcznego…”) — czekaj dłużej niż jedną klatkę."""
     raw = normalize_text(text)
@@ -576,10 +579,16 @@ def ocr_reading_unsettled(text):
     if any(len(word) == 1 and word.lower() not in "aiouwz" for word in words):
         return True
     table = _pl_diacritics()
-    long = [polish_fold(word) for word in words if len(word) >= 6]
+    long = [word for word in words if len(word) >= 6]
     if len(long) < 3:
         return False
-    unknown = sum(1 for fold in long if fold not in table and fold not in _POLISH_BY_FOLD)
+    # 25.11: bez słownika napisów „Kierowco, zatrzymaj pojazd!” uchodziło za zlepek i czekało dodatkową klatkę
+    lex = _pl_lexicon()
+    unknown = sum(
+        1 for word in long
+        if polish_fold(word) not in table and polish_fold(word) not in _POLISH_BY_FOLD
+        and not (lex is not None and lex.count(word.lower()) >= OCR_SETTLED_WORD_COUNT)
+    )
     return unknown * 2 > len(long)
 
 
@@ -1136,6 +1145,17 @@ def screen_junk_level(text):
     return "ok"
 
 
+LEAD_DIALOGUE_FREQ = 10000  # tyle razy w napisach filmowych = słowo dialogu („wiesz”, „mój”, „panie”, „rzuć”), nie etykieta
+LEAD_WORD_FREQ = 50  # od tylu wystąpień odczyt jest polskim słowem — etykietą bywa tylko dokładnie nauczony
+LEAD_SHORT_WORD_FREQ = 100000  # „to”, „no”, „co”, „ty”… — dwuliterowe słowa dialogu (nie „n”, „u” ze śmieci OCR)
+
+
+def polish_fold_freq(fold):
+    """Ile razy słowo (wszystkie formy o tej postaci bez ogonków) padło w napisach filmowych; bez słownika 0."""
+    lex = _pl_lexicon()
+    return sum(lex.forms(fold).values()) if lex is not None and fold else 0
+
+
 class RecurringLead:
     """Nazwa strefy / etykieta z mapy doklejana PRZED różnymi kwestiami („Lotnisko n Tato!…”, „Lotnisko n
     Coś ci się…”, „Wiad To mnie…”). Słowo, które stało na początku 2 RÓŻNYCH kwestii bez interpunkcji po
@@ -1177,6 +1197,15 @@ class RecurringLead:
         return None
 
     def _is_junk(self, fold):
+        # 25.11: nauczone „wiesz”, „panie”, „mój” wycinały przez podobieństwo początki kwestii („Nie, nie! Ma
+        # kuloodporną szybę!” → „kuloodporną szybę!”, „Ta, pewnie.” → nic). Częste słowo dialogu nigdy nie jest
+        # etykietą, a polskie słowo jest nią tylko wtedy, gdy samo zostało nauczone — podobieństwo (warianty OCR:
+        # „Lotniako”, „Miad”) dotyczy wyłącznie odczytów spoza słownika.
+        freq = polish_fold_freq(fold)
+        if freq >= LEAD_DIALOGUE_FREQ:
+            return False
+        if freq >= LEAD_WORD_FREQ:
+            return fold in self.junk
         return any(
             abs(len(fold) - len(j)) <= 2 and SequenceMatcher(None, fold, j, autojunk=False).ratio() >= 0.7
             for j in self.junk
@@ -1200,7 +1229,11 @@ class RecurringLead:
         if not self.junk:
             return normalize_text(text)
         folds = [polish_fold(w) for w in words]
-        if folds and all(self._is_junk(f) or len(f) <= 2 for f in folds) and any(len(f) >= 3 for f in folds):
+        # „Rzuć to.”, „Sklep? No co ty.” — krótkie słowo dialogu obok nauczonego słowa to kwestia, nie etykieta
+        said = lambda f: len(f) == 2 and polish_fold_freq(f) >= LEAD_SHORT_WORD_FREQ
+        spoken = any(said(f) for f in folds)
+        if (folds and not spoken and all(self._is_junk(f) or len(f) <= 2 for f in folds)
+                and any(len(f) >= 3 for f in folds)):
             return ""  # sama etykieta z mapy („Lotnisko.”)
         for cut in (3, 2, 1):
             if len(words) < cut + 1:
@@ -1208,7 +1241,7 @@ class RecurringLead:
             head = [polish_fold(w) for w in words[:cut]]
             # przód = nauczone słowo + najwyżej krótkie śmieci obok („n”, „n!”, „z”, „u *”)
             if any(self._is_junk(h) for h in head if len(h) >= 3) and all(
-                self._is_junk(h) or len(h) <= 2 for h in head
+                self._is_junk(h) or (len(h) <= 2 and not said(h)) for h in head
             ):
                 # „Lotnisko jest blisko.” to zdanie; „Lotnisku u * więć…” — śmieć z krótkim ogonem
                 if re.match(rf"[-–„\"]?[{_CAPS}]", words[cut]) or any(len(h) <= 2 for h in head):
@@ -1588,14 +1621,17 @@ LEKTOR_CATCHUP_RATE = 1.08
 # 25.11 „lektor jest za wolny względem tekstu, przyspiesz”: w sesji GTA 54 % kwestii szło już na suficie ×1,20,
 # a co trzecia startowała ponad 1,5 s po napisie. Pomiar lektor-hd (14 kwestii GTA, Parakeet): do ×1,40 zero
 # zgubionych słów (13,1 → 15,2 liter/s, nagrania o 14 % krótsze niż przy ×1,20) — sufit ×1,40
-LEKTOR_CLOUD_MAX_BOOST = 1.40
+# Tego samego wieczoru po ×1,10 / ×1,35 / ×1,40: „wolę szybciej, żeby czytał, bo teraz jest nawet dobrze albo
+# i lepiej przyspieszyć jeszcze trochę” — ×1,20 / ×1,45 / ×1,50. Cena znana: na 20 trudnych kwestiach (ś, ć, ł)
+# rozpoznawanie mowy nie zgadza się co do litery w 13–16 słowach na 110 przy ×1,00 i w 18–20 przy ×1,40.
+LEKTOR_CLOUD_MAX_BOOST = 1.50
 # pierwsza kwestia w serii u lektora VoiceStudio (było ×1,00)
-LEKTOR_CLOUD_BASE_BOOST = 1.10
+LEKTOR_CLOUD_BASE_BOOST = 1.20
 # cisza po fragmencie lektora VoiceStudio — stała jak u lektora w filmie; dłuższe zostają tylko po „…” i „?”
 LEKTOR_CLOUD_PAUSE = 0.05
 # kwestia, która przyszła, gdy lektor czytał poprzednią (dialog zmienia się w trakcie mowy) — „każda następna
-# kwestia” z GameReadera; pierwsza kwestia w serii zostaje w tempie bazowym. 25.11: ×1,20 → ×1,35
-LEKTOR_NEXT_LINE_BOOST = 1.35
+# kwestia” z GameReadera; pierwsza kwestia w serii zostaje w tempie bazowym. 25.11: ×1,20 → ×1,35 → ×1,45
+LEKTOR_NEXT_LINE_BOOST = 1.45
 SERIES_MEMORY_SEC = 30.0
 # tempo dopasowane do napisów: lektor ma się zmieścić w czasie, w którym napis wisi na ekranie
 LEKTOR_CPS_PRIOR = 15.0  # znaki/s lektora przy speed=1 — potem uczy się z własnych syntez
@@ -2832,9 +2868,34 @@ _POLISH_FUNCTION = set("nie się jest to że co jak tak na w z do czy już tylko
                        "tu tam jestem mam masz ci go jej mu".split())
 
 
+POLISH_WORD_MIN_COUNT = 100  # tyle wystąpień w napisach = zwykłe polskie słowo (śmieci OCR: „wedy” 23, „thy” 52)
+
+
 def polish_common_words(text):
     """Ile w tekście zwykłych polskich słów (2+ litery) — odróżnia polszczyznę spoza słownika od śmieci OCR."""
     return sum(1 for w in re.findall(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]{2,}", (text or "").lower()) if w in _POLISH_COMMON)
+
+
+def mostly_polish_words(text):
+    """Czy odczyt składa się z polskich słów ze słownika napisów filmowych (co najmniej 2 i ponad połowa słów
+    od 3 liter; nazwy z wielkiej litery w środku zdania się nie liczą). „Thy co wedy atak eles.” — nie; „Potrzebuję tego auta.” — tak. Bez słownika: nie wiadomo → False."""
+    lex = _pl_lexicon()
+    if lex is None:
+        return False
+    words = known = 0
+    start = True
+    for token in re.findall(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+|[.!?…]", text or ""):
+        if token in ".!?…":
+            start = True
+            continue
+        at_start, start = start, False
+        if len(token) < 3:
+            continue
+        words += 1
+        # nazwa w środku zdania („hrabstwo Vice-Dale”) to nie dowód na kwestię, choć „dale” jest w słowniku
+        if (at_start or not token[0].isupper()) and lex.count(token.lower()) >= POLISH_WORD_MIN_COUNT:
+            known += 1
+    return known >= 2 and known * 2 > words
 
 
 def scene_text_junk(text):
@@ -7749,8 +7810,10 @@ class Engine:
             self._log_junk(src, f"pomijam — zła powtórka przeczytanej kwestii: {src[:70]!r}")
             return
         # „Thy co wedy atak eles.” — zła klatka właśnie przeczytanego napisu, bez ani jednego polskiego słowa
+        # 25.11: krótka lista zwykłych słów nie znała „Potrzebuję tego auta.”, „Kierowco, zatrzymaj pojazd!” — 91
+        # pominięć w 40 minut gry, co trzecie to prawdziwa kwestia. Odczyt z polskimi słowami ze słownika napisów zostaje.
         if (not should_translate(src) and ocr_reading_rank(src) <= 0 and polish_common_words(src) < 2
-                and len(re.findall(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+", src)) >= 3):
+                and len(re.findall(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+", src)) >= 3 and not mostly_polish_words(src)):
             self._log_junk(src, f"pomijam — odczyt bez polskich słów: {src[:70]!r}")
             return
         if not should_translate(src) and scene_text_junk(src):
