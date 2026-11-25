@@ -1,5 +1,5 @@
 """21.11 — tempo jak w ustawieniach GameReadera, które pokazał użytkownik: pierwsza kwestia w serii ×1,00,
-każda następna (dialog zmienia się w trakcie mowy lektora) ×1,20. Do tego log napisu, który przepadł przed
+każda następna (dialog zmienia się w trakcie mowy lektora) ×1,20; 25.11 „za wolny, przyspiesz”: ×1,10 i ×1,35. Do tego log napisu, który przepadł przed
 potwierdzeniem (21.11 „Coś podać?” i „Jezu Chryste, jeszcze kogoś zabijesz!” zniknęły bez śladu w logu)."""
 import sys
 import threading
@@ -26,14 +26,14 @@ class SeriesBoostTest(unittest.TestCase):
     LINE = "Powiedziała, że możesz mi pomóc z autem."
 
     def test_first_line_of_series_reads_at_base_tempo(self):
-        self.assertEqual(voicestudio_lektor().line_boost(self.LINE, 4.0, lag=0.0), 1.0)
+        self.assertEqual(voicestudio_lektor().line_boost(self.LINE, 4.0, lag=0.0), 1.10)
 
-    def test_next_line_in_series_reads_at_120(self):
-        self.assertEqual(ge.LEKTOR_NEXT_LINE_BOOST, 1.20)
-        self.assertEqual(voicestudio_lektor().line_boost(self.LINE, 4.0, lag=0.0, series=True), 1.20)
+    def test_next_line_in_series_reads_at_135(self):
+        self.assertEqual(ge.LEKTOR_NEXT_LINE_BOOST, 1.35)
+        self.assertEqual(voicestudio_lektor().line_boost(self.LINE, 4.0, lag=0.0, series=True), 1.35)
 
     def test_series_tempo_is_the_ceiling(self):
-        self.assertEqual(voicestudio_lektor().line_boost(self.LINE, 1.0, lag=5.0, series=True), 1.20)
+        self.assertEqual(voicestudio_lektor().line_boost(self.LINE, 1.0, lag=5.0, series=True), 1.40)
 
 
 def queue_engine():

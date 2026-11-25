@@ -1585,12 +1585,17 @@ LEKTOR_CATCHUP_RATE = 1.08
 # gry tts 0,92) dawał tylko ×1,04 — 18.11 lektor 3,6 s za napisem czytał „tempo x1.05” i pomijał zaległe kwestie.
 # 18.11 zasada użytkownika ×1,15; 21.11 użytkownik pokazał ustawienia GameReadera (bazowa ×1,00, każda następna
 # kwestia ×1,20) i kazał dostosować tak — sufit ×1,20 (~14,4 l/s, lektor-filmowy zrozumiały do ~14,7)
-LEKTOR_CLOUD_MAX_BOOST = 1.20
+# 25.11 „lektor jest za wolny względem tekstu, przyspiesz”: w sesji GTA 54 % kwestii szło już na suficie ×1,20,
+# a co trzecia startowała ponad 1,5 s po napisie. Pomiar lektor-hd (14 kwestii GTA, Parakeet): do ×1,40 zero
+# zgubionych słów (13,1 → 15,2 liter/s, nagrania o 14 % krótsze niż przy ×1,20) — sufit ×1,40
+LEKTOR_CLOUD_MAX_BOOST = 1.40
+# pierwsza kwestia w serii u lektora VoiceStudio (było ×1,00)
+LEKTOR_CLOUD_BASE_BOOST = 1.10
 # cisza po fragmencie lektora VoiceStudio — stała jak u lektora w filmie; dłuższe zostają tylko po „…” i „?”
 LEKTOR_CLOUD_PAUSE = 0.05
 # kwestia, która przyszła, gdy lektor czytał poprzednią (dialog zmienia się w trakcie mowy) — „każda następna
-# kwestia” z GameReadera; pierwsza kwestia w serii zostaje w tempie bazowym ×1,00
-LEKTOR_NEXT_LINE_BOOST = 1.20
+# kwestia” z GameReadera; pierwsza kwestia w serii zostaje w tempie bazowym. 25.11: ×1,20 → ×1,35
+LEKTOR_NEXT_LINE_BOOST = 1.35
 SERIES_MEMORY_SEC = 30.0
 # tempo dopasowane do napisów: lektor ma się zmieścić w czasie, w którym napis wisi na ekranie
 LEKTOR_CPS_PRIOR = 15.0  # znaki/s lektora przy speed=1 — potem uczy się z własnych syntez
@@ -4377,7 +4382,7 @@ class MaleLektor:
         cloud = getattr(self, "cloud", None)
         voicestudio = cloud is not None and time.monotonic() >= getattr(cloud, "failed_until", 0.0)
         cap = LEKTOR_CLOUD_MAX_BOOST if voicestudio else LEKTOR_MAX_RATE / base
-        boost = max(1.0, by_length, min(cap, needed))
+        boost = max(min(cap, LEKTOR_CLOUD_BASE_BOOST) if voicestudio else 1.0, by_length, min(cap, needed))
         late = min(1.0, max(0.0, (float(lag or 0.0) - 1.0) / 1.5))
         boost = min(max(boost, 1.0 + late * (cap - 1.0)), cap)
         if series:
