@@ -102,22 +102,34 @@ function currentBundle() {
 }
 
 // Windows: nowy instalator (NSIS) po cichu instaluje wersję na miejsce starej i uruchamia LiveDub
-async function installWindows({ asset, token, version, log, status }) {
+async function installWindows({ asset, token, version, log, status, defer }) {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "livedub-update-"));
   const setup = path.join(work, ASSET);
   const dl = await fetch(asset.url, { headers: headers(token, "application/octet-stream") });
   if (!dl.ok) throw new Error(`pobieranie: HTTP ${dl.status}`);
   fs.writeFileSync(setup, Buffer.from(await dl.arrayBuffer()));
+  const install = (relaunch = true) => {
+    log(`update-install ${version}${relaunch ? "" : " (przy zamknięciu)"}`);
+    // /S = bez okien, --updated --force-run = po instalacji uruchom LiveDub (instalator electron-builder)
+    const args = relaunch ? ["/S", "--updated", "--force-run"] : ["/S", "--updated"];
+    spawn(setup, args, { detached: true, stdio: "ignore", windowsHide: true }).unref();
+    if (relaunch) setTimeout(() => app.quit(), 800);
+  };
+  if (defer) return ready(version, install, log);
   status(`Aktualizacja ${version} gotowa — instaluję i uruchamiam ponownie…`);
-  log(`update-install ${version}`);
-  // /S = bez okien, --updated --force-run = po instalacji uruchom LiveDub (instalator electron-builder)
-  spawn(setup, ["/S", "--updated", "--force-run"], { detached: true, stdio: "ignore", windowsHide: true }).unref();
-  setTimeout(() => app.quit(), 800);
+  install(true);
   return { state: "installing", text: `Instaluję wersję ${version}…` };
 }
 
-// Wynik: { state: "none" | "installing" | "unavailable" | "dev", text }
-async function checkForUpdates({ log, status }) {
+// pobrana w trakcie pracy: instaluje ją main.js, gdy lektor ucichnie albo aplikacja się zamyka
+function ready(version, install, log) {
+  log(`update-ready ${version}`);
+  return { state: "ready", version, install, text: `Wersja ${version} pobrana — zainstaluję ją, gdy lektor ucichnie.` };
+}
+
+// Wynik: { state: "none" | "installing" | "ready" | "unavailable" | "dev", text }. defer: tylko pobierz i przygotuj
+// („ready” z install(relaunch)) — w trakcie gry podmiana i restart przerwałyby lektora
+async function checkForUpdates({ log, status, defer = false }) {
   if (!app.isPackaged || !["darwin", "win32"].includes(process.platform) || process.env.LIVEDUB_NO_UPDATE) {
     return { state: "dev", text: "Aktualizacje działają tylko w zainstalowanej aplikacji." };
   }
@@ -143,7 +155,7 @@ async function checkForUpdates({ log, status }) {
   const version = String(release.tag_name).replace(/^v/i, "");
   status(`Pobieram aktualizację ${version}…`);
   log(`update-download ${local} -> ${version}`);
-  if (IS_WIN) return installWindows({ asset, token, version, log, status });
+  if (IS_WIN) return installWindows({ asset, token, version, log, status, defer });
 
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "livedub-update-"));
   const zip = path.join(work, ASSET);
@@ -186,7 +198,7 @@ async function checkForUpdates({ log, status }) {
   // jako „LiveDub.app.old” w Aplikacjach — gdy macOS nie pozwolił jej usunąć, kopie się mnożyły)
   // i wraca na miejsce tylko wtedy, gdy nowej nie udało się wstawić.
   const script = path.join(work, "swap.sh");
-  fs.writeFileSync(
+  const writeScript = (relaunch) => fs.writeFileSync(
     script,
     [
       "#!/bin/sh",
@@ -204,16 +216,21 @@ async function checkForUpdates({ log, status }) {
       '  echo "podmiana nie wyszła — przywracam poprzednią wersję"',
       '  [ -d "$OLD" ] || mv "$BAK" "$OLD"',
       "fi",
-      'open "$OLD"',
+      relaunch ? 'open "$OLD"' : "",
       `rm -rf "${work}"`,
       "",
     ].join("\n"),
     { mode: 0o755 },
   );
+  const install = (relaunch = true) => {
+    writeScript(relaunch);
+    log(`update-install ${version}${relaunch ? "" : " (przy zamknięciu)"}`);
+    spawn("/bin/sh", [script], { detached: true, stdio: "ignore" }).unref();
+    if (relaunch) setTimeout(() => app.quit(), 1500);
+  };
+  if (defer) return ready(version, install, log);
   status(`Aktualizacja ${version} gotowa — uruchamiam ponownie…`);
-  log(`update-install ${version}`);
-  spawn("/bin/sh", [script], { detached: true, stdio: "ignore" }).unref();
-  setTimeout(() => app.quit(), 1500);
+  install(true);
   return { state: "installing", text: `Instaluję wersję ${version}…` };
 }
 

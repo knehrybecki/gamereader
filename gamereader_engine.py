@@ -726,8 +726,8 @@ def _dropped_variants(low):
 def _fix_ocr_word(lex, token, polish, name_like):
     """Jedno słowo bez sąsiadów: brakujące ogonki (gdy forma jest jedna) i litery pomylone przez OCR."""
     low = token.lower()
-    if len(low) < 3 or len(polish_fold(low)) != len(low):
-        return token
+    if len(low) < 3 or len(polish_fold(low)) != len(low) or (len(low) == 3 and token.isupper()):
+        return token  # „ROA” to śmieć z interfejsu, nie „RÓŻA”
     seen = lex.count(low)
     if polish:
         options = _completions(lex, low)
@@ -736,6 +736,8 @@ def _fix_ocr_word(lex, token, polish, name_like):
             form, n = max(options.items(), key=lambda item: item[1])
             if n >= OCR_FORM_SHARE * total:
                 return _preserve_case(token, form)
+            if not seen:
+                return token  # brakuje tylko ogonków („wyladuj”: wyładuj/wyląduj) — wybiorą sąsiedzi, bez zgadywania liter
     if seen and (name_like or not polish):
         return token  # „Cate” w środku zdania to imię; angielskiego tekstu nie poprawiamy na polskie słowa
     best, best_n = None, 0
@@ -753,16 +755,18 @@ def _fix_ocr_word(lex, token, polish, name_like):
     return token
 
 
-def _fix_by_neighbours(lex, words, i):
-    """Obie formy poprawne („woda”/„wodą”, „ze”/„że”) — wybór z sąsiadów: „z dzisiejsza” → „z dzisiejszą”."""
+def _fix_by_neighbours(lex, words, i, joined):
+    """Obie formy poprawne („woda”/„wodą”, „ze”/„że”) — wybór z sąsiadów: „z dzisiejsza” → „z dzisiejszą”. Sąsiad
+    tylko z tego samego zdania (joined[i]: słowa i-1 oraz i bez kropki/wykrzyknika między nimi) — „Spokojna głowa!
+    Myśl…” to nie „głową myśl”."""
     low = words[i].lower()
     fold = polish_fold(low)
     if len(fold) != len(low) or not _completions(lex, low):
         return words[i]
     picks = set()
-    if i:
+    if i and joined[i]:
         picks.add(lex.context(f"L|{words[i - 1].lower()}|{fold}"))
-    if i + 1 < len(words):
+    if i + 1 < len(words) and joined[i + 1]:
         picks.add(lex.context(f"R|{fold}|{words[i + 1].lower()}"))
     picks.discard(None)
     if len(picks) == 1:
@@ -786,10 +790,11 @@ def latin_ocr_polish(text):
     matches = list(_PL_WORD_RE.finditer(text))
     if not matches:
         return text
-    words = []
+    words, joined = [], []
     for i, match in enumerate(matches):
         token = match.group(0)
         before = text[matches[i - 1].end():match.start()] if i else ""
+        joined.append(bool(i) and not re.search(r"[.!?…]", before))
         after = matches[i + 1].group(0) if i + 1 < len(matches) else ""
         capital = token[:1].isupper() and not token.isupper()
         # imię: wielka litera w środku zdania albo przed kolejnym słowem z wielkiej („Cate Blanchett”)
@@ -797,7 +802,7 @@ def latin_ocr_polish(text):
                                  or (after[:1].isupper() and not after.isupper()))
         words.append(_fix_ocr_word(lex, token, polish, name_like))
     if polish:
-        words = [_fix_by_neighbours(lex, words, i) for i in range(len(words))]
+        words = [_fix_by_neighbours(lex, words, i, joined) for i in range(len(words))]
     out, last = [], 0
     for match, word in zip(matches, words):
         out.append(text[last:match.start()])

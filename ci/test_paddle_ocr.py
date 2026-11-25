@@ -51,6 +51,9 @@ class LatinToPolishTest(unittest.TestCase):
             ("Przez ciebie się spónię!", "Przez ciebie się spóźnię!"),
             ("Wiem, cięko jest.", "Wiem, ciężko jest."),
             ("Zadanie zakorczone.", "Zadanie zakończone."),
+            ("Ej! Jesteś pod wpływem! Cate życie ci rozjebię!", "Ej! Jesteś pod wpływem! Całe życie ci rozjebię!"),
+            ("Sprawdź, czy fańcuch jest w sejfie.", "Sprawdź, czy łańcuch jest w sejfie."),
+            ("Chodś, nieżle jest.", "Chodź, nieźle jest."),
         ):
             self.assertEqual(latin_ocr_polish(read), want)
 
@@ -62,10 +65,13 @@ class LatinToPolishTest(unittest.TestCase):
             ("Tu masz główna scenę.", "Tu masz główną scenę."),
             ("Spotkałem się z twoja siostrą.", "Spotkałem się z twoją siostrą."),
             ("Wpuść ja, Dook.", "Wpuść ją, Dook."),
+            ("O, furgonetka z kasa. Może zajrzymy do środka…", "O, furgonetka z kasą. Może zajrzymy do środka…"),
         ):
             self.assertEqual(latin_ocr_polish(read), want)
         for text in ("Idę ze mną.", "Woda jest zimna.", "Główna scena.", "Jak na laskę, której kariera to wpadka.",
-                     "Ja nie wiem.", "Dobra robota."):
+                     "Ja nie wiem.", "Dobra robota.",
+                     # 25.11 z logu: sąsiad zza wykrzyknika się nie liczy, śmieć z interfejsu zostaje
+                     "Spokojna głowa! Myśl tylko o tym.", "Serio? ROA Przyjrzyjmy się."):
             self.assertEqual(latin_ocr_polish(text), text)
 
     def test_names_and_real_words_with_lookalike_letters_stay(self):

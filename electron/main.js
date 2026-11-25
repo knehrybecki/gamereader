@@ -919,8 +919,12 @@ app.whenReady().then(() => {
     setTimeout(() => {
       startWorker().catch((err) => log(`worker-error ${err && err.stack ? err.stack : err}`));
     }, 400);
-    // raz przy starcie: nowa wersja na GitHubie → pobierz, podmień i uruchom ponownie
+    // przy starcie: nowa wersja na GitHubie → pobierz, podmień i uruchom ponownie
     setTimeout(() => runUpdateCheck(), 4000);
+    // w trakcie pracy (aplikacja bywa otwarta całą noc — 24.11 rano grała dalej starą wersją): tylko pobierz,
+    // a zainstaluj, gdy lektor ucichnie na dłużej albo przy zamknięciu aplikacji
+    setInterval(backgroundUpdateCheck, UPDATE_EVERY_MS);
+    setInterval(installWhenIdle, 60 * 1000);
     // macOS: stare kopie LiveDub w Aplikacjach (po wcześniejszych aktualizacjach) — do Kosza
     setTimeout(() => {
       cleanupOldCopies({ log })
@@ -949,6 +953,7 @@ process.on("uncaughtException", (err) => {
 });
 
 app.on("before-quit", () => {
+  installPendingUpdate(false); // pobrana w tle wersja podmienia się po zamknięciu, bez ponownego uruchamiania
   engineSend({ cmd: "quit" });
   stopTap();
   if (regionGuideWin && !regionGuideWin.isDestroyed()) regionGuideWin.close();
@@ -979,10 +984,10 @@ ipcMain.on("tap-pcm", (_e, buffer) => {
   }
 });
 let updateCheck = null;
-function runUpdateCheck() {
-  // jedno sprawdzanie naraz (start aplikacji i przycisk w „O aplikacji”)
+function runUpdateCheck({ defer = false } = {}) {
+  // jedno sprawdzanie naraz (start aplikacji, przycisk w „O aplikacji” i sprawdzanie w tle)
   if (!updateCheck) {
-    updateCheck = checkForUpdates({ log, status: (text) => sendToWindow({ event: "status", text }) })
+    updateCheck = checkForUpdates({ log, defer, status: (text) => sendToWindow({ event: "status", text }) })
       .catch((err) => {
         log(`update-error ${err && err.message ? err.message : err}`);
         return { state: "error", text: `Aktualizacja nie wyszła: ${err && err.message ? err.message : err}` };
@@ -992,6 +997,43 @@ function runUpdateCheck() {
       });
   }
   return updateCheck;
+}
+
+const UPDATE_EVERY_MS = 30 * 60 * 1000;
+const UPDATE_IDLE_MS = 10 * 60 * 1000; // tyle bez wpisu w logu silnika = lektor nic nie czyta
+let pendingUpdate = null;
+
+function backgroundUpdateCheck() {
+  if (pendingUpdate) return;
+  runUpdateCheck({ defer: true }).then((res) => {
+    if (res && res.state === "ready") {
+      pendingUpdate = res;
+      sendToWindow({ event: "status", text: res.text });
+    }
+  });
+}
+
+function engineIdleMs() {
+  try {
+    return Date.now() - fs.statSync(ENGINE_LOG).mtimeMs;
+  } catch (_err) {
+    return Infinity;
+  }
+}
+
+function installPendingUpdate(relaunch) {
+  if (!pendingUpdate) return;
+  const update = pendingUpdate;
+  pendingUpdate = null;
+  try {
+    update.install(relaunch);
+  } catch (err) {
+    log(`update-error ${err && err.message ? err.message : err}`);
+  }
+}
+
+function installWhenIdle() {
+  if (pendingUpdate && engineIdleMs() >= UPDATE_IDLE_MS) installPendingUpdate(true);
 }
 
 ipcMain.handle("app-info", () => ({
