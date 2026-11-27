@@ -5303,6 +5303,77 @@ def strip_hud_prompts(text):
     return normalize_text(" ".join(words))
 
 
+# GTA VI: telefon w rogu ekranu wchodzi w pasek napisów. OCR czyta go jako „<kontakt> <tekst>”: ekran połączenia
+# („Lorena Dzwoni…”, „Jason Połączenie zakończone”, „Lucia Wybieranie…”, w trakcie rozmowy „Lorena :”) i SMS-y
+# („Lorena Taa, zadowolon Pełnia szczęści”, „Numer zastrz Odbierzcie to…”), ucięte na brzegu paska. 25–27.11 lektor
+# przeczytał je 37 razy („Połączenie za”, „Mamy już ciebie dosyć! Randy Dzwoni…”) i użytkownik słyszał go „bez napisu”;
+# SMS-y pomijamy (wybór użytkownika 27.11). Napis postaci w czasie rozmowy stoi NAD nagłówkiem telefonu („Cześć, tití.
+# Lorena :”), a SMS POD nim — więc kwestia przed nagłówkiem zostaje, a tekst za kontaktem na początku odczytu to SMS.
+# Kontakty z logów 25–27.11; kolejne dochodzą z ekranu połączenia.
+PHONE_CONTACTS = ("Jason", "Lucia", "Cal", "Dook", "Kyle", "Raul", "Randy", "Lorena", "Evelyn", "Kenton", "Andy",
+                  "Yasmani", "Brian")
+PHONE_SMS_MEMORY_SEC = 90.0  # fragment SMS-a bez nagłówka („Taa, zadowolon”) odpada jeszcze przez tyle sekund
+_PHONE_NAME = r"[A-ZĄĆĘŁŃÓŚŹŻ][a-ząćęłńóśźż]{1,14}(?:['’][A-ZĄĆĘŁŃÓŚŹŻ]?[a-ząćęłńóśźż]+)?"  # też „Dre'Quan”
+_PHONE_STATUS = (r"(?:Dzwoni(?:…|\.{2,3})|Wybieranie(?:…|\.{2,3})?|Konferencja\s*:?"
+                 r"|Po[łl][ąa]czeni[ea](?:\s+[zZ](?:a[a-ząćęłńóśźż]{0,10})?)?)")
+# „Lorena :” — nagłówek trwającej rozmowy; sam „:” na końcu też (imię wyżej, w jednym wierszu z napisem)
+_PHONE_TAIL_RE = re.compile(
+    rf"(?:^|(?<=\s))(?:(?P<name>{_PHONE_NAME})\s+)?{_PHONE_STATUS}\s*$"
+    rf"|(?:^|(?<=\s))(?P<header>{_PHONE_NAME})\s*:\s*$|\s(?P<colon>:)\s*$")
+_PHONE_WITHHELD_RE = re.compile(r"(?:^|(?<=\s))Numer\s+zastrz\S*")
+_PHONE_HEAD_RE = re.compile(rf"^(?:\S{{1,3}}\s+){{0,2}}(?P<name>{_PHONE_NAME})(?:\s+(?P<body>[A-ZĄĆĘŁŃÓŚŹŻ0-9].*))?$")
+
+
+class PhoneScreen:
+    """Wycina z odczytu OCR telefon z gry: status połączenia na końcu, a cały odczyt, gdy to SMS."""
+
+    def __init__(self, contacts=PHONE_CONTACTS):
+        self.contacts = set(contacts)
+        self.sms = {}  # polish_fold(treść SMS-a) → kiedy
+
+    def strip(self, text, now=None):
+        """Tekst bez telefonu; "" = cały odczyt to telefon."""
+        now = time.monotonic() if now is None else now
+        self.sms = {body: at for body, at in self.sms.items() if now - at < PHONE_SMS_MEMORY_SEC}
+        text = normalize_text(text)
+        call = False  # trwa rozmowa: tekst przy nagłówku to kwestia, nie SMS
+        while True:
+            tail = _PHONE_TAIL_RE.search(text)
+            if not tail:
+                break
+            name = tail.group("name") or tail.group("header")
+            if name:
+                self.contacts.add(name)
+            call = call or tail.group("header") is not None or tail.group("colon") is not None
+            text = text[: tail.start()].strip()
+        if call:
+            # nagłówek z okruchami OCR („To mega. N Andy DK :”) — od końca zdania postaci
+            end = max(text.rfind(ch) for ch in ".!?…")
+            rest = text[end + 1:] if end >= 0 else ""
+            if any(word.strip(".,:;") in self.contacts for word in rest.split()):
+                text = text[: end + 1].strip()
+        withheld = _PHONE_WITHHELD_RE.search(text)
+        if withheld:
+            self._remember(text[withheld.end():], now)
+            text = text[: withheld.start()].strip()
+        head = _PHONE_HEAD_RE.match(text)
+        if head and head.group("name") in self.contacts:
+            if call:
+                return head.group("body") or ""  # „Jason Serio? :” — nagłówek rozmowy w wierszu z napisem
+            if head.group("body"):
+                self._remember(head.group("body"), now)
+            return ""
+        fold = polish_fold(text)
+        if len(fold) >= 8 and any(fold in body for body in self.sms):
+            return ""
+        return text
+
+    def _remember(self, body, now):
+        fold = polish_fold(body)
+        if len(fold) >= 8:
+            self.sms[fold] = now
+
+
 def looks_like_game_ui(text):
     """Czy odczyt to element interfejsu gry, a nie kwestia postaci (wtedy lektor go pomija)."""
     global _UI_DIALOGUE_WORDS
@@ -7248,7 +7319,8 @@ class Engine:
                 # ta kwestia właśnie syntezuje się na zapas — poczekaj, zamiast robić ją drugi raz
                 if len(parts) == 1:
                     self._await_spec(src)
-                ready = self._pop_ready(src)
+                # sklejone kwestie: tylko zapas z kolejki dla całości; nagrania części bierze _ready_parts
+                ready = self._pop_ready(src, variants=len(parts) == 1)
                 # kto mówi: jeśli rozpoznana postać ma gotowy głos, czytamy nim — zapas z syntezy zwykłym głosem odpada
                 voice, skip = self._pick_voice(parts, src, translate)
                 if voice:
@@ -7265,8 +7337,14 @@ class Engine:
                         self._mark_spoken(part)
                         self._seen_at.pop(part, None)
                     continue
+                premade, styles = None, None  # sklejone kwestie: gotowe nagrania i (przejęcie, tempo) fragmentów
+                merged = self._ready_parts(parts, translate) if not ready and not voice and len(parts) > 1 else None
                 if ready:
                     text, segments, arousal, boost, path = ready
+                elif merged:
+                    text, segments, styles, premade = merged
+                    arousal, boost = styles[0][0], max(b for _a, b in styles)
+                    path, ready = premade[0], merged
                 else:
                     text, segments, arousal, boost = self._plan_line(src, translate, parts)
                     if not segments:
@@ -7328,10 +7406,13 @@ class Engine:
                     nxt = None
                     if idx + 1 < len(segments):
                         seg, mood = segments[idx + 1]
-                        nxt = self.lektor.prepare(
-                            seg, volume=self.lektor_volume / 100.0, mood=mood, arousal=arousal,
-                            hurry=self._queue_waiting(src), boost=boost, voice=voice,
-                        )
+                        nxt = premade[idx + 1] if premade else None
+                        if nxt is None:
+                            seg_arousal, seg_boost = styles[idx + 1] if styles else (arousal, boost)
+                            nxt = self.lektor.prepare(
+                                seg, volume=self.lektor_volume / 100.0, mood=mood, arousal=seg_arousal,
+                                hurry=self._queue_waiting(src), boost=seg_boost, voice=voice,
+                            )
                     else:
                         # ostatni fragment gra — w tym czasie przygotuj kolejną kwestię z kolejki
                         self._prefetch_pending(src)
@@ -7354,6 +7435,32 @@ class Engine:
                 self.speaking_full = ""
                 self._tts_interrupt.clear()
                 self._duck_release()
+
+    def _ready_parts(self, parts, translate):
+        """Sklejone kwestie, gdy pierwsza ma gotowe nagranie z zapasu: każda część gra swoim nagraniem, brakujące
+        syntezują się, gdy lektor już mówi. 27.11 18:54 „Pewnie.” i „Świetnie. Tu jest lepsze światło, chodź…”
+        miały gotowy zapas, a sklejone czekały na syntezę całości od nowa (2,6 s) — lektor ruszył 4,9 s po napisie.
+        Zwraca (tekst, fragmenty, [(przejęcie, tempo)] fragmentów, [nagranie albo None] fragmentów) albo None."""
+        self._await_spec(parts[0])
+        first = self._pop_ready(parts[0])
+        if first is None:
+            return None
+        texts, segments, styles, paths = [], [], [], []
+        for idx, part in enumerate(parts):
+            item = first if idx == 0 else self._pop_ready(part)
+            if item is not None:
+                text, segs, arousal, boost, path = item
+                made = [path] + [None] * (len(segs) - 1)
+            else:
+                text, segs, arousal, boost = self._plan_line(part, translate, [part])
+                made = [None] * len(segs)
+            if not segs:
+                continue
+            texts.append(text)
+            segments.extend(segs)
+            styles.extend([(arousal, boost)] * len(segs))
+            paths.extend(made)
+        return " ".join(texts), segments, styles, paths
 
     def _fresh_parts(self, parts):
         """Usuń przeczytane kwestie i warianty OCR także wewnątrz jednej paczki."""
@@ -7533,12 +7640,13 @@ class Engine:
         except Exception:
             pass
 
-    def _pop_ready(self, src):
+    def _pop_ready(self, src, variants=True):
         """Dźwięk przygotowany zawczasu dla tej kwestii — także pod wariantem tekstu tego samego napisu
-        (zapas robi się przy pierwszym odczycie OCR; w kolejce bywa ten sam napis z inną interpunkcją)."""
+        (zapas robi się przy pierwszym odczycie OCR; w kolejce bywa ten sam napis z inną interpunkcją).
+        variants=False: tylko dokładnie ten tekst — sklejone kwestie „wariantem” łapały nagranie jednej z części."""
         with self._ready_lock:
             item = self._ready.pop(src, None)
-            if item is None:
+            if item is None and variants:
                 key = next((k for k in self._ready if ocr_variants(k, src) and not subtitle_extends(k, src)), None)
                 if key is not None:
                     item = self._ready.pop(key)
@@ -7559,6 +7667,10 @@ class Engine:
             self._spec_redo, self._spec_rank = 0, -1
         key = strip_fillers(src)
         if not key or len(key) < 6 or key == getattr(self, "_spec_key", ""):
+            return
+        # okruch z kadru bez słowa i bez końca zdania („f (n O”): 27.11 zajął jedyny proces VoiceStudio na 2 s,
+        # a prawdziwa kwestia czekała w tym czasie na syntezę („No i co?” ma „?” — zapas dostaje)
+        if not re.search(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]{3}", key) and not re.search(r"[.!?…]\W*$", key):
             return
         # zlepek („altanval Jebany silniki”) albo gorsza powtórka właśnie czytanej kwestii („Z blisko!”
         # po „Za blisko!”) — synteza poszłaby do kosza
@@ -7792,6 +7904,17 @@ class Engine:
             if (not usable_ocr(src) or not re.search(r"[a-ząćęłńóśźż]{2}", src)
                     or (not looks_polish(src) and polish_common_words(src) == 0 and not should_translate(src))):
                 return
+        if self._source_kind() != "chrome":
+            # przed „etykietą z mapy”: ona zjadała samo imię kontaktu, a SMS pod nim szedł do lektora
+            phone = getattr(self, "_phone", None)
+            if phone is None:
+                phone = self._phone = PhoneScreen()
+            unphoned = phone.strip(src)
+            if unphoned != normalize_text(src):
+                self._log_junk(src, f"pomijam telefon z gry: {src[:70]!r} -> {unphoned[:70]!r}")
+                src = unphoned
+                if not usable_ocr(src):
+                    return
         lead = getattr(self, "_lead_junk", None)
         if lead is None:
             store = CACHE_DIR / "lead_junk.json" if hasattr(self, "lektor") else None  # testy bez zapisu

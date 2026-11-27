@@ -59,6 +59,8 @@ class DuplicateTest(unittest.TestCase):
         engine.speaking_text = ''
         engine._ready_lock = threading.Lock()
         engine._ready = {}
+        engine._spec_done = threading.Condition()
+        engine._spec_busy = None
         engine._plan_line = Mock(side_effect=StopLoop)
         engine.lektor = SimpleNamespace(busy_until=0)
         engine._tts_interrupt = threading.Event()
